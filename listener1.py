@@ -3,7 +3,6 @@ import json
 
 LIVE_URL = "https://live.douyin.com/69164788651"
 
-
 HOOK_JS = r"""
 (() => {
     if (window.__DY_HOOK__) return;
@@ -40,16 +39,27 @@ HOOK_JS = r"""
             }
 
             else if (method === "WebcastGiftMessage") {
-                const gift = payload.gift?.name;
-                const count = payload.total_count;
+                const gift = payload?.gift?.name;
+                const repeatend = payload?.repeat_end;
+
+                const count =
+                    payload?.combo_count
+                        ? Number(payload.combo_count)
+                        : payload?.repeat_count
+                            ? Number(payload.repeat_count)
+                            : 1;
 
                 if (user && gift) {
                     data = {
                         type: "gift",
                         user,
                         gift,
-                        count
+                        count,
                     };
+
+                    if (String(repeatend).trim() !== "1") {
+                        data = null;
+                    }
                 }
             }
 
@@ -72,8 +82,8 @@ HOOK_JS = r"""
 })();
 """
 
-
 def run():
+    
     with sync_playwright() as p:
         browser = p.chromium.launch(
             headless=False,
@@ -82,7 +92,7 @@ def run():
             ]
         )
 
-        context = browser.new_context()
+        context = browser.new_context(storage_state="state.json")
 
         page = context.new_page()
 

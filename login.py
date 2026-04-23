@@ -1,5 +1,6 @@
 from playwright.sync_api import sync_playwright
 import winreg
+import time
 
 ATTENTION_JS = r"""
 (() => {
@@ -10,16 +11,16 @@ ATTENTION_JS = r"""
         const box = document.createElement("div");
 
         box.style.position = "fixed";
-        box.style.top = "0";                // 贴顶
-        box.style.left = "50%";             // 水平居中关键
+        box.style.top = "0";
+        box.style.left = "50%";
         box.style.transform = "translateX(-50%)"; 
 
         box.style.zIndex = "9999999";
-        box.style.background = "#ffffff";   // 白底
-        box.style.color = "#000000";        // 黑字
+        box.style.background = "#ffffff";
+        box.style.color = "#000000";
 
         box.style.padding = "12px 20px";
-        box.style.borderRadius = "0 0 12px 12px"; // 下方圆角，更像提示条
+        box.style.borderRadius = "0 0 12px 12px";
         box.style.fontSize = "15px";
         box.style.fontWeight = "600";
         box.style.fontFamily = "sans-serif";
@@ -42,6 +43,15 @@ ATTENTION_JS = r"""
 })();
 """
 
+def save_state(context):
+    try:
+        context.storage_state(path="state.json")
+        print("state 保存成功")
+        return True
+    except Exception as e:
+        print("state 保存失败:", str(e))
+        return False
+
 def get_chrome_path():
     try:
         key = winreg.OpenKey(
@@ -56,13 +66,14 @@ def get_chrome_path():
 def login_and_save():
     with sync_playwright() as p:
         path = get_chrome_path()
-        browser = p.chromium.launch(executable_path= path ,headless=False)  # 一定要False
+        browser = p.chromium.launch(path,headless=False) 
         context = browser.new_context()
 
         page = context.new_page()
         page.add_init_script(ATTENTION_JS)
-        page.goto("https://douyin.com/")  # 你的目标页面
-
+        page.goto("https://douyin.com/") 
+        
+        input("👉 请完成登录后按回车继续...")
         context.storage_state(path="state.json")
 
         page.wait_for_event("close", timeout=0)
