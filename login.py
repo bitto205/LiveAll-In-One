@@ -1,81 +1,231 @@
-from playwright.sync_api import sync_playwright
-import winreg
+"""
+login.py — 登录管理
+
+用法:
+    from login import do_login
+    do_login()          # 两层检测，按需登录
+
+    python login.py     # 直接运行，同上
+"""
+
+import asyncio
+import json
+import logging
+import os
 import time
+from datetime import datetime
 
-ATTENTION_JS = r"""
+from playwright.async_api import async_playwright
+
+# ─────────────────────────────────────────────
+# 配置
+# ─────────────────────────────────────────────
+STATE_FILE = "state.json"
+
+os.makedirs("log", exist_ok=True)
+_ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(message)s",
+    handlers=[
+        logging.FileHandler(f"log/login_{_ts}.log", encoding="utf-8"),
+        logging.StreamHandler(),
+    ],
+)
+logger = logging.getLogger(__name__)
+
+
+# ─────────────────────────────────────────────
+# 第一层：检查 sessionid 是否过期
+# ─────────────────────────────────────────────
+def _check_cookie_expiry(state_file: str) -> tuple[bool, str]:
+    try:
+        with open(state_file, "r", encoding="utf-8") as f:
+            state = json.load(f)
+    except Exception as e:
+        return False, f"读取失败: {e}"
+
+    now = time.time()
+
+    for c in state.get("cookies", []):
+        if c.get("name") != "sessionid":
+            continue
+
+        if not c.get("value", ""):
+            return False, "sessionid 值为空"
+
+        expires = c.get("expires", -1)
+
+        if expires == -1:
+            return True, "sessionid 存在（无过期时间）"
+
+        remaining = expires - now
+        if remaining <= 0:
+            return False, "sessionid 已过期"
+
+        days = int(remaining / 86400)
+        return True, f"sessionid 有效，还剩约 {days} 天"
+
+    return False, "未找到 sessionid"
+
+
+# ─────────────────────────────────────────────
+# 注入到页面的"已完成登录"确认按钮
+# ─────────────────────────────────────────────
+_CONFIRM_JS = """
 (() => {
-    if (window.__DY_NOTICE__) return;
-    window.__DY_NOTICE__ = true;
+    const inject = () => {
+        if (document.getElementById('__dy_login_btn__')) return;
 
-    function createNotice() {
-        const box = document.createElement("div");
+        const btn = document.createElement('div');
+        btn.id = '__dy_login_btn__';
+        btn.style.cssText = `
+            position: fixed;
+            bottom: 30px;
+            right: 30px;
+            z-index: 999999;
+            background: #fe2c55;
+            color: #fff;
+            font-size: 16px;
+            font-weight: bold;
+            padding: 14px 28px;
+            border-radius: 8px;
+            cursor: pointer;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+            user-select: none;
+        `;
+        btn.innerText = '✅  我已完成登录';
+        btn.onclick = () => {
+            window.__LOGIN_DONE__ = true;
+            btn.innerText = '⏳ 保存中...';
+            btn.style.background = '#888';
+        };
+        document.body.appendChild(btn);
+    };
 
-        box.style.position = "fixed";
-        box.style.top = "0";
-        box.style.left = "50%";
-        box.style.transform = "translateX(-50%)"; 
-
-        box.style.zIndex = "9999999";
-        box.style.background = "#ffffff";
-        box.style.color = "#000000";
-
-        box.style.padding = "12px 20px";
-        box.style.borderRadius = "0 0 12px 12px";
-        box.style.fontSize = "15px";
-        box.style.fontWeight = "600";
-        box.style.fontFamily = "sans-serif";
-
-        box.style.boxShadow = "0 4px 12px rgba(0,0,0,0.2)";
-        box.style.lineHeight = "1.6";
-
-        box.style.textAlign = "center";
-
-        box.innerText = "请登录抖音\n登录完成后直接关闭浏览器即可";
-
-        document.body.appendChild(box);
-    }
-
-    if (document.readyState === "loading") {
-        document.addEventListener("DOMContentLoaded", createNotice);
+    // 每次导航后重新注入（add_init_script 在 DOM 就绪前执行，需要等 DOMContentLoaded）
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', inject);
     } else {
-        createNotice();
+        inject();
     }
 })();
 """
 
-def save_state(context):
-    try:
-        context.storage_state(path="state.json")
-        print("state 保存成功")
-        return True
-    except Exception as e:
-        print("state 保存失败:", str(e))
-        return False
 
-def get_chrome_path():
-    try:
-        key = winreg.OpenKey(
-            winreg.HKEY_LOCAL_MACHINE,
-            r"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\chrome.exe"
+# ─────────────────────────────────────────────
+# 第二层：弹出浏览器扫码
+# ─────────────────────────────────────────────
+async def _run_login(state_file: str) -> bool:
+    logger.info("启动登录流程，请在浏览器中扫码，完成后点击页面右下角按钮...")
+
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(
+            headless=False,
+            args=["--disable-blink-features=AutomationControlled"],
         )
-        path, _ = winreg.QueryValueEx(key, None)
-        return path
-    except:
-        return None
+        context = await browser.new_context(
+            user_agent=(
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/136.0.0.0 Safari/537.36"
+            ),
+            viewport={"width": 1280, "height": 800},
+        )
+        page = await context.new_page()
+        await page.add_init_script(_CONFIRM_JS)
+        await page.goto("https://www.douyin.com/", wait_until="domcontentloaded")
 
-def login_and_save():
-    with sync_playwright() as p:
-        path = get_chrome_path()
-        browser = p.chromium.launch(path,headless=False) 
-        context = browser.new_context()
+        while True:
+            logger.info("等待手动确认（点击页面右下角按钮）...")
 
-        page = context.new_page()
-        page.add_init_script(ATTENTION_JS)
-        page.goto("https://douyin.com/") 
-        
-        input("👉 请完成登录后按回车继续...")
-        context.storage_state(path="state.json")
+            # 等用户点按钮，浏览器关闭时会抛异常
+            try:
+                await page.wait_for_function(
+                    "() => window.__LOGIN_DONE__ === true",
+                    timeout=0,
+                )
+            except Exception:
+                logger.warning("浏览器已关闭，登录取消")
+                return False
 
-        page.wait_for_event("close", timeout=0)
+            await asyncio.sleep(1)
+            await context.storage_state(path=state_file)
 
-login_and_save()  
+            valid, reason = _check_cookie_expiry(state_file)
+
+            if valid:
+                logger.info(f"✅ 登录成功，已保存 {state_file}（{reason}）")
+                await browser.close()
+                return True
+
+            # 未检测到登录态 → 页面注入红色提示，恢复按钮，继续等待
+            logger.warning(f"⚠️  未检测到登录态（{reason}），提示用户重试")
+            await page.evaluate("""
+                (() => {
+                    // 恢复按钮
+                    const btn = document.getElementById('__dy_login_btn__');
+                    if (btn) {
+                        btn.innerText = '✅  我已完成登录';
+                        btn.style.background = '#fe2c55';
+                    }
+                    window.__LOGIN_DONE__ = false;
+
+                    // 注入红色提示（3 秒后自动消失）
+                    const old = document.getElementById('__dy_login_warn__');
+                    if (old) old.remove();
+                    const warn = document.createElement('div');
+                    warn.id = '__dy_login_warn__';
+                    warn.style.cssText = `
+                        position: fixed;
+                        bottom: 90px;
+                        right: 30px;
+                        z-index: 999999;
+                        background: #d32f2f;
+                        color: #fff;
+                        font-size: 14px;
+                        padding: 10px 18px;
+                        border-radius: 6px;
+                        box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+                    `;
+                    warn.innerText = '❌  未检测到登录态，请确认是否已登录';
+                    document.body.appendChild(warn);
+                    setTimeout(() => warn.remove(), 3000);
+                })();
+            """)
+            # 继续下一轮循环，等待再次点击按钮
+
+    return False   # 理论上不会执行到这里，兜底
+
+
+# ─────────────────────────────────────────────
+# 公开接口
+# ─────────────────────────────────────────────
+def do_login(state_file: str = STATE_FILE) -> bool:
+    """
+    两层检测，按需登录：
+        1. state.json 不存在  →  扫码
+        2. state.json 存在    →  检查 sessionid 过期时间
+               未过期  →  直接返回 True，跳过登录
+               已过期  →  扫码
+    返回 True = 登录态有效，False = 登录失败。
+    """
+    if not os.path.exists(state_file):
+        logger.info(f"{state_file} 不存在，需要登录")
+    else:
+        valid, reason = _check_cookie_expiry(state_file)
+        if valid:
+            logger.info(f"✅ 登录有效：{reason}")
+            return True
+        logger.warning(f"⚠️  登录失效：{reason}，重新登录")
+
+    return asyncio.run(_run_login(state_file))
+
+
+# ─────────────────────────────────────────────
+# 直接运行
+# ─────────────────────────────────────────────
+if __name__ == "__main__":
+    ok = do_login()
+    logger.info("🎉 就绪" if ok else "❌ 登录失败")
