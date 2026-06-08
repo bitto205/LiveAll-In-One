@@ -338,4 +338,4 @@ if __name__ == "__main__":
     def on_message(msg: LiveMessage):
         print(msg)
 
-    start_listener("sanpan0.0", on_message, on_status=on_status, debug=True)
+    start_listener("", on_message, on_status=on_status, debug=True)
