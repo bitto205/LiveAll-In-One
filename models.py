@@ -24,12 +24,13 @@ class ChatMessage:
 # ─────────────────────────────────────────────
 @dataclass
 class GiftMessage:
-    type:    Literal["gift"] = field(default="gift", init=False)
-    user:    str = ""        # 送礼用户昵称
-    user_id: str = ""        # 送礼用户 ID
-    gift:    str = ""        # 礼物名称
-    gift_id: int = 0         # 礼物 ID
-    count:   int = 1         # 连击数（combo_count）
+    type:       Literal["gift"] = field(default="gift", init=False)
+    user:       str = ""
+    user_id:    str = ""
+    gift:       str = ""
+    gift_id:    int = 0
+    count:      int = 1
+    repeat_end: int = -1   # 1=连击结束帧  0=中间帧  -1=未知
 
 
 # ─────────────────────────────────────────────
