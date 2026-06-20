@@ -13,7 +13,7 @@ main.py — 应用 Hub + 入口
 
 import sys, os
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-
+os.environ["PLAYWRIGHT_BROWSERS_PATH"] = os.path.join(os.path.dirname(os.path.abspath(__file__)), "browsers")
 import asyncio
 
 from PySide6.QtWidgets import QApplication
@@ -162,7 +162,5 @@ class App(QObject):
 # 入口
 # ─────────────────────────────────────────────
 if __name__ == "__main__":
-    from listener.login import do_login
-    do_login()                  # 检测/执行登录，有 state.json 就跳过
 
     sys.exit(App(sys.argv).run())
