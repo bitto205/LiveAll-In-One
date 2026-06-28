@@ -260,7 +260,7 @@ class HomePage(BasePage):
         # ── Step 3：线路选择 ──
         card3, c3 = _step_card(3, "线路选择")
 
-        desc = QLabel("线路一/二需登录并填写直播间ID；线路三为本地MITM代理，无需登录，需提前配置浏览器代理")
+        desc = QLabel("线路一/二需登录并填写直播间ID；线路三为WinDivert拦截；线路四需先Patch直播伴侣")
         desc.setWordWrap(True)
         desc.setStyleSheet(
             f"background: transparent; font-size: 12px;"
@@ -286,6 +286,31 @@ class HomePage(BasePage):
         btn_row.addWidget(self._route_btn3)
         btn_row.addStretch()
         c3.addLayout(btn_row)
+
+        # ── 线路四（需先 Patch 直播伴侣）──
+        patch_row = QHBoxLayout()
+        patch_row.setSpacing(8)
+
+        self._route_btn4 = QPushButton("线路四")
+        self._route_btn4.setFixedHeight(36)
+        self._route_btn4.setCursor(Qt.PointingHandCursor)
+        self._route_btn4.clicked.connect(lambda: self._select_route("4"))
+
+        self._patch_btn = QPushButton("Patch 直播伴侣")
+        self._patch_btn.setFixedHeight(36)
+        self._patch_btn.setCursor(Qt.PointingHandCursor)
+        self._patch_btn.clicked.connect(self._do_patch)
+
+        self._patch_lbl = QLabel("")
+        self._patch_lbl.setStyleSheet("background: transparent; font-size: 12px;")
+
+        patch_row.addWidget(self._route_btn4)
+        patch_row.addWidget(self._patch_btn)
+        patch_row.addWidget(self._patch_lbl)
+        patch_row.addStretch()
+        c3.addLayout(patch_row)
+
+        self._check_patch_status()
         lay.addWidget(card3)
 
         # ── Step 4：连接 ──
@@ -396,14 +421,60 @@ class HomePage(BasePage):
         self._route_btn1.setStyleSheet(sel if self._route == "1" else unsel)
         self._route_btn2.setStyleSheet(sel if self._route == "2" else unsel)
         self._route_btn3.setStyleSheet(sel if self._route == "3" else unsel)
+        if self._route_btn4.isVisible():
+            self._route_btn4.setStyleSheet(sel if self._route == "4" else unsel)
+        C = _theme.get()
+        warn_style = (f"QPushButton {{ background: {C['hover']}; color: {C['text']};"
+                      f" border: 1.5px solid {C['border']}; border-radius: 8px;"
+                      f" font-size: 13px; padding: 0 14px; }}"
+                      f"QPushButton:hover {{ background: {C['active_line']}; color: #fff; }}")
+        self._patch_btn.setStyleSheet(warn_style)
+
+    # ── 线路四 patch ─────────────────────────
+    def _check_patch_status(self):
+        try:
+            from listener.listener4 import is_patched
+            patched = is_patched()
+        except Exception:
+            patched = False
+        self._route_btn4.setVisible(patched)
+        self._patch_btn.setVisible(not patched)
+        self._patch_lbl.setVisible(not patched)
+        if not patched and self._route == "4":
+            self._select_route("1")
+        self._refresh_route_btns()
+
+    def _do_patch(self):
+        self._patch_btn.setText("Patch 中...")
+        self._patch_btn.setEnabled(False)
+        try:
+            from listener.listener4 import patch_companion
+            ok, msg = patch_companion()
+            if ok:
+                self._patch_lbl.setText("")
+                self._toast.show_msg(msg)
+                self._check_patch_status()
+            else:
+                self._patch_lbl.setStyleSheet(
+                    "background: transparent; font-size: 12px; color: #D20F39;")
+                self._patch_lbl.setText(msg)
+                self._toast.show_msg(msg, error=True)
+        except Exception as e:
+            self._toast.show_msg(f"Patch 失败: {e}", error=True)
+        finally:
+            self._patch_btn.setText("Patch 直播伴侣")
+            self._patch_btn.setEnabled(True)
 
     # ── 连接/断开 ────────────────────────────
     def _on_conn_click(self):
         if self._btn_state == _Btn.IDLE or self._btn_state == _Btn.ERROR:
-            live_id = self._room_input.text().strip()
-            if not live_id:
-                self._toast.show_msg("请先填写直播间 ID", error=True)
-                return
+            if self._route in ("3", "4"):
+                live_id = ""
+            else:
+                live_id = self._room_input.text().strip()
+                if not live_id:
+                    self._toast.show_msg("请先填写直播间 ID", error=True)
+                    return
             self._set_btn(_Btn.CONNECTING)
             self._was_connecting = True
             if self._connect_cb:

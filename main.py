@@ -84,6 +84,13 @@ class ListenerThread(QThread):
             self._loop.close()
 
     async def _listen(self):
+        if self._route == "4":
+            from listener.listener4 import start_listener
+            await start_listener(
+                callback  = lambda msg: self.message_received.emit(msg),
+                on_status = lambda c: self.status_changed.emit(c),
+            )
+            return
         if self._route == "3":
             from listener.listener3 import start_listener
             await start_listener(
