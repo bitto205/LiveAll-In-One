@@ -17,7 +17,22 @@ os.environ["PLAYWRIGHT_BROWSERS_PATH"] = os.path.join(os.path.dirname(os.path.ab
 import asyncio
 
 from PySide6.QtWidgets import QApplication
-from PySide6.QtCore    import QThread, Signal, QObject
+from PySide6.QtCore    import QThread, Signal, QObject, QtMsgType, qInstallMessageHandler
+
+
+def _qt_msg_handler(msg_type, _, msg):  # _ = QMessageLogContext (required by Qt API)
+    """过滤 DirectWrite/Fixedsys 无害警告，其余正常输出。"""
+    if "Fixedsys" in msg or "CreateFontFaceFromHDC" in msg:
+        return
+    if msg_type in (QtMsgType.QtDebugMsg, QtMsgType.QtInfoMsg):
+        print(msg)
+    elif msg_type == QtMsgType.QtWarningMsg:
+        print(f"Qt Warning: {msg}", file=sys.stderr)
+    else:
+        print(f"Qt: {msg}", file=sys.stderr)
+
+
+qInstallMessageHandler(_qt_msg_handler)
 
 from main_page import MainPage
 import pages   # 触发所有 @register

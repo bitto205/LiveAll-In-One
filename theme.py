@@ -27,7 +27,7 @@ THEMES: dict[str, dict] = {
         "active":      "#ccd0da",
         "active_line": "#1e66f5",
         "text":        "#4c4f69",
-        "text_muted":  "#6c6f85",
+        "text_muted":  "#5c5f77",   # subtext1，对比度 5.2:1（原 subtext0 4.1:1）
         "border":      "#ccd0da",
         "win_edge":    "#bcc0cc",
         "close_hover": "#d20f39",
@@ -75,7 +75,7 @@ THEMES: dict[str, dict] = {
         "active":      "#d9d2b5",
         "active_line": "#268bd2",
         "text":        "#586e75",
-        "text_muted":  "#93a1a1",
+        "text_muted":  "#657b83",   # base00，对比度 3.9:1（原 base1 仅 2.4:1）
         "border":      "#e2dcc8",
         "win_edge":    "#d9d2b5",
         "close_hover": "#dc322f",
@@ -86,7 +86,18 @@ THEMES: dict[str, dict] = {
 # ─────────────────────────────────────────────
 # 运行时状态
 # ─────────────────────────────────────────────
-_current: str = "拿铁奶咖"
+def _load_saved() -> str:
+    try:
+        import config
+        name = config.get("theme")
+        if name in THEMES:
+            return name
+    except Exception:
+        pass
+    return "拿铁奶咖"
+
+
+_current: str = _load_saved()
 _callbacks: list = []
 
 
@@ -111,6 +122,11 @@ def set_theme(name: str):
     if name not in THEMES:
         return
     _current = name
+    try:
+        import config
+        config.set("theme", name)
+    except Exception:
+        pass
     for cb in _callbacks:
         try:
             cb(name)

@@ -25,11 +25,12 @@ from models import GiftMessage, FollowMessage, LikeMessage, FansclubMessage
 # 配置键前缀
 # ─────────────────────────────────────────────
 _K = {
-    "gift_on":    "memo.gift.enabled",
-    "gift_stack": "memo.gift.stack",
-    "follow_on":  "memo.follow.enabled",
-    "like_on":    "memo.like.enabled",
-    "like_stack": "memo.like.stack",
+    "gift_on":       "memo.gift.enabled",
+    "gift_stack":    "memo.gift.stack",
+    "gift_min_dia":  "memo.gift.min_diamonds",
+    "follow_on":     "memo.follow.enabled",
+    "like_on":       "memo.like.enabled",
+    "like_stack":    "memo.like.stack",
 }
 
 
@@ -171,6 +172,7 @@ class _SettingsTab(QWidget):
             [
                 ("启用", ThemedToggle(_K["gift_on"])),
                 ("叠加", ThemedToggle(_K["gift_stack"])),
+                ("最低钻石数", self._make_diamond_input()),
             ]
         ))
 
@@ -235,6 +237,37 @@ class _SettingsTab(QWidget):
         for label, widget in rows:
             lay.addLayout(_row(label, widget))
         return card
+
+    def _make_diamond_input(self) -> QWidget:
+        from PySide6.QtWidgets import QHBoxLayout
+        wrap = QWidget()
+        wrap.setStyleSheet("background:transparent;")
+        row = QHBoxLayout(wrap)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(6)
+
+        inp = QLineEdit(str(_cfg.get(_K["gift_min_dia"], 0)))
+        inp.setFixedSize(80, 30)
+        inp.setAlignment(Qt.AlignCenter)
+        inp.setPlaceholderText("0")
+
+        hint = QLabel("0 = 不过滤")
+        hint.setStyleSheet(f"background:transparent; color:{_C()['text_muted']}; font-size:11px;")
+
+        def _save():
+            try:
+                val = int(inp.text().strip())
+                val = max(0, val)
+            except ValueError:
+                val = 0
+            inp.setText(str(val))
+            _cfg.set(_K["gift_min_dia"], val)
+
+        inp.editingFinished.connect(_save)
+        row.addWidget(inp)
+        row.addWidget(hint)
+        row.addStretch()
+        return wrap
 
     def _spin(self, attr: str, default: int) -> QLineEdit:
         w = QLineEdit(str(default))
@@ -414,6 +447,14 @@ class MemoTool(QMainWindow):
     def _handle_gift(self, msg):
         if not _cfg.get(_K["gift_on"], True):
             return
+
+        # 钻石过滤
+        min_dia = _cfg.get(_K["gift_min_dia"], 0)
+        if min_dia > 0:
+            from gift.gift_prices import get_diamonds
+            diamonds = get_diamonds(msg.gift)
+            if diamonds is not None and diamonds < min_dia:
+                return
 
         stack = _cfg.get(_K["gift_stack"], True)
         key   = f"gift:{msg.user}:{msg.gift}"

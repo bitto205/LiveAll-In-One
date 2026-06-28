@@ -597,8 +597,7 @@ class MainPage(QMainWindow):
 
     # ── 系统托盘 ──────────────────────────────────
     def _setup_tray(self):
-        """创建系统托盘图标与右键菜单。"""
-        # 用主题 active_line 色画一个简单图标
+        """创建系统托盘图标与右键菜单（含来自 _TRAY_REGISTRY 的子菜单）。"""
         size = 32
         pix  = QPixmap(size, size)
         pix.fill(Qt.transparent)
@@ -618,17 +617,50 @@ class MainPage(QMainWindow):
         self._tray = QSystemTrayIcon(QIcon(pix), self)
         self._tray.setToolTip("LiveHelper")
 
-        menu = QMenu()
-        show_action = menu.addAction("显示主窗口")
-        menu.addSeparator()
-        quit_action = menu.addAction("退出")
+        self._tray_menu = QMenu()
 
-        show_action.triggered.connect(self._restore_from_tray)
-        quit_action.triggered.connect(QApplication.instance().quit)
+        # 静态：显示主窗口
+        show_act = self._tray_menu.addAction("显示主窗口")
+        show_act.triggered.connect(self._restore_from_tray)
 
-        self._tray.setContextMenu(menu)
+        # 动态：来自工具注册表的子菜单
+        # _tray_toggle_actions: [(TrayAction, QAction)] 用于 aboutToShow 刷新标签
+        self._tray_toggle_actions: list[tuple[object, object]] = []
+        self._build_tray_submenus()
+
+        self._tray_menu.addSeparator()
+        quit_act = self._tray_menu.addAction("退出")
+        quit_act.triggered.connect(QApplication.instance().quit)
+
+        self._tray_menu.aboutToShow.connect(self._refresh_tray_labels)
+        self._tray.setContextMenu(self._tray_menu)
         self._tray.activated.connect(self._on_tray_activated)
         self._tray.show()
+
+    def _build_tray_submenus(self):
+        """从 _TRAY_REGISTRY 构建子菜单（启动时调用一次）。"""
+        from tools import _TRAY_REGISTRY
+        self._tray_toggle_actions.clear()
+        for entry in _TRAY_REGISTRY:
+            self._tray_menu.addSeparator()
+            submenu = QMenu(entry.name, self._tray_menu)
+            for t_act in entry.get_actions():
+                q_act = submenu.addAction(t_act.text)
+                q_act.triggered.connect(t_act.callback)
+                if t_act.disabled:
+                    q_act.setEnabled(False)
+                # disabled 的状态行也需要刷新标签，所以一并加入
+                if t_act.text_when_active:
+                    self._tray_toggle_actions.append((t_act, q_act))
+            self._tray_menu.addMenu(submenu)
+
+    def _refresh_tray_labels(self):
+        """托盘菜单展开前刷新所有可切换项的文字。"""
+        for t_act, q_act in self._tray_toggle_actions:
+            if t_act.is_active:
+                q_act.setText(
+                    t_act.text_when_active if t_act.is_active() else t_act.text
+                )
 
     def _on_tray_activated(self, reason):
         if reason == QSystemTrayIcon.DoubleClick:
