@@ -1,42 +1,43 @@
 """
-listener3.py — 系统代理 + MITM 拦截方案
+listener3.py — OS 级本地进程拦截方案，专门只监听"直播伴侣"客户端
 
-不依赖 Playwright/浏览器自动化，直接在网络层用本地代理拦截 WSS 流量解析。
-复用 listener2.py 现成的 protobuf 解析逻辑（_parse_frame），解析口径完全一致，
-不重复维护两套解析代码。
+不依赖 Playwright/浏览器自动化，也不需要碰系统代理设置（不会跟你已有的
+Clash Verge 之类的代理冲突）。用 mitmproxy 官方自带的 local 模式，在
+OS 层面直接按进程名拦截流量，对目标进程完全透明无感。复用 listener2.py
+现成的 protobuf 解析逻辑（_parse_frame），解析口径完全一致。
 
-设计参考：DouyinBarrageGrab (ape-byte) 的系统代理抓包方案
-https://github.com/ape-byte/DouyinBarrageGrab
+设计参考：
+- DouyinBarrageGrab (ape-byte) 的进程过滤思路
+  https://github.com/ape-byte/DouyinBarrageGrab
+- mitmproxy 官方 local 模式（OS 级拦截）
+  https://docs.mitmproxy.org/stable/concepts/modes/
+  https://www.mitmproxy.org/posts/local-capture/windows/
 
-跟 listener1（JS Hook）/ listener2（Playwright 拦截 WSS 帧）的本质区别：
-    listener1/2 自己用 Playwright 启动一个受控浏览器，自动打开直播间页面；
-    listener3 不开浏览器，而是起一个本地 MITM 代理服务器，你自己手动把
-    浏览器（或其他任何会产生抖音 WSS 流量的程序）的网络代理设置指向这个
-    端口，所有经过的 HTTPS/WSS 流量会被解密、按域名过滤、解析。
+跟之前版本的核心区别：
+    旧版本走系统代理（system-wide proxy），所有流量都先过 mitmproxy
+    再判断是不是目标进程，意味着你的系统代理位置被占用了，没法再用来
+    跑 Clash Verge 之类的工具。
+    这一版换成 mitmproxy 的 local 模式——它在 OS 层面（Windows 上靠
+    WinDivert 这个内核级抓包库）直接按进程名/PID 截获网络包，不需要
+    任何应用把代理指向它、不占用系统代理设置、跟你现有的代理工具
+    完全不冲突。
 
-这意味着 listener3 也能用来抓"抖音直播伴侣"客户端的弹幕（因为直播伴侣
-内嵌 Chromium，走的也是标准 HTTPS/WSS，同样能被系统代理拦截），不只是
-网页版直播间——但这不是本项目当前的目标场景，提一下只是说明这个方案
-的能力边界。
+【Windows 上的额外依赖（重要）】
+    pip install mitmproxy mitmproxy-windows
 
-【准备工作】
-    pip install mitmproxy
-    （Windows 如果 pip 装的时候报 C 扩展编译错误，去 https://mitmproxy.org/
-     下载官方安装包装好，它会带一个独立的 Python 环境，不需要再额外配置）
+    mitmproxy-windows 这个包专门提供 Windows 下 local 模式需要的
+    WinDivert 转发组件，光装 mitmproxy 本体是不够的。
 
-【首次使用：必须先装好 mitmproxy 的根证书，否则 HTTPS 流量解不开】
-    1. 先跑一次 listener3.py（哪怕还没配浏览器代理）
-    2. 把要监听的浏览器代理设置成 127.0.0.1:<端口>（默认 8888）
-    3. 浏览器访问 http://mitm.it ，按提示给这个浏览器安装根证书
-       （这是 mitmproxy 自己生成的本机证书，只用来解密你自己电脑上的流量，
-       不会被任何外部利用；某些安全软件可能会弹提示，是正常现象）
-    4. 证书装完后重启一下浏览器，才能正常解密 HTTPS
+【权限要求】
+    必须以管理员身份运行本脚本——WinDivert 这个底层抓包库本身就要求
+    管理员权限，不是 mitmproxy 自己加的限制，权限不够会直接加载失败。
 
-【配置浏览器走代理】
-    建议用一个独立的浏览器实例/配置文件来跑这个，不要全局改系统代理
-    （否则你平时上网的所有流量都会被解密记录，没必要）。
-    最简单的办法：装一个 SwitchyOmega 之类的代理切换扩展，只给这一个
-    Profile 配置代理指向 127.0.0.1:8888，平时用默认 Profile 不受影响。
+【首次使用：还是要装一次 mitmproxy 的根证书】
+    1. 管理员身份运行 listener3.py
+    2. 打开"直播伴侣"，正常连接/开播
+    3. 第一次连接时如果 HTTPS 解密失败（日志里会有报错），找一个能上网的
+       浏览器访问 http://mitm.it 装一次根证书（装完不需要重启全部软件，
+       只要重新连一次直播间通常就行）
 
 【使用方法】
     from listener3 import start_listener
@@ -50,16 +51,16 @@ https://github.com/ape-byte/DouyinBarrageGrab
     import asyncio
     asyncio.run(start_listener(on_message, on_status=on_status))
 
-    然后用配置好代理的浏览器打开抖音直播间，正常看播放即可。
-
-【已知限制】（系统代理方案的固有限制，跟原版 DouyinBarrageGrab 一致）
-    - 只能拦截"握手之后"建立的新 WSS 连接。如果浏览器已经打开直播间在
-      播放中途才启动本程序，是抓不到的，必须保证 listener3 先跑起来，
-      再去开直播间页面
+【已知限制】
+    - 只能拦截"握手之后"建立的新 WSS 连接，必须保证 listener3 先跑起来
     - 只有最终送达客户端的消息才能被截获，被抖音服务器过滤掉的内容
-      （比如被风控吞掉的弹幕）天然就抓不到，这跟 listener1/2 是一样的限制
-    - 默认只处理域名里带 "webcast" 关键字的 WSS 连接，避免把无关流量也
-      解密浪费 CPU；如果某天域名规则变了，改 HOST_FILTER_KEYWORDS 常量
+      天然抓不到
+    - local 模式是 mitmproxy 比较新的功能，不同 Windows 版本/权限环境下
+      表现可能有差异，遇到问题先确认：①是不是用管理员身份跑的 ②是不是
+      装了 mitmproxy-windows ③进程名关键词对不对（任务管理器核实）
+    - 如果 local 模式在你的环境下死活跑不起来，退回旧的系统代理方案
+      作为备用：上游代理链式转发（System Proxy -> listener3 -> Clash Verge）
+      是验证过可行的，需要的话告诉我，把这部分代码加回来
 """
 import asyncio
 import logging
@@ -68,25 +69,36 @@ from typing import Callable, Optional
 from mitmproxy import http, options
 from mitmproxy.tools.dump import DumpMaster
 
-from listener2 import _parse_frame  # 直接复用，解析口径跟 listener2 完全一致
+try:
+    from listener.listener2 import _parse_frame  # 从项目根导入时
+except ImportError:
+    from listener2 import _parse_frame           # 直接运行 __main__ 时
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_PORT = 8888
-# 只处理域名里带这些关键字的 WSS 连接，其余流量原样放过、不解析
+# local 模式的拦截目标，已通过任务管理器实测确认进程名为"直播伴侣.exe"
+# （会同时跑多个 PID，是 Electron 应用常见的多进程架构，mitmproxy 的
+# local 模式天然按进程名匹配所有同名 PID，不需要额外处理）
+TARGET_PROCESS = "直播伴侣.exe"
+
+# 进一步按域名过滤，避免"直播伴侣"自己的其他网络请求（更新检测、统计上报等）
+# 也被拿去尝试解析协议，产生不必要的噪音和报错日志
 HOST_FILTER_KEYWORDS = ("webcast",)
 
 
 class _DouyinWsAddon:
     """
-    mitmproxy 的 addon。mitmproxy 会在每次收到一条完整的 WebSocket 消息时
-    调用 websocket_message(flow) —— 这个 hook 名字和签名是 mitmproxy 自带的
-    dumper 插件本身也在用的标准写法，不是猜的。
+    mitmproxy 的 addon。因为这一版用的是 local 模式，到达这里的流量已经
+    是 OS 层面筛过的"直播伴侣"专属流量，不需要再像旧版本那样自己用
+    psutil 反查进程归属——这一层过滤已经由 mitmproxy 自己在更底层做掉了。
+    这里只需要再做域名过滤，剔除"直播伴侣"自身产生的无关请求。
     """
 
-    def __init__(self, callback: Callable, on_status: Optional[Callable] = None):
+    def __init__(self, callback: Callable, on_status: Optional[Callable],
+                 connected: asyncio.Event):
         self.callback = callback
         self.on_status = on_status
+        self._connected = connected
         self._seen_first = False
 
     def websocket_message(self, flow: http.HTTPFlow):
@@ -97,10 +109,11 @@ class _DouyinWsAddon:
         assert flow.websocket is not None
         message = flow.websocket.messages[-1]
         if message.from_client:
-            return  # 只关心服务器推给客户端的消息，忽略客户端发的心跳/请求帧
+            return  # 只关心服务器推给客户端的消息
 
         if not self._seen_first:
             self._seen_first = True
+            self._connected.set()
             logger.info("✅ 监听到目标 WSS 连接，开始解析消息")
             if self.on_status:
                 self.on_status(True)
@@ -126,31 +139,55 @@ class _DouyinWsAddon:
             self.on_status(False)
 
 
+_CONNECT_TIMEOUT = 30.0  # 秒，等待首次 WSS 连接的超时时间
+
+
 async def start_listener(
     callback: Callable,
     on_status: Optional[Callable] = None,
-    port: int = DEFAULT_PORT,
+    target_process: str = TARGET_PROCESS,
 ):
     """
-    启动本地 MITM 代理，监听并解析抖音 WSS 流量。
-
-    跟 listener1/listener2 的 start_listener 不同：这个函数不会自己打开
-    浏览器，而是常驻起一个代理服务，等你手动把浏览器代理指过来。
-    这个 await 会一直阻塞直到外部取消这个 asyncio task（比如 GUI 那边的
-    ListenerThread 调 task.cancel()）。
+    启动 mitmproxy local 模式拦截直播伴侣流量。
+    30s 内未检测到 WSS 连接则视为连接失败，on_status(False) 后返回。
     """
-    opts = options.Options(listen_host="0.0.0.0", listen_port=port)
+    connected = asyncio.Event()
+    opts = options.Options(mode=[f"local:{target_process}"])
     master = DumpMaster(opts, with_termlog=False, with_dumper=False)
-    master.addons.add(_DouyinWsAddon(callback, on_status))
+    master.addons.add(_DouyinWsAddon(callback, on_status, connected))
 
-    logger.info(f"MITM 代理已启动，监听端口 {port}")
-    logger.info("首次使用请用要监听的浏览器访问 http://mitm.it 安装根证书")
-    logger.info(f"然后把该浏览器的代理设置为 127.0.0.1:{port}")
+    logger.info(f"local 模式已启动，拦截进程: {target_process}")
+    logger.info("如无反应请确认：①以管理员身份运行 ②已安装 mitmproxy-windows ③直播伴侣已开播")
 
-    try:
-        await master.run()
-    except asyncio.CancelledError:
+    master_task = asyncio.create_task(master.run())
+
+    async def _stop_master():
+        """关闭 mitmproxy 并等待 WinDivert 完全释放，避免 loop 关闭时报错。"""
         master.shutdown()
+        master_task.cancel()
+        try:
+            await master_task
+        except (asyncio.CancelledError, Exception):
+            pass
+
+    # 等待首次 WSS 连接，超时视为连接失败
+    try:
+        await asyncio.wait_for(connected.wait(), timeout=_CONNECT_TIMEOUT)
+    except asyncio.TimeoutError:
+        logger.warning(f"{_CONNECT_TIMEOUT:.0f}s 内未检测到 WSS 连接，连接失败")
+        await _stop_master()
+        if on_status:
+            on_status(False)
+        return
+    except asyncio.CancelledError:
+        await _stop_master()
+        raise
+
+    # 已连接，持续运行直到外部停止
+    try:
+        await master_task
+    except asyncio.CancelledError:
+        await _stop_master()
         raise
     finally:
         if on_status:

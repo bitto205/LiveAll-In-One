@@ -260,7 +260,8 @@ class HomePage(BasePage):
         # ── Step 3：线路选择 ──
         card3, c3 = _step_card(3, "线路选择")
 
-        desc = QLabel("当线路1无效时，可尝试线路2")
+        desc = QLabel("线路一/二需登录并填写直播间ID；线路三为本地MITM代理，无需登录，需提前配置浏览器代理")
+        desc.setWordWrap(True)
         desc.setStyleSheet(
             f"background: transparent; font-size: 12px;"
             f" color: {_theme.get()['text_muted']};"
@@ -273,13 +274,16 @@ class HomePage(BasePage):
         btn_row.setSpacing(8)
         self._route_btn1 = QPushButton("线路一")
         self._route_btn2 = QPushButton("线路二")
-        for btn in (self._route_btn1, self._route_btn2):
+        self._route_btn3 = QPushButton("线路三")
+        for btn in (self._route_btn1, self._route_btn2, self._route_btn3):
             btn.setFixedHeight(36)
             btn.setCursor(Qt.PointingHandCursor)
         self._route_btn1.clicked.connect(lambda: self._select_route("1"))
         self._route_btn2.clicked.connect(lambda: self._select_route("2"))
+        self._route_btn3.clicked.connect(lambda: self._select_route("3"))
         btn_row.addWidget(self._route_btn1)
         btn_row.addWidget(self._route_btn2)
+        btn_row.addWidget(self._route_btn3)
         btn_row.addStretch()
         c3.addLayout(btn_row)
         lay.addWidget(card3)
@@ -391,6 +395,7 @@ class HomePage(BasePage):
         unsel = _style_outlined(C, h=36)
         self._route_btn1.setStyleSheet(sel if self._route == "1" else unsel)
         self._route_btn2.setStyleSheet(sel if self._route == "2" else unsel)
+        self._route_btn3.setStyleSheet(sel if self._route == "3" else unsel)
 
     # ── 连接/断开 ────────────────────────────
     def _on_conn_click(self):

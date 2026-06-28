@@ -84,6 +84,13 @@ class ListenerThread(QThread):
             self._loop.close()
 
     async def _listen(self):
+        if self._route == "3":
+            from listener.listener3 import start_listener
+            await start_listener(
+                callback  = lambda msg: self.message_received.emit(msg),
+                on_status = lambda c: self.status_changed.emit(c),
+            )
+            return
         if self._route == "1":
             from listener.listener1 import _run
         else:
@@ -176,6 +183,16 @@ class App(QObject):
 # ─────────────────────────────────────────────
 # 入口
 # ─────────────────────────────────────────────
-if __name__ == "__main__":
+def _ensure_admin() -> None:
+    """以管理员身份重新启动，若已是管理员则直接返回。"""
+    import ctypes
+    if ctypes.windll.shell32.IsUserAnAdmin():
+        return
+    args = " ".join(f'"{a}"' for a in sys.argv)
+    ctypes.windll.shell32.ShellExecuteW(None, "runas", sys.executable, args, None, 1)
+    sys.exit(0)
 
+
+if __name__ == "__main__":
+    _ensure_admin()
     sys.exit(App(sys.argv).run())
