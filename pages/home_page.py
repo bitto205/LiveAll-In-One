@@ -433,14 +433,43 @@ class HomePage(BasePage):
     # ── 线路四 patch ─────────────────────────
     def _check_patch_status(self):
         try:
-            from listener.listener4 import is_patched
-            patched = is_patched()
+            from listener.listener4 import get_route4_status
+            s = get_route4_status()
         except Exception:
-            patched = False
-        self._route_btn4.setVisible(patched)
-        self._patch_btn.setVisible(not patched)
-        self._patch_lbl.setVisible(not patched)
-        if not patched and self._route == "4":
+            s = {}
+
+        ready = bool(
+            s.get("index_js_found")
+            and s.get("is_patched")
+            and s.get("exe_in_place")
+            and s.get("ca_installed")
+        )
+
+        self._route_btn4.setVisible(ready)
+        self._patch_btn.setVisible(not ready)
+        self._patch_lbl.setVisible(not ready)
+
+        if not ready:
+            C = _theme.get()
+            if not s.get("companion_installed"):
+                msg = "未检测到直播伴侣"
+                self._patch_btn.setEnabled(False)
+                self._patch_btn.setStyleSheet(_style_disabled(C, h=36))
+            elif not s.get("is_patched"):
+                msg = "点击 Patch 以启用线路四"
+                self._patch_btn.setEnabled(True)
+            elif not s.get("exe_in_place"):
+                msg = "proxy_shell.exe 不存在，请检查软件完整性"
+                self._patch_btn.setEnabled(False)
+                self._patch_btn.setStyleSheet(_style_disabled(C, h=36))
+            elif not s.get("ca_installed"):
+                msg = "CA 证书未安装，重新 Patch 可修复"
+                self._patch_btn.setEnabled(True)
+            else:
+                msg = ""
+            self._patch_lbl.setText(msg)
+
+        if not ready and self._route == "4":
             self._select_route("1")
         self._refresh_route_btns()
 

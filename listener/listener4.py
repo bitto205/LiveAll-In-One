@@ -14,11 +14,14 @@ listener4.py — 直播伴侣代理注入方案（proxy_shell 架构）
 - 不占用系统代理，证书只对 webcast 域生效
 """
 import asyncio
+import gzip
 import json
 import logging
 import os
 import re
+import secrets
 import shutil
+import struct
 import subprocess
 import sys
 import winreg
@@ -40,33 +43,106 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
-PROXY_PORT   = 8888
-IPC_PORT     = 18998
-_PROXY_VALUE = f"127.0.0.1:{PROXY_PORT},direct://"
-_TIMEOUT     = 60.0          # 等待首条 IPC 消息的超时（秒）
+PROXY_PORT        = 8888
+IPC_PORT          = 18998
+_PROXY_VALUE      = f"127.0.0.1:{PROXY_PORT},direct://"
+_TIMEOUT          = 60.0          # 等待首条 IPC 消息的超时（秒）
+_SHELL_PROCESS    = "proxy_shell.exe"   # tasklist 检测用进程名
+_SHELL_MARKER     = "proxy_shell.exe"   # 检测 patch 中是否已注入 spawn
 
-# proxy_shell.exe 在 listener/ 目录下
-_SHELL_MARKER = "proxy_shell.exe"   # 用于检测 patch 中是否已注入 spawn
+
+# ─────────────────────────────────────────────
+# CA 证书管理（patch 时由 Python 生成并安装）
+# ─────────────────────────────────────────────
+
+def _ca_paths() -> tuple[Path, Path]:
+    d = Path.home() / ".livehelper"
+    return d / "proxy_shell_ca.crt", d / "proxy_shell_ca.key"
+
+
+def _ensure_ca_cert() -> Path:
+    """若 CA 证书不存在则用 cryptography 库生成，返回 .crt 路径。"""
+    cert_path, key_path = _ca_paths()
+    if cert_path.exists() and key_path.exists():
+        return cert_path
+
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import rsa
+    from cryptography.x509.oid import NameOID
+    import datetime
+
+    cert_path.parent.mkdir(parents=True, exist_ok=True)
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    name = x509.Name([
+        x509.NameAttribute(NameOID.ORGANIZATION_NAME, "LiveHelper"),
+        x509.NameAttribute(NameOID.COMMON_NAME, "LiveHelper Proxy CA"),
+    ])
+    now = datetime.datetime.utcnow()
+    cert = (
+        x509.CertificateBuilder()
+        .subject_name(name).issuer_name(name)
+        .public_key(key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now - datetime.timedelta(hours=1))
+        .not_valid_after(now + datetime.timedelta(days=3650))
+        .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
+        .sign(key, hashes.SHA256())
+    )
+    cert_path.write_bytes(cert.public_bytes(serialization.Encoding.PEM))
+    key_path.write_bytes(key.private_bytes(
+        serialization.Encoding.PEM,
+        serialization.PrivateFormat.TraditionalOpenSSL,
+        serialization.NoEncryption(),
+    ))
+    logger.info(f"CA 证书已生成: {cert_path}")
+    return cert_path
+
+
+def _install_ca_cert() -> None:
+    """将 CA 证书安装到 Windows ROOT 信任存储（需要管理员权限）。"""
+    cert_path = _ensure_ca_cert()
+    try:
+        r = subprocess.run(
+            ["certutil", "-addstore", "-f", "ROOT", str(cert_path)],
+            capture_output=True, timeout=30,
+        )
+        if r.returncode == 0:
+            logger.info("CA 证书已安装到 Windows ROOT")
+        else:
+            logger.warning(f"certutil 返回非零: {r.returncode}\n{r.stderr.decode(errors='ignore')}")
+    except Exception as e:
+        logger.warning(f"certutil 异常: {e}")
 
 
 # ─────────────────────────────────────────────
 # 路径注册（主软件启动时调用，让 patch 能找到 exe）
 # ─────────────────────────────────────────────
 
-def save_location() -> None:
-    """将当前项目目录写入 ~/.livehelper/config.json，供 patch_companion 使用。"""
-    exe_dir = os.path.dirname(os.path.abspath(sys.argv[0]))
-    shell_exe = os.path.join(exe_dir, "listener", "proxy_shell.exe")
-    cfg = {"exe_dir": exe_dir, "proxy_shell_exe": shell_exe}
-    cfg_dir = Path.home() / ".livehelper"
-    cfg_dir.mkdir(parents=True, exist_ok=True)
-    with open(cfg_dir / "config.json", "w", encoding="utf-8") as f:
-        json.dump(cfg, f)
-    logger.debug(f"路径已注册: {shell_exe}")
+def _ipc_token_path() -> Path:
+    return Path.home() / ".livehelper" / "ipc_token"
+
+
+def _refresh_ipc_token() -> str:
+    """每次主软件启动时重新生成 IPC token，写入磁盘后返回。"""
+    token = secrets.token_hex(32)
+    p = _ipc_token_path()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(token, encoding="ascii")
+    return token
+
+
+def _shell_source() -> Optional[str]:
+    """源 proxy_shell.exe：listener4.py 的同级目录，随主软件发布。"""
+    p = os.path.join(os.path.dirname(os.path.abspath(__file__)), "proxy_shell.exe")
+    return p if os.path.isfile(p) else None
 
 
 def _load_shell_exe() -> Optional[str]:
-    """从 config.json 读取 proxy_shell.exe 路径；回退到本文件旁边。"""
+    """
+    读取 patch 时部署到直播伴侣目录的 proxy_shell.exe 路径。
+    config.json 里的 proxy_shell_exe 由 patch_companion() 写入。
+    """
     cfg_file = Path.home() / ".livehelper" / "config.json"
     try:
         cfg = json.loads(cfg_file.read_text(encoding="utf-8"))
@@ -75,9 +151,34 @@ def _load_shell_exe() -> Optional[str]:
             return p
     except Exception:
         pass
-    # 回退：listener4.py 旁边找 proxy_shell.exe
-    fallback = os.path.join(os.path.dirname(os.path.abspath(__file__)), "proxy_shell.exe")
-    return fallback if os.path.isfile(fallback) else None
+    return None
+
+
+def _save_deployed_exe(dest: str) -> None:
+    """patch_companion() 部署完毕后，把目标路径写入 config.json。"""
+    cfg_file = Path.home() / ".livehelper" / "config.json"
+    try:
+        cfg = json.loads(cfg_file.read_text(encoding="utf-8"))
+    except Exception:
+        cfg = {}
+    cfg["proxy_shell_exe"] = dest
+    cfg_file.parent.mkdir(parents=True, exist_ok=True)
+    cfg_file.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def save_location() -> None:
+    """将主软件目录写入 ~/.livehelper/config.json，刷新 IPC token。"""
+    exe_dir = os.path.dirname(os.path.abspath(sys.argv[0]))
+    cfg_file = Path.home() / ".livehelper" / "config.json"
+    try:
+        cfg = json.loads(cfg_file.read_text(encoding="utf-8"))
+    except Exception:
+        cfg = {}
+    cfg["exe_dir"] = exe_dir
+    cfg_file.parent.mkdir(parents=True, exist_ok=True)
+    cfg_file.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+    _refresh_ipc_token()
+    logger.debug(f"主软件目录已注册: {exe_dir}")
 
 
 # ─────────────────────────────────────────────
@@ -162,38 +263,56 @@ def is_patched() -> bool:
 def patch_companion() -> tuple[bool, str]:
     """
     向直播伴侣 index.js 注入：
-      1. proxy_shell.exe spawn 代码（开播时自动起代理）
-      2. --proxy-server 参数（流量走 8888）
-      3. 完整性校验绕过
-    同时运行 proxy_shell.exe --setup 安装 CA 证书。
+      1. 把 proxy_shell.exe 从 listener/ 拷贝到 index.js 同级目录
+      2. spawn 拷贝后的 proxy_shell.exe
+      3. --proxy-server 参数（流量走 8888）
+      4. 完整性校验绕过
+      5. 生成并安装 CA 证书
     """
     path = find_index_js()
     if not path:
         return False, "未找到直播伴侣安装目录"
 
-    shell_exe = _load_shell_exe()
-    if not shell_exe:
-        return False, "未找到 proxy_shell.exe，请确认软件目录完整"
+    # 源 exe（随主软件发布）
+    src = _shell_source()
+    if not src:
+        return False, "未找到源 proxy_shell.exe（listener/ 目录），请确认软件完整性"
+
+    # 目标：部署到 index.js 同级目录
+    dest = os.path.join(os.path.dirname(path), "proxy_shell.exe")
 
     try:
         content = open(path, encoding="utf-8", errors="ignore").read()
     except Exception as e:
         return False, f"读取 index.js 失败: {e}"
 
-    if f"127.0.0.1:{PROXY_PORT}" in content and _SHELL_MARKER in content:
+    # 已 patch 且 dest 就位 → 幂等
+    if (f"127.0.0.1:{PROXY_PORT}" in content and _SHELL_MARKER in content
+            and os.path.isfile(dest)):
         return True, "已经是 patch 状态"
 
-    # 备份
+    # ── 1. 拷贝 exe ──────────────────────────
+    try:
+        shutil.copy2(src, dest)
+        logger.info(f"proxy_shell.exe 已部署到: {dest}")
+    except Exception as e:
+        return False, f"拷贝 proxy_shell.exe 失败: {e}"
+
+    # ── 2. 记录部署路径到 config.json ────────
+    _save_deployed_exe(dest)
+
+    # ── 3. 备份 index.js ─────────────────────
     bak = path + ".bak"
     if not os.path.exists(bak):
         shutil.copy2(path, bak)
 
     new_content = content
 
-    # 1. proxy-server appendSwitch（替换已有或注入新）
+    # ── 4. proxy-server appendSwitch ─────────
     proxy_re = re.compile(
         r'(\.commandLine\.appendSwitch\s*\(\s*["\']proxy-server["\'],\s*["\'])([^"\']*?)(["\'])'
     )
+    proxy_inject = ""
     if proxy_re.search(new_content):
         new_content = proxy_re.sub(rf'\g<1>{_PROXY_VALUE}\g<3>', new_content)
     else:
@@ -205,26 +324,22 @@ def patch_companion() -> tuple[bool, str]:
         proxy_inject = f'{app_var}.commandLine.appendSwitch("proxy-server","{_PROXY_VALUE}");'
         new_content = new_content[:m.start()] + proxy_inject + new_content[m.start():]
 
-    # 2. spawn proxy_shell.exe（在同一注入点前再插一段）
-    js_path = shell_exe.replace("\\", "\\\\")
+    # ── 5. spawn（注入到 proxy-server 前） ───
+    js_path = dest.replace("\\", "\\\\")
     spawn_code = (
         f';(function(){{var c=require("child_process");'
         f'try{{c.spawn("{js_path}",[],{{detached:false,stdio:"ignore",windowsHide:true}});}}'
         f'catch(e){{}}}}());'
     )
-    # 找到刚才注入的 proxy_inject（或已有的 appendSwitch），在其前面插入 spawn
-    inject_anchor = proxy_inject if not proxy_re.search(content) else \
-        f'.commandLine.appendSwitch("proxy-server","{_PROXY_VALUE}")'
     idx = new_content.find("proxy-server")
     if idx >= 0:
-        # 找到 appendSwitch 那一行的行首位置
         line_start = new_content.rfind(";", 0, idx) + 1
         new_content = new_content[:line_start] + spawn_code + new_content[line_start:]
 
-    # 3. 完整性校验绕过
+    # ── 6. 完整性校验绕过 ────────────────────
     new_content, n = re.subn(r',!\w+\.ok\)', ',false)', new_content, count=1)
     if n == 0:
-        logger.warning("未找到完整性校验 pattern")
+        logger.warning("未找到完整性校验 pattern，跳过")
 
     try:
         with open(path, "w", encoding="utf-8") as f:
@@ -232,12 +347,8 @@ def patch_companion() -> tuple[bool, str]:
     except Exception as e:
         return False, f"写入 index.js 失败: {e}"
 
-    # 4. 运行 proxy_shell --setup 安装 CA 证书（主软件有管理员权限）
-    try:
-        subprocess.run([shell_exe, "--setup"], capture_output=True, timeout=30)
-        logger.info("proxy_shell --setup 完成")
-    except Exception as e:
-        logger.warning(f"proxy_shell --setup 异常: {e}")
+    # ── 7. 生成并安装 CA 证书 ─────────────────
+    _install_ca_cert()
 
     return True, "Patch 成功！请重启直播伴侣使设置生效"
 
@@ -273,42 +384,239 @@ def check_path_mismatch() -> bool:
 
 
 # ─────────────────────────────────────────────
-# JSON → model 转换
+# 运行时诊断
 # ─────────────────────────────────────────────
 
-def _json_to_msg(data: dict):
-    t = data.get("type", "")
+def _is_ca_installed() -> bool:
+    """检查 LiveHelper CA 证书是否已安装到 Windows ROOT 信任存储。"""
+    cert_path, _ = _ca_paths()
+    if not cert_path.exists():
+        return False
     try:
-        if t == "chat":
-            return ChatMessage(user=data["user"], user_id=data.get("user_id", ""),
-                               content=data.get("content", ""))
-        if t == "gift":
-            return GiftMessage(user=data["user"], user_id=data.get("user_id", ""),
-                               gift=data.get("gift", ""), gift_id=data.get("gift_id", 0),
-                               count=data.get("count", 1), repeat_end=1)
-        if t == "like":
-            return LikeMessage(user=data["user"], user_id=data.get("user_id", ""),
-                               count=data.get("count", 1))
-        if t == "enter":
-            return EnterMessage(user=data["user"], user_id=data.get("user_id", ""))
-        if t == "follow":
-            return FollowMessage(user=data["user"], user_id=data.get("user_id", ""))
-        if t == "online":
-            return OnlineMessage(current=data.get("current", 0), total=data.get("total", 0))
-        if t == "fansclub":
-            return FansclubMessage(user=data.get("user", ""), user_id=data.get("user_id", ""),
-                                   content=data.get("content", ""))
-        if t == "emoji":
-            return EmojiChatMessage(user=data.get("user", ""), user_id=data.get("user_id", ""),
-                                    emoji_id=data.get("emoji_id", ""),
-                                    default_content=data.get("default_content", ""))
-        if t == "room_stats":
-            return RoomStatsMessage(display_long=data.get("display_long", ""))
-        if t == "control":
-            return ControlMessage(status=data.get("status", 0))
+        r = subprocess.run(
+            ["powershell", "-NoProfile", "-Command",
+             "(Get-ChildItem Cert:\\LocalMachine\\Root | "
+             "Where-Object Subject -like '*LiveHelper*').Count -gt 0"],
+            capture_output=True, timeout=10, encoding="utf-8", errors="ignore",
+        )
+        return "True" in r.stdout
+    except Exception:
+        return False
+
+
+def _is_proxy_running() -> bool:
+    """检测 proxy_shell.exe 是否在进程列表中。"""
+    try:
+        r = subprocess.run(
+            ["tasklist", "/FI", f"IMAGENAME eq {_SHELL_PROCESS}", "/NH"],
+            capture_output=True, timeout=5, encoding="utf-8", errors="ignore",
+        )
+        return _SHELL_PROCESS.lower() in r.stdout.lower()
+    except Exception:
+        return False
+
+
+def get_route4_status() -> dict:
+    """
+    主软件启动时调用，返回线路 4 整体状态，供 UI 展示。
+
+    Keys:
+        companion_installed  直播伴侣是否已安装
+        index_js_found       找到 index.js
+        is_patched           已 patch（含 spawn + proxy-server）
+        exe_in_place         proxy_shell.exe 文件存在
+        ca_installed         CA 证书在 Windows ROOT 信任链中
+    """
+    patched    = is_patched()
+    shell_exe  = _load_shell_exe()
+    status = {
+        "companion_installed": bool(_find_install_dir()),
+        "index_js_found":      bool(find_index_js()),
+        "is_patched":          patched,
+        "exe_in_place":        bool(shell_exe and os.path.isfile(shell_exe)),
+        "ca_installed":        _is_ca_installed() if patched else False,
+    }
+    logger.info(
+        "[线路4 启动状态] 伴侣已装=%s | index.js=%s | 已patch=%s | "
+        "exe就位=%s | 证书已装=%s",
+        status["companion_installed"], status["index_js_found"],
+        status["is_patched"], status["exe_in_place"], status["ca_installed"],
+    )
+    return status
+
+
+def get_route4_connect_check() -> dict:
+    """
+    连接直播间前调用，做双向路径 + 进程诊断并写 log。
+
+    Keys:
+        exe_known_to_main        listener4 能找到 proxy_shell.exe
+        main_location_registered config.json 中 exe_dir 与当前 main 路径一致
+        path_mismatch            index.js 中注入路径与当前 exe 路径不符
+        exe_running              proxy_shell.exe 进程正在运行
+    """
+    shell_exe = _load_shell_exe()
+    exe_known = bool(shell_exe and os.path.isfile(shell_exe))
+
+    main_location_registered = False
+    try:
+        cfg = json.loads(
+            (Path.home() / ".livehelper" / "config.json").read_text(encoding="utf-8")
+        )
+        current = os.path.normcase(os.path.dirname(os.path.abspath(sys.argv[0])))
+        stored  = os.path.normcase(cfg.get("exe_dir", ""))
+        main_location_registered = bool(stored) and current == stored
+    except Exception:
+        pass
+
+    mismatch    = check_path_mismatch()
+    exe_running = _is_proxy_running()
+
+    result = {
+        "exe_known_to_main":        exe_known,
+        "main_location_registered": main_location_registered,
+        "path_mismatch":            mismatch,
+        "exe_running":              exe_running,
+    }
+
+    logger.info(
+        "[线路4 连接诊断] exe路径已知=%s | main位置已注册=%s | "
+        "路径变动=%s | 进程运行=%s",
+        exe_known, main_location_registered, mismatch, exe_running,
+    )
+    if mismatch:
+        logger.warning(
+            "proxy_shell.exe 路径已变动（软件目录被移动？），建议重新 Patch 直播伴侣"
+        )
+    if not main_location_registered:
+        logger.warning("主软件位置未注册或已变动，建议重启主软件以更新路径")
+    if not exe_running:
+        logger.warning(
+            "proxy_shell.exe 未检测到运行中（直播伴侣启动后会自动 spawn；"
+            "若伴侣已开启请检查 patch 状态）"
+        )
+
+    return result
+
+
+# ─────────────────────────────────────────────
+# Protobuf 解析（接收 Go 推来的原始 PushFrame 字节）
+# ─────────────────────────────────────────────
+
+def _g(obj, *keys, default=""):
+    for k in keys:
+        v = getattr(obj, k, None)
+        if v is not None and v != "" and v != 0:
+            return v
+    return default
+
+
+def _uname(user) -> str:
+    return getattr(user, "nickname", "") or getattr(user, "nick_name", "")
+
+
+def _uid(user) -> str:
+    return str(getattr(user, "id", "") or getattr(user, "id_str", ""))
+
+
+def _parse_item_pb(method: str, payload: bytes):
+    import listener.Live_pb2 as pb
+    try:
+        if method == "WebcastChatMessage":
+            m = pb.ChatMessage(); m.ParseFromString(payload)
+            u, c = _uname(m.user), getattr(m, "content", "")
+            if u and c:
+                return ChatMessage(user=u, user_id=_uid(m.user), content=c)
+
+        elif method == "WebcastGiftMessage":
+            m = pb.GiftMessage(); m.ParseFromString(payload)
+            if m.repeatEnd != 1:
+                return None
+            u = _uname(m.user)
+            name = m.gift.name if m.gift else ""
+            gid  = int(m.gift.id) if m.gift else 0
+            cnt  = int(m.comboCount) if m.comboCount else 1
+            if u and name:
+                return GiftMessage(user=u, user_id=_uid(m.user),
+                                   gift=name, gift_id=gid, count=cnt, repeat_end=1)
+
+        elif method == "WebcastLikeMessage":
+            m = pb.LikeMessage(); m.ParseFromString(payload)
+            u = _uname(m.user)
+            if u:
+                return LikeMessage(user=u, user_id=_uid(m.user),
+                                   count=int(_g(m, "count", default=1)))
+
+        elif method == "WebcastMemberMessage":
+            m = pb.MemberMessage(); m.ParseFromString(payload)
+            u = _uname(m.user)
+            if u:
+                return EnterMessage(user=u, user_id=_uid(m.user))
+
+        elif method == "WebcastSocialMessage":
+            m = pb.SocialMessage(); m.ParseFromString(payload)
+            u = _uname(m.user)
+            if u:
+                return FollowMessage(user=u, user_id=_uid(m.user))
+
+        elif method == "WebcastRoomUserSeqMessage":
+            m = pb.RoomUserSeqMessage(); m.ParseFromString(payload)
+            return OnlineMessage(
+                current=int(_g(m, "total", default=0)),
+                total=int(_g(m, "totalPvForAnchor", "total_pv_for_anchor", default=0)),
+            )
+
+        elif method == "WebcastFansclubMessage":
+            m = pb.FansclubMessage(); m.ParseFromString(payload)
+            return FansclubMessage(
+                user=_uname(m.user) if hasattr(m, "user") else "",
+                user_id=_uid(m.user) if hasattr(m, "user") else "",
+                content=getattr(m, "content", ""),
+            )
+
+        elif method == "WebcastEmojiChatMessage":
+            m = pb.EmojiChatMessage(); m.ParseFromString(payload)
+            return EmojiChatMessage(
+                user=_uname(m.user) if hasattr(m, "user") else "",
+                user_id=_uid(m.user) if hasattr(m, "user") else "",
+                emoji_id=str(_g(m, "emojiId", "emoji_id", default="")),
+                default_content=str(_g(m, "defaultContent", "default_content", default="")),
+            )
+
+        elif method == "WebcastRoomStatsMessage":
+            m = pb.RoomStatsMessage(); m.ParseFromString(payload)
+            return RoomStatsMessage(
+                display_long=str(_g(m, "displayLong", "display_long", default="")),
+            )
+
+        elif method == "WebcastControlMessage":
+            m = pb.ControlMessage(); m.ParseFromString(payload)
+            return ControlMessage(status=int(getattr(m, "status", 0)))
+
     except Exception as e:
-        logger.debug(f"json_to_msg [{t}]: {e}")
+        logger.debug(f"pb 解析失败 [{method}]: {e}")
     return None
+
+
+def _parse_frame_pb(data: bytes) -> list:
+    import listener.Live_pb2 as pb
+    results = []
+    try:
+        frame = pb.PushFrame(); frame.ParseFromString(data)
+        if not frame.payload:
+            return results
+        try:
+            body = gzip.decompress(frame.payload)
+        except Exception:
+            body = frame.payload
+        response = pb.LiveResponse(); response.ParseFromString(body)
+        for item in response.messagesList:
+            msg = _parse_item_pb(item.method, item.payload)
+            if msg is not None:
+                results.append(msg)
+    except Exception as e:
+        logger.debug(f"帧解析失败: {e}")
+    return results
 
 
 # ─────────────────────────────────────────────
@@ -320,11 +628,19 @@ async def start_listener(
     on_status: Optional[Callable] = None,
 ) -> None:
     """
-    连接 proxy_shell 的 IPC 端口（18998），接收 JSON 弹幕消息并转发给 callback。
-    60 秒内没有任何消息则超时。
+    连接 proxy_shell 的 IPC 端口（18998），接收原始 PushFrame 字节帧（4字节长度前缀），
+    本地 protobuf 解析后转发给 callback。60 秒内无首条消息则超时。
     """
+    logger.info("=== 线路 4 连接启动 ===")
     if not is_patched():
         logger.error("直播伴侣未 patch，请先执行 Patch 操作")
+        if on_status:
+            on_status(False)
+        return
+
+    check = get_route4_connect_check()
+    if not check["exe_running"]:
+        logger.error("proxy_shell.exe 未运行，无法建立 IPC 连接")
         if on_status:
             on_status(False)
         return
@@ -340,32 +656,48 @@ async def start_listener(
             on_status(False)
         return
 
+    # 发送 token 完成身份验证（Go 在 3 秒内校验）
+    try:
+        token = _ipc_token_path().read_text(encoding="ascii").strip()
+        writer.write(token.encode("ascii") + b"\n")
+        await writer.drain()
+    except Exception as e:
+        logger.error(f"IPC token 发送失败: {e}")
+        writer.close()
+        if on_status:
+            on_status(False)
+        return
+
     logger.info(f"已连接 proxy_shell IPC（{IPC_PORT}），等待弹幕消息…（{_TIMEOUT:.0f}s 超时）")
 
     async def _recv() -> None:
         first = True
-        async for line in reader:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                data = json.loads(line)
-                msg = _json_to_msg(data)
-                if msg is None:
-                    continue
+        while True:
+            # 4-byte big-endian length prefix (with timeout only before first message)
+            if first:
+                hdr = await asyncio.wait_for(reader.readexactly(4), timeout=_TIMEOUT)
+            else:
+                hdr = await reader.readexactly(4)
+            length = struct.unpack(">I", hdr)[0]
+            data = await reader.readexactly(length)
+            msgs = _parse_frame_pb(data)
+            for msg in msgs:
                 if first:
                     first = False
-                    logger.info("✅ 收到首条弹幕，连接正常")
+                    logger.info("✅ 首条弹幕已到达，IPC 通道正常，开始转发")
                     if on_status:
                         on_status(True)
-                callback(msg)
-            except Exception as e:
-                logger.debug(f"IPC 消息解析失败: {e}")
+                try:
+                    callback(msg)
+                except Exception as e:
+                    logger.debug(f"callback 异常: {e}")
 
     try:
-        await asyncio.wait_for(_recv(), timeout=_TIMEOUT)
+        await _recv()
     except asyncio.TimeoutError:
         logger.warning(f"{_TIMEOUT:.0f}s 内未收到消息，请确认直播伴侣已重启并开播")
+    except asyncio.IncompleteReadError:
+        logger.info("IPC 连接已断开")
     except asyncio.CancelledError:
         pass
     except Exception as e:

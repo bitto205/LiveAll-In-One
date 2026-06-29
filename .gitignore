@@ -12,3 +12,6 @@ browsers/
 build/
 spider.py
 0000.py
+listener/proxy_shell.build
+listener/proxy_shell.dist
+listener/proxy_shell.onefile-build
