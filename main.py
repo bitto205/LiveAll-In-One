@@ -202,4 +202,9 @@ def _ensure_admin() -> None:
 
 if __name__ == "__main__":
     _ensure_admin()
+    try:
+        from listener.listener4 import save_location
+        save_location()
+    except Exception:
+        pass
     sys.exit(App(sys.argv).run())

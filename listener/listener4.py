@@ -1,49 +1,89 @@
 """
-listener4.py — 直播伴侣代理注入方案
+listener4.py — 直播伴侣代理注入方案（proxy_shell 架构）
 
-修改直播伴侣 Electron 应用的 index.js，注入 --proxy-server 启动参数，
-使直播伴侣的所有流量经过本地 mitmproxy 代理。
+原理：
+1. patch_companion() 向直播伴侣 index.js 注入两段代码：
+   - spawn proxy_shell.exe（代理进程，开机/开播时自动启动）
+   - --proxy-server=127.0.0.1:8888,direct://（所有流量走 proxy_shell）
+2. proxy_shell.exe 持久运行，对 webcast WSS 做 TLS MITM，解析弹幕
+3. start_listener() 连接 proxy_shell 的 IPC 端口（18998）接收 JSON 消息
 
-优势（对比 listener3 WinDivert 方案）：
-- 不依赖 WinDivert，无"Cannot spawn more than one"问题
-- 直播伴侣启动后就一直走代理，任何时候点连接都能抓到新建的 WSS
-- 不占用系统代理，不影响其他应用
-
-使用流程：
-1. 软件里点"Patch 直播伴侣"（自动找安装路径并修改 index.js）
-2. 重启直播伴侣一次
-3. 之后正常开播，点线路四连接即可
-
-直播伴侣更新后会覆盖 index.js，需重新 patch（软件启动时自动检测）。
+优势：
+- proxy_shell 跟着直播伴侣生命周期，主软件随时可以接入，无需先起代理
+- 不依赖 mitmproxy / WinDivert，exe 轻量（约 9 MB）
+- 不占用系统代理，证书只对 webcast 域生效
 """
 import asyncio
+import json
 import logging
 import os
 import re
 import shutil
 import subprocess
+import sys
 import winreg
+from pathlib import Path
 from typing import Callable, Optional
 
-from mitmproxy import http, options
-from mitmproxy.tools.dump import DumpMaster
-
 try:
-    from listener.listener2 import _parse_frame
+    from models import (ChatMessage, ControlMessage, EmojiChatMessage,
+                        EnterMessage, FansclubMessage, FollowMessage,
+                        GiftMessage, LikeMessage, OnlineMessage,
+                        RoomRankMessage, RoomStatsMessage)
 except ImportError:
-    from listener2 import _parse_frame
+    from sys import path as _p
+    _p.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    from models import (ChatMessage, ControlMessage, EmojiChatMessage,
+                        EnterMessage, FansclubMessage, FollowMessage,
+                        GiftMessage, LikeMessage, OnlineMessage,
+                        RoomRankMessage, RoomStatsMessage)
 
 logger = logging.getLogger(__name__)
 
 PROXY_PORT   = 8888
+IPC_PORT     = 18998
 _PROXY_VALUE = f"127.0.0.1:{PROXY_PORT},direct://"
-HOST_FILTER  = ("webcast",)
-_TIMEOUT     = 60.0
+_TIMEOUT     = 60.0          # 等待首条 IPC 消息的超时（秒）
+
+# proxy_shell.exe 在 listener/ 目录下
+_SHELL_MARKER = "proxy_shell.exe"   # 用于检测 patch 中是否已注入 spawn
+
+
+# ─────────────────────────────────────────────
+# 路径注册（主软件启动时调用，让 patch 能找到 exe）
+# ─────────────────────────────────────────────
+
+def save_location() -> None:
+    """将当前项目目录写入 ~/.livehelper/config.json，供 patch_companion 使用。"""
+    exe_dir = os.path.dirname(os.path.abspath(sys.argv[0]))
+    shell_exe = os.path.join(exe_dir, "listener", "proxy_shell.exe")
+    cfg = {"exe_dir": exe_dir, "proxy_shell_exe": shell_exe}
+    cfg_dir = Path.home() / ".livehelper"
+    cfg_dir.mkdir(parents=True, exist_ok=True)
+    with open(cfg_dir / "config.json", "w", encoding="utf-8") as f:
+        json.dump(cfg, f)
+    logger.debug(f"路径已注册: {shell_exe}")
+
+
+def _load_shell_exe() -> Optional[str]:
+    """从 config.json 读取 proxy_shell.exe 路径；回退到本文件旁边。"""
+    cfg_file = Path.home() / ".livehelper" / "config.json"
+    try:
+        cfg = json.loads(cfg_file.read_text(encoding="utf-8"))
+        p = cfg.get("proxy_shell_exe", "")
+        if p and os.path.isfile(p):
+            return p
+    except Exception:
+        pass
+    # 回退：listener4.py 旁边找 proxy_shell.exe
+    fallback = os.path.join(os.path.dirname(os.path.abspath(__file__)), "proxy_shell.exe")
+    return fallback if os.path.isfile(fallback) else None
 
 
 # ─────────────────────────────────────────────
 # 直播伴侣路径查找
 # ─────────────────────────────────────────────
+
 def _find_install_dir() -> Optional[str]:
     subkeys = [
         r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall",
@@ -73,23 +113,16 @@ def _find_install_dir() -> Optional[str]:
 
 
 def find_index_js() -> Optional[str]:
-    """返回直播伴侣 index.js 的完整路径，找不到返回 None。
-
-    直播伴侣使用 Launcher 模式：InstallLocation 是 launcher 目录，
-    实际版本在子目录里，路径由 launcher_config.json 的 cur_path 字段决定。
-    """
+    """返回直播伴侣 index.js 的完整路径。支持 Launcher 多版本目录结构。"""
     root = _find_install_dir()
     if not root:
         return None
 
-    # 候选路径列表，按优先级排列
     candidates: list[str] = []
 
-    # 1. Launcher 模式：读 launcher_config.json 找当前版本子目录
     config_path = os.path.join(root, "launcher_config.json")
     if os.path.isfile(config_path):
         try:
-            import json
             cfg = json.load(open(config_path, encoding="utf-8", errors="ignore"))
             for key in ("cur_path", "new_path"):
                 ver = cfg.get(key, "")
@@ -99,7 +132,6 @@ def find_index_js() -> Optional[str]:
         except Exception:
             pass
 
-    # 2. 直接安装模式（无 launcher）
     for rel in (
         os.path.join("resources", "app", "index.js"),
         os.path.join("resources", "app.asar.unpacked", "index.js"),
@@ -115,73 +147,102 @@ def find_index_js() -> Optional[str]:
 # ─────────────────────────────────────────────
 # Patch / Unpatch
 # ─────────────────────────────────────────────
+
 def is_patched() -> bool:
-    """index.js 中已含我们的代理地址则视为已 patch。"""
     path = find_index_js()
     if not path:
         return False
     try:
-        return f"127.0.0.1:{PROXY_PORT}" in open(path, encoding="utf-8", errors="ignore").read()
+        content = open(path, encoding="utf-8", errors="ignore").read()
+        return f"127.0.0.1:{PROXY_PORT}" in content and _SHELL_MARKER in content
     except Exception:
         return False
 
 
 def patch_companion() -> tuple[bool, str]:
     """
-    向直播伴侣 index.js 注入代理设置并绕过完整性校验。
-    返回 (成功, 提示信息)。
+    向直播伴侣 index.js 注入：
+      1. proxy_shell.exe spawn 代码（开播时自动起代理）
+      2. --proxy-server 参数（流量走 8888）
+      3. 完整性校验绕过
+    同时运行 proxy_shell.exe --setup 安装 CA 证书。
     """
     path = find_index_js()
     if not path:
-        return False, "未找到直播伴侣安装目录，请确认已安装"
+        return False, "未找到直播伴侣安装目录"
+
+    shell_exe = _load_shell_exe()
+    if not shell_exe:
+        return False, "未找到 proxy_shell.exe，请确认软件目录完整"
 
     try:
         content = open(path, encoding="utf-8", errors="ignore").read()
     except Exception as e:
         return False, f"读取 index.js 失败: {e}"
 
-    if f"127.0.0.1:{PROXY_PORT}" in content:
+    if f"127.0.0.1:{PROXY_PORT}" in content and _SHELL_MARKER in content:
         return True, "已经是 patch 状态"
 
-    # 备份原文件（仅首次）
+    # 备份
     bak = path + ".bak"
     if not os.path.exists(bak):
         shutil.copy2(path, bak)
 
-    # 1. 替换已有的 proxy-server appendSwitch 参数值
+    new_content = content
+
+    # 1. proxy-server appendSwitch（替换已有或注入新）
     proxy_re = re.compile(
         r'(\.commandLine\.appendSwitch\s*\(\s*["\']proxy-server["\'],\s*["\'])([^"\']*?)(["\'])'
     )
-    if proxy_re.search(content):
-        new_content = proxy_re.sub(rf'\g<1>{_PROXY_VALUE}\g<3>', content)
+    if proxy_re.search(new_content):
+        new_content = proxy_re.sub(rf'\g<1>{_PROXY_VALUE}\g<3>', new_content)
     else:
-        # 2. 在 app.on('ready'…) 前注入新的 appendSwitch 调用
         ready_re = re.compile(r'(\b(\w+)\.on\s*\(\s*["\']ready["\'])')
-        m = ready_re.search(content)
-        if m:
-            app_var = m.group(2)
-            inject = f'{app_var}.commandLine.appendSwitch("proxy-server","{_PROXY_VALUE}");'
-            new_content = content[:m.start()] + inject + content[m.start():]
-        else:
+        m = ready_re.search(new_content)
+        if not m:
             return False, "未找到合适的注入点，index.js 结构可能已变更"
+        app_var = m.group(2)
+        proxy_inject = f'{app_var}.commandLine.appendSwitch("proxy-server","{_PROXY_VALUE}");'
+        new_content = new_content[:m.start()] + proxy_inject + new_content[m.start():]
 
-    # 3. 绕过直播伴侣自身的完整性校验（避免 patch 后弹"文件损坏"并退出）
-    # 实际 pattern：})(E),!E.ok)return ... app.quit()
-    # 把 ,!VARNAME.ok) 改成 ,false) 让条件永远不成立
-    new_content, n_subs = re.subn(r',!\w+\.ok\)', ',false)', new_content, count=1)
-    if n_subs == 0:
-        logger.warning("未找到完整性校验 pattern，直播伴侣启动时可能弹出文件损坏提示")
+    # 2. spawn proxy_shell.exe（在同一注入点前再插一段）
+    js_path = shell_exe.replace("\\", "\\\\")
+    spawn_code = (
+        f';(function(){{var c=require("child_process");'
+        f'try{{c.spawn("{js_path}",[],{{detached:false,stdio:"ignore",windowsHide:true}});}}'
+        f'catch(e){{}}}}());'
+    )
+    # 找到刚才注入的 proxy_inject（或已有的 appendSwitch），在其前面插入 spawn
+    inject_anchor = proxy_inject if not proxy_re.search(content) else \
+        f'.commandLine.appendSwitch("proxy-server","{_PROXY_VALUE}")'
+    idx = new_content.find("proxy-server")
+    if idx >= 0:
+        # 找到 appendSwitch 那一行的行首位置
+        line_start = new_content.rfind(";", 0, idx) + 1
+        new_content = new_content[:line_start] + spawn_code + new_content[line_start:]
+
+    # 3. 完整性校验绕过
+    new_content, n = re.subn(r',!\w+\.ok\)', ',false)', new_content, count=1)
+    if n == 0:
+        logger.warning("未找到完整性校验 pattern")
 
     try:
         with open(path, "w", encoding="utf-8") as f:
             f.write(new_content)
-        return True, "Patch 成功！请重启直播伴侣使设置生效"
     except Exception as e:
         return False, f"写入 index.js 失败: {e}"
 
+    # 4. 运行 proxy_shell --setup 安装 CA 证书（主软件有管理员权限）
+    try:
+        subprocess.run([shell_exe, "--setup"], capture_output=True, timeout=30)
+        logger.info("proxy_shell --setup 完成")
+    except Exception as e:
+        logger.warning(f"proxy_shell --setup 异常: {e}")
+
+    return True, "Patch 成功！请重启直播伴侣使设置生效"
+
 
 def unpatch_companion() -> tuple[bool, str]:
-    """从备份还原 index.js。"""
     path = find_index_js()
     if not path:
         return False, "未找到直播伴侣"
@@ -195,78 +256,72 @@ def unpatch_companion() -> tuple[bool, str]:
         return False, f"还原失败: {e}"
 
 
-# ─────────────────────────────────────────────
-# mitmproxy CA 证书安装
-# ─────────────────────────────────────────────
-def _install_cert() -> None:
-    cert = os.path.expanduser(r"~\.mitmproxy\mitmproxy-ca-cert.cer")
-    if not os.path.exists(cert):
-        logger.warning("mitmproxy CA 证书未找到，TLS 解密可能失败")
-        return
-    r = subprocess.run(
-        ["certutil", "-addstore", "-f", "ROOT", cert],
-        capture_output=True, text=True, errors="ignore",
-    )
-    if r.returncode == 0:
-        logger.info("mitmproxy CA 证书已安装")
-    else:
-        logger.debug(f"certutil 返回 {r.returncode}（证书可能已存在）")
+def check_path_mismatch() -> bool:
+    """检查 index.js 中注入的 proxy_shell.exe 路径是否与当前路径一致。"""
+    path = find_index_js()
+    if not path:
+        return False
+    shell_exe = _load_shell_exe()
+    if not shell_exe:
+        return False
+    try:
+        content = open(path, encoding="utf-8", errors="ignore").read()
+        js_path = shell_exe.replace("\\", "\\\\")
+        return js_path not in content and _SHELL_MARKER in content
+    except Exception:
+        return False
 
 
 # ─────────────────────────────────────────────
-# mitmproxy addon
+# JSON → model 转换
 # ─────────────────────────────────────────────
-class _DouyinWsAddon:
-    def __init__(self, callback: Callable, on_status: Optional[Callable],
-                 connected: asyncio.Event):
-        self.callback    = callback
-        self.on_status   = on_status
-        self._connected  = connected
-        self._seen_first = False
 
-    def request(self, flow: http.HTTPFlow):
-        if flow.request.headers.get("upgrade", "").lower() == "websocket":
-            logger.info(f"WS 升级: {flow.request.host}{flow.request.path[:80]}")
-
-    def websocket_message(self, flow: http.HTTPFlow):
-        host = flow.request.host or ""
-        if not any(k in host for k in HOST_FILTER):
-            return
-        assert flow.websocket is not None
-        msg = flow.websocket.messages[-1]
-        if msg.from_client:
-            return
-        if not self._seen_first:
-            self._seen_first = True
-            self._connected.set()
-            logger.info("✅ 监听到弹幕 WSS 连接，开始解析")
-            if self.on_status:
-                self.on_status(True)
-        try:
-            for m in _parse_frame(msg.content):
-                self.callback(m)
-        except Exception as e:
-            logger.debug(f"帧解析失败: {e}")
-
-    def websocket_end(self, flow: http.HTTPFlow):
-        if not any(k in (flow.request.host or "") for k in HOST_FILTER):
-            return
-        logger.info("WSS 连接断开")
-        if self.on_status:
-            self.on_status(False)
+def _json_to_msg(data: dict):
+    t = data.get("type", "")
+    try:
+        if t == "chat":
+            return ChatMessage(user=data["user"], user_id=data.get("user_id", ""),
+                               content=data.get("content", ""))
+        if t == "gift":
+            return GiftMessage(user=data["user"], user_id=data.get("user_id", ""),
+                               gift=data.get("gift", ""), gift_id=data.get("gift_id", 0),
+                               count=data.get("count", 1), repeat_end=1)
+        if t == "like":
+            return LikeMessage(user=data["user"], user_id=data.get("user_id", ""),
+                               count=data.get("count", 1))
+        if t == "enter":
+            return EnterMessage(user=data["user"], user_id=data.get("user_id", ""))
+        if t == "follow":
+            return FollowMessage(user=data["user"], user_id=data.get("user_id", ""))
+        if t == "online":
+            return OnlineMessage(current=data.get("current", 0), total=data.get("total", 0))
+        if t == "fansclub":
+            return FansclubMessage(user=data.get("user", ""), user_id=data.get("user_id", ""),
+                                   content=data.get("content", ""))
+        if t == "emoji":
+            return EmojiChatMessage(user=data.get("user", ""), user_id=data.get("user_id", ""),
+                                    emoji_id=data.get("emoji_id", ""),
+                                    default_content=data.get("default_content", ""))
+        if t == "room_stats":
+            return RoomStatsMessage(display_long=data.get("display_long", ""))
+        if t == "control":
+            return ControlMessage(status=data.get("status", 0))
+    except Exception as e:
+        logger.debug(f"json_to_msg [{t}]: {e}")
+    return None
 
 
 # ─────────────────────────────────────────────
-# 对外接口
+# 监听入口（IPC 客户端）
 # ─────────────────────────────────────────────
+
 async def start_listener(
     callback: Callable,
     on_status: Optional[Callable] = None,
-    port: int = PROXY_PORT,
-):
+) -> None:
     """
-    以普通 HTTP 代理模式启动 mitmproxy，等待直播伴侣的 WSS 弹幕连接。
-    需提前执行 patch_companion() 并重启直播伴侣。
+    连接 proxy_shell 的 IPC 端口（18998），接收 JSON 弹幕消息并转发给 callback。
+    60 秒内没有任何消息则超时。
     """
     if not is_patched():
         logger.error("直播伴侣未 patch，请先执行 Patch 操作")
@@ -274,51 +329,52 @@ async def start_listener(
             on_status(False)
         return
 
-    connected = asyncio.Event()
-    opts = options.Options(listen_host="0.0.0.0", listen_port=port)
-    master = DumpMaster(opts, with_termlog=False, with_dumper=False)
-    _install_cert()
-    master.addons.add(_DouyinWsAddon(callback, on_status, connected))
-
-    logger.info(f"代理已启动，监听 0.0.0.0:{port}（{_TIMEOUT:.0f}s 超时）")
-
-    master_task = asyncio.create_task(master.run())
-
-    async def _stop():
-        master.shutdown()
-        master_task.cancel()
-        try:
-            await master_task
-        except (asyncio.CancelledError, Exception):
-            pass
-
     try:
-        await asyncio.wait_for(connected.wait(), timeout=_TIMEOUT)
-    except asyncio.TimeoutError:
-        logger.warning(f"{_TIMEOUT:.0f}s 内未检测到 WSS，请确认直播伴侣已重启并开播")
-        await _stop()
+        reader, writer = await asyncio.wait_for(
+            asyncio.open_connection("127.0.0.1", IPC_PORT),
+            timeout=10,
+        )
+    except Exception as e:
+        logger.error(f"连接 IPC 端口 {IPC_PORT} 失败: {e}（proxy_shell 是否已随直播伴侣启动？）")
         if on_status:
             on_status(False)
         return
-    except asyncio.CancelledError:
-        await _stop()
-        raise
+
+    logger.info(f"已连接 proxy_shell IPC（{IPC_PORT}），等待弹幕消息…（{_TIMEOUT:.0f}s 超时）")
+
+    async def _recv() -> None:
+        first = True
+        async for line in reader:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                data = json.loads(line)
+                msg = _json_to_msg(data)
+                if msg is None:
+                    continue
+                if first:
+                    first = False
+                    logger.info("✅ 收到首条弹幕，连接正常")
+                    if on_status:
+                        on_status(True)
+                callback(msg)
+            except Exception as e:
+                logger.debug(f"IPC 消息解析失败: {e}")
 
     try:
-        await master_task
+        await asyncio.wait_for(_recv(), timeout=_TIMEOUT)
+    except asyncio.TimeoutError:
+        logger.warning(f"{_TIMEOUT:.0f}s 内未收到消息，请确认直播伴侣已重启并开播")
     except asyncio.CancelledError:
-        await _stop()
-        raise
+        pass
+    except Exception as e:
+        logger.error(f"IPC 接收异常: {e}")
     finally:
+        try:
+            writer.close()
+            await writer.wait_closed()
+        except Exception:
+            pass
         if on_status:
             on_status(False)
-
-
-if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO,
-                        format="%(asctime)s | %(levelname)s | %(message)s")
-
-    def _cb(msg): print(f"[消息] {msg}")
-    def _st(c):   print(f"[状态] {'已连接' if c else '已断开'}")
-
-    asyncio.run(start_listener(_cb, on_status=_st))
