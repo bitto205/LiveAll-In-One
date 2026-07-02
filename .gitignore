@@ -18,3 +18,6 @@ ws_samples/
 listener/proxy_shell.build
 listener/proxy_shell.dist
 listener/proxy_shell.onefile-build
+_bench_pages.py
+_bench_startup.py
+requirements.txt
