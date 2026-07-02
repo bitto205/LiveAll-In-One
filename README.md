@@ -1,4 +1,4 @@
-# LiveAll-in-one/LiveAIO
+# LiveAll-In-One/LiveAIO
 
 LiveAIO 是一个给抖音直播使用的辅助工具。它可以连接直播间，接收弹幕、礼物、点赞、关注、进场、在线人数等消息，再把这些消息交给不同的小工具使用。
 
