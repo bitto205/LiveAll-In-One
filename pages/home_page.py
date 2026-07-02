@@ -333,7 +333,6 @@ class _WebRoutePage(QWidget, ConnPageMixin):
         self._back_btn = QPushButton("← 返回选择线路")
         self._back_btn.setCursor(Qt.PointingHandCursor)
         self._back_btn.clicked.connect(self._home.show_picker)
-        lay.addWidget(self._back_btn)
 
         title = QLabel(self._title_text)
         title.setObjectName("PageTitle")
@@ -404,7 +403,8 @@ class _WebRoutePage(QWidget, ConnPageMixin):
         c3.addWidget(self._conn_btn)
         c3.addWidget(self._conn_label)
         lay.addWidget(card3)
-
+        lay.addSpacing(8)
+        lay.addWidget(self._back_btn, alignment=Qt.AlignLeft)
         lay.addStretch()
 
         root = QVBoxLayout(self)
@@ -543,7 +543,6 @@ class _Route3Page(QWidget, ConnPageMixin):
         self._back_btn = QPushButton("← 返回选择线路")
         self._back_btn.setCursor(Qt.PointingHandCursor)
         self._back_btn.clicked.connect(self._home.show_picker)
-        lay.addWidget(self._back_btn)
 
         title = QLabel(_ROUTE_META["3"]["title"])
         title.setObjectName("PageTitle")
@@ -613,6 +612,8 @@ class _Route3Page(QWidget, ConnPageMixin):
         conn_lay.addWidget(self._conn_label)
 
         lay.addWidget(conn_card)
+        lay.addSpacing(8)
+        lay.addWidget(self._back_btn, alignment=Qt.AlignLeft)
         lay.addStretch()
 
         root = QVBoxLayout(self)
@@ -802,7 +803,6 @@ class _Route4Page(QWidget, ConnPageMixin):
         self._back_btn = QPushButton("← 返回选择线路")
         self._back_btn.setCursor(Qt.PointingHandCursor)
         self._back_btn.clicked.connect(self._home.show_picker)
-        lay.addWidget(self._back_btn)
 
         title = QLabel(_ROUTE_META["4"]["title"])
         title.setObjectName("PageTitle")
@@ -868,6 +868,8 @@ class _Route4Page(QWidget, ConnPageMixin):
         conn_lay.addWidget(self._conn_label)
 
         lay.addWidget(conn_card)
+        lay.addSpacing(8)
+        lay.addWidget(self._back_btn, alignment=Qt.AlignLeft)
         lay.addStretch()
 
         root = QVBoxLayout(self)
