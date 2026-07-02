@@ -1,4 +1,4 @@
-﻿"""绾胯矾 3锛歮itmproxy local 妯″紡鎷︽埅鐩存挱浼翠荆 WSS銆?""
+﻿"""线路 3：mitmproxy local 模式拦截直播伴侣 WSS。"""
 import asyncio
 import logging
 import os
@@ -9,8 +9,8 @@ from typing import Awaitable, Callable, Optional
 from mitmproxy import http, options
 from mitmproxy.tools.dump import DumpMaster
 
-from listener.log_util import get_logger, on_connect_success
 from listener.LiveProtobuf import parse_frame
+from listener.log_util import get_logger, on_connect_success
 
 logger = get_logger(__name__)
 
@@ -31,7 +31,7 @@ def check_system_proxy() -> dict:
                 server = ""
         return {"enabled": bool(enable), "server": server or ""}
     except Exception as e:
-        logger.debug(f"璇诲彇绯荤粺浠ｇ悊澶辫触: {e}")
+        logger.debug(f"读取系统代理失败: {e}")
         return {"enabled": False, "server": ""}
 
 
@@ -48,7 +48,7 @@ def run_page_check() -> dict:
     _page_proxy_snapshot = proxy["enabled"]
     status = get_page_status()
     logger.info(
-        "[绾胯矾3 椤甸潰妫€娴媇 浼翠荆鐩綍=%s | index.js=%s | 宸叉敼鍐?%s | 绯荤粺浠ｇ悊=%s | server=%s",
+        "[线路3 页面检测] 伴侣目录=%s | index.js=%s | 已改写=%s | 系统代理=%s | server=%s",
         status["companion_installed"],
         status["index_js_found"],
         status["index_modified"],
@@ -73,25 +73,24 @@ def get_page_status() -> dict:
 def _install_mitmproxy_cert() -> None:
     cert_path = os.path.expanduser(r"~\.mitmproxy\mitmproxy-ca-cert.cer")
     if not os.path.exists(cert_path):
-        logger.warning("mitmproxy CA 璇佷功鏂囦欢鏈壘鍒帮紝TLS 瑙ｅ瘑鍙兘澶辫触")
+        logger.warning("mitmproxy CA 证书文件未找到，TLS 解密可能失败")
         return
     result = subprocess.run(
         ["certutil", "-addstore", "-f", "ROOT", cert_path],
         capture_output=True, text=True, errors="ignore",
     )
     if result.returncode == 0:
-        logger.info("mitmproxy CA 璇佷功宸插畨瑁呭埌绯荤粺鍙椾俊浠绘牴璇佷功锛孴LS 瑙ｅ瘑灏辩华")
+        logger.info("mitmproxy CA 证书已安装到系统受信任根证书，TLS 解密就绪")
     else:
-        logger.debug(f"certutil 杩斿洖 {result.returncode}锛堣瘉涔﹀彲鑳藉凡瀛樺湪锛?)
+        logger.debug(f"certutil 返回 {result.returncode}（证书可能已存在）")
 
 
-TARGET_PROCESS = "鐩存挱浼翠荆.exe"
+TARGET_PROCESS = "直播伴侣.exe"
 HOST_FILTER_KEYWORDS = ("webcast",)
 
 
 class _DouyinWsAddon:
-    def __init__(self, callback: Callable, on_status: Optional[Callable],
-                 connected: asyncio.Event):
+    def __init__(self, callback: Callable, on_status: Optional[Callable], connected: asyncio.Event):
         self.callback = callback
         self.on_status = on_status
         self._connected = connected
@@ -99,7 +98,7 @@ class _DouyinWsAddon:
 
     def request(self, flow: http.HTTPFlow):
         if flow.request.headers.get("upgrade", "").lower() == "websocket":
-            logger.info(f"WS 鍗囩骇璇锋眰: {flow.request.host}{flow.request.path[:80]}")
+            logger.info(f"WS 升级请求: {flow.request.host}{flow.request.path[:80]}")
 
     def websocket_message(self, flow: http.HTTPFlow):
         host = flow.request.host or ""
@@ -114,14 +113,14 @@ class _DouyinWsAddon:
         try:
             msgs = parse_frame(message.content)
         except Exception as e:
-            logger.debug(f"甯цВ鏋愬け璐? {e}")
+            logger.debug(f"帧解析失败: {e}")
             return
 
         if msgs and not self._live_confirmed:
             self._live_confirmed = True
             self._connected.set()
             on_connect_success("listener3")
-            logger.info("鉁?鏀跺埌鍒濆鐩存挱娑堟伅锛岃繛鎺ユ垚鍔?)
+            logger.info("收到初始直播消息，连接成功")
             if self.on_status:
                 self.on_status(True)
 
@@ -129,7 +128,7 @@ class _DouyinWsAddon:
             try:
                 self.callback(msg)
             except Exception as e:
-                logger.error(f"callback 寮傚父: {e}")
+                logger.error(f"callback 异常: {e}")
 
     def websocket_end(self, flow: http.HTTPFlow):
         host = flow.request.host or ""
@@ -137,14 +136,14 @@ class _DouyinWsAddon:
             return
         if not self._live_confirmed:
             return
-        logger.info("WSS 杩炴帴宸叉柇寮€")
+        logger.info("WSS 连接已断开")
         self._live_confirmed = False
         if self.on_status:
             self.on_status(False)
 
 
 async def shutdown() -> None:
-    """褰诲簳鍏抽棴 mitmproxy / WinDivert锛堝垏鎹㈢嚎璺垨鍙栨秷杩炴帴鏃惰皟鐢級銆?""
+    """彻底关闭 mitmproxy / WinDivert（切换线路或取消连接时调用）。"""
     global _shutdown_fn
     fn = _shutdown_fn
     _shutdown_fn = None
@@ -164,8 +163,8 @@ async def start_listener(
     _install_mitmproxy_cert()
     master.addons.add(_DouyinWsAddon(callback, on_status, connected))
 
-    logger.info(f"local 妯″紡宸插惎鍔紝鎷︽埅杩涚▼: {target_process}")
-    logger.info("璇峰湪鐩存挱浼翠荆涓紑鎾紝绛夊緟 WSS 杩炴帴鍙婂垵濮嬫秷鎭€?)
+    logger.info(f"local 模式已启动，拦截进程: {target_process}")
+    logger.info("请在直播伴侣中开播，等待 WSS 连接及初始消息…")
 
     master_task = asyncio.create_task(master.run())
 
@@ -213,9 +212,9 @@ if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
 
     def _demo_callback(msg):
-        print(f"[鏀跺埌娑堟伅] {msg}")
+        print(f"[收到消息] {msg}")
 
     def _demo_status(connected: bool):
-        print(f"[鐘舵€乚 {'宸茶繛鎺? if connected else '宸叉柇寮€'}")
+        print(f"[状态] {'已连接' if connected else '已断开'}")
 
     asyncio.run(start_listener(_demo_callback, on_status=_demo_status))
