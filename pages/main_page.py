@@ -229,7 +229,7 @@ class TitleBar(QWidget):
         lay.setContentsMargins(14, 0, 0, 0)
         lay.setSpacing(0)
 
-        title = QLabel("LiveHelper")
+        title = QLabel("LiveAIO")
         title.setObjectName("AppTitle")
         lay.addWidget(title)
         lay.addStretch()
