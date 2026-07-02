@@ -1,0 +1,7 @@
+# LiveHelper — core dependencies
+PySide6>=6.11.0
+playwright>=1.40.0
+protobuf>=4.25.0
+mitmproxy>=12.0.0
+mitmproxy-windows>=0.12.0
+cryptography>=42.0.0

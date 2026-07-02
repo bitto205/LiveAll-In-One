@@ -21,11 +21,11 @@ import asyncio
 import json
 import logging
 import os
-from datetime import datetime
 from typing import Callable
 
 from playwright.async_api import async_playwright
 
+from listener.log_util import get_logger, make_msg_logger, on_connect_success
 from models import (
     ChatMessage,
     ControlMessage,
@@ -41,42 +41,7 @@ from models import (
     RoomStatsMessage,
 )
 
-# ─────────────────────────────────────────────
-# 目录
-# ─────────────────────────────────────────────
-os.makedirs("log", exist_ok=True)
-os.makedirs("msg_log", exist_ok=True)
-
-_ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-
-# ─────────────────────────────────────────────
-# 主日志：系统事件，不含 msg 内容
-# ─────────────────────────────────────────────
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)s | %(message)s",
-    handlers=[
-        logging.FileHandler(f"log/listener1_{_ts}.log", encoding="utf-8"),
-        logging.StreamHandler(),
-    ],
-)
-logger = logging.getLogger(__name__)
-
-
-# ─────────────────────────────────────────────
-# msg 日志：仅 debug=True 时启用
-# ─────────────────────────────────────────────
-def _make_msg_logger(live_id: str) -> logging.Logger:
-    import re
-    safe_id = re.sub(r'[\\/*?:"<>|]', '_', live_id)
-    name = f"msg_{safe_id}_{_ts}"
-    ml = logging.getLogger(name)
-    ml.setLevel(logging.INFO)
-    h = logging.FileHandler(f"msg_log/{safe_id}_{_ts}.log", encoding="utf-8")
-    h.setFormatter(logging.Formatter("%(asctime)s | %(message)s"))
-    ml.addHandler(h)
-    ml.propagate = False
-    return ml
+logger = get_logger(__name__)
 
 
 # ─────────────────────────────────────────────
@@ -226,7 +191,7 @@ async def _run(
     debug: bool,
     on_status: Callable[[bool], None] | None,
 ):
-    msg_logger = _make_msg_logger(live_id) if debug else None
+    msg_logger = make_msg_logger(live_id) if debug else None
 
     def _emit_status(val: bool):
         if on_status:
@@ -269,6 +234,7 @@ async def _run(
                 if built:
                     if not _state["live_confirmed"]:
                         _state["live_confirmed"] = True
+                        on_connect_success("listener1")
                         logger.info("✅ 直播间正在直播")
                         _emit_status(True)
                     if msg_logger:

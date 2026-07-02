@@ -1,24 +1,10 @@
 """
-theme.py — 全局色彩方案
-
-五套专业级配色，均来自主流设计社区：
-  · Catppuccin Latte  — github.com/catppuccin（官方浅色）
-  · Catppuccin Mocha  — github.com/catppuccin（官方深色）
-  · Nord Light        — nordtheme.com（极地浅色）
-  · Nord Dark         — nordtheme.com（极地深色）
-  · Solarized         — ethanschoonover.com/solarized（经典护眼浅色）
-
-切换主题：theme.set_theme(name) → 触发所有 on_change 回调
-读取颜色：theme.get()[key]
+theme.py — 全局色彩方案（4 套主题，config 键 theme）
 """
 from __future__ import annotations
 
-# ─────────────────────────────────────────────
-# 方案定义
-# ─────────────────────────────────────────────
 THEMES: dict[str, dict] = {
 
-    # ── 拿铁奶咖（Catppuccin Latte）────────────
     "拿铁奶咖": {
         "bg":          "#eff1f5",
         "sidebar":     "#e6e9ef",
@@ -27,14 +13,13 @@ THEMES: dict[str, dict] = {
         "active":      "#ccd0da",
         "active_line": "#1e66f5",
         "text":        "#4c4f69",
-        "text_muted":  "#5c5f77",   # subtext1，对比度 5.2:1（原 subtext0 4.1:1）
+        "text_muted":  "#5c5f77",
         "border":      "#ccd0da",
         "win_edge":    "#bcc0cc",
         "close_hover": "#d20f39",
         "btn_hover":   "#ccd0da",
     },
 
-    # ── 深焙摩卡（Catppuccin Mocha）────────────
     "深焙摩卡": {
         "bg":          "#1e1e2e",
         "sidebar":     "#181825",
@@ -50,7 +35,6 @@ THEMES: dict[str, dict] = {
         "btn_hover":   "#45475a",
     },
 
-    # ── 极夜深蓝（Nord Dark）──────────────────
     "极夜深蓝": {
         "bg":          "#2e3440",
         "sidebar":     "#252b35",
@@ -66,7 +50,6 @@ THEMES: dict[str, dict] = {
         "btn_hover":   "#434c5e",
     },
 
-    # ── 日晷护眼（Solarized Light）────────────
     "日晷护眼": {
         "bg":          "#fdf6e3",
         "sidebar":     "#eee8d5",
@@ -75,7 +58,7 @@ THEMES: dict[str, dict] = {
         "active":      "#d9d2b5",
         "active_line": "#268bd2",
         "text":        "#586e75",
-        "text_muted":  "#657b83",   # base00，对比度 3.9:1（原 base1 仅 2.4:1）
+        "text_muted":  "#657b83",
         "border":      "#e2dcc8",
         "win_edge":    "#d9d2b5",
         "close_hover": "#dc322f",
@@ -83,9 +66,6 @@ THEMES: dict[str, dict] = {
     },
 }
 
-# ─────────────────────────────────────────────
-# 运行时状态
-# ─────────────────────────────────────────────
 def _load_saved() -> str:
     try:
         import config
@@ -132,3 +112,111 @@ def set_theme(name: str):
             cb(name)
         except Exception:
             pass
+
+
+def qss_outlined(C: dict | None = None, h: int = 36) -> str:
+    C = C or get()
+    return f"""
+        QPushButton {{
+            background: {C["card"]};
+            color: {C["active_line"]};
+            border: 1.5px solid {C["active_line"]};
+            border-radius: 8px;
+            font-size: 13px;
+            font-weight: 600;
+            min-height: {h}px;
+            padding: 0 16px;
+        }}
+        QPushButton:hover {{
+            background: {C["hover"]};
+            border: 1.5px solid {C["active_line"]};
+        }}
+    """
+
+
+def qss_disabled(C: dict | None = None, h: int = 36) -> str:
+    C = C or get()
+    return f"""
+        QPushButton {{
+            background: {C["border"]};
+            color: {C["text_muted"]};
+            border: none;
+            border-radius: 8px;
+            font-size: 13px;
+            min-height: {h}px;
+            padding: 0 16px;
+        }}
+    """
+
+
+def qss_success(C: dict | None = None, h: int = 36) -> str:
+    C = C or get()
+    return f"""
+        QPushButton {{
+            background: {C["active_line"]};
+            color: #ffffff;
+            border: none;
+            border-radius: 8px;
+            font-size: 13px;
+            font-weight: 600;
+            min-height: {h}px;
+            padding: 0 16px;
+        }}
+    """
+
+
+def qss_danger(C: dict | None = None, h: int = 36) -> str:
+    C = C or get()
+    return f"""
+        QPushButton {{
+            background: {C["close_hover"]};
+            color: #ffffff;
+            border: none;
+            border-radius: 8px;
+            font-size: 13px;
+            font-weight: 600;
+            min-height: {h}px;
+            padding: 0 16px;
+        }}
+        QPushButton:hover {{ background: {C["active"]}; }}
+    """
+
+
+def qss_back(C: dict | None = None) -> str:
+    C = C or get()
+    return f"""
+        QPushButton {{
+            background: transparent;
+            color: {C["text_muted"]};
+            border: none;
+            font-size: 13px;
+            padding: 4px 8px;
+        }}
+        QPushButton:hover {{
+            color: {C["active_line"]};
+        }}
+    """
+
+
+def qss_muted_label(C: dict | None = None, size: int = 13) -> str:
+    C = C or get()
+    return (
+        f"background: transparent; font-size: {size}px;"
+        f" color: {C['text_muted']};"
+    )
+
+
+def qss_error_label(C: dict | None = None, size: int = 13) -> str:
+    C = C or get()
+    return (
+        f"background: transparent; font-size: {size}px;"
+        f" color: {C['close_hover']};"
+    )
+
+
+def qss_accent_label(C: dict | None = None, size: int = 13) -> str:
+    C = C or get()
+    return (
+        f"background: transparent; font-size: {size}px;"
+        f" color: {C['active_line']};"
+    )

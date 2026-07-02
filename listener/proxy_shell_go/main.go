@@ -19,13 +19,20 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 )
 
 const (
-	proxyPort = 8888
-	ipcPort   = 18998
+	proxyPort = 19088
+	ipcPort   = 19098
+)
+
+const (
+	ipcCtrlPrefix  = "__LH_CTRL__:"
+	ctrlWSConnected = "WS_CONNECTED"
+	ctrlWSDisconnected = "WS_DISCONNECTED"
 )
 
 // ─── Paths ────────────────────────────────────────────────────────────────────
@@ -154,6 +161,27 @@ type ipcServer struct {
 	mu   sync.Mutex // guards conn
 	wmu  sync.Mutex // serialises writes
 	conn net.Conn
+}
+
+var liveActive uint32 // 1=live websocket active, 0=inactive
+
+func isLiveActive() bool {
+	return atomic.LoadUint32(&liveActive) == 1
+}
+
+func setLiveActive(active bool, ipc *ipcServer, host string) {
+	var next uint32
+	state := ctrlWSDisconnected
+	if active {
+		next = 1
+		state = ctrlWSConnected
+	}
+	prev := atomic.SwapUint32(&liveActive, next)
+	if prev == next {
+		return
+	}
+	logger.Printf("live state changed: %v (host=%s)", active, host)
+	ipc.push([]byte(ipcCtrlPrefix + state))
 }
 
 func (s *ipcServer) serve() {
@@ -307,8 +335,11 @@ func writeWSFrame(w io.Writer, opcode byte, payload []byte, fin bool) error {
 func relayWS(clientR io.Reader, clientW io.Writer,
 	serverR io.Reader, serverW io.Writer,
 	host string, ipc *ipcServer) {
+	setLiveActive(true, ipc, host)
+
 	// server → client: reassemble fragmented frames, push complete payloads to IPC
 	go func() {
+		defer setLiveActive(false, ipc, host)
 		var acc []byte
 		var curOpcode byte
 		for {
@@ -336,9 +367,11 @@ func relayWS(clientR io.Reader, clientW io.Writer,
 	for {
 		opcode, payload, fin, err := readWSFrame(clientR)
 		if err != nil {
+			setLiveActive(false, ipc, host)
 			return
 		}
 		if writeWSFrame(serverW, opcode, payload, fin) != nil {
+			setLiveActive(false, ipc, host)
 			return
 		}
 	}

@@ -16,13 +16,19 @@ class ToolsPage(BasePage):
         super().__init__()
         self._open_wins: dict[str, object] = {}   # name → window
         self._scroll: QScrollArea | None = None
+        self._built = False
 
         # 根布局只创建一次，_build 往里加 scroll
         self._root_lay = QVBoxLayout(self)
         self._root_lay.setContentsMargins(0, 0, 0, 0)
 
-        self._build()
-        _theme.on_change(lambda _: self._rebuild())
+        _theme.on_change(lambda _: self._rebuild() if self._built else None)
+
+    def showEvent(self, event):
+        if not self._built:
+            self._build()
+            self._built = True
+        super().showEvent(event)
 
     def _build(self):
         import tools as _tools
@@ -108,6 +114,8 @@ class ToolsPage(BasePage):
 
     def _rebuild(self):
         """主题切换时替换 scroll 内容（不重建根布局）。"""
+        if not self._built:
+            return
         if self._scroll is not None:
             self._root_lay.removeWidget(self._scroll)
             self._scroll.deleteLater()

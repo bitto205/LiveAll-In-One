@@ -5,6 +5,7 @@ state.json
 .DS_store
 Thumbs.db
 .vscode/
+.cursor/
 msg_log/
 log/
 config.json
@@ -12,6 +13,8 @@ browsers/
 build/
 spider.py
 0000.py
+ws_dump.py
+ws_samples/
 listener/proxy_shell.build
 listener/proxy_shell.dist
 listener/proxy_shell.onefile-build

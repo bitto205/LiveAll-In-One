@@ -13,7 +13,6 @@ import json
 import logging
 import os
 import time
-from datetime import datetime
 
 from playwright.async_api import async_playwright
 
@@ -22,23 +21,28 @@ from playwright.async_api import async_playwright
 # ─────────────────────────────────────────────
 STATE_FILE = "state.json"
 
-os.makedirs("log", exist_ok=True)
-_ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)s | %(message)s",
-    handlers=[
-        logging.FileHandler(f"log/login_{_ts}.log", encoding="utf-8"),
-        logging.StreamHandler(),
-    ],
-)
 logger = logging.getLogger(__name__)
 
 
-# ─────────────────────────────────────────────
-# 第一层：检查 sessionid 是否过期
-# ─────────────────────────────────────────────
+def get_login_ui_state(state_file: str = STATE_FILE) -> tuple[str, bool]:
+    """线路 1/2 登录态 UI：(状态文案, 登录按钮是否可点)。"""
+    if not os.path.exists(state_file):
+        return "❌ 未登录", True
+    ok, detail = _check_cookie_expiry(state_file)
+    if not ok:
+        if "过期" in detail:
+            return "⚠️ 登录已过期", True
+        if "未找到" in detail:
+            return "⚠️ 未找到登录凭证", True
+        return f"❌ {detail}", True
+    if "无过期" in detail:
+        return "✅ 已登录", False
+    if "还剩" in detail:
+        days = detail.split("还剩约")[-1].split("天")[0].strip()
+        return f"✅ 已登录，还剩约 {days} 天", False
+    return "✅ 已登录", False
+
+
 def _check_cookie_expiry(state_file: str) -> tuple[bool, str]:
     try:
         with open(state_file, "r", encoding="utf-8") as f:
@@ -204,23 +208,27 @@ async def _run_login(state_file: str) -> bool:
 # ─────────────────────────────────────────────
 def do_login(state_file: str = STATE_FILE) -> bool:
     """
-    两层检测，按需登录：
-        1. state.json 不存在  →  扫码
-        2. state.json 存在    →  检查 sessionid 过期时间
-               未过期  →  直接返回 True，跳过登录
-               已过期  →  扫码
+    两层检测，按需登录。
     返回 True = 登录态有效，False = 登录失败。
     """
+    import os
+    from datetime import datetime
+    from listener.log_util import on_connect_success
+
     if not os.path.exists(state_file):
         logger.info(f"{state_file} 不存在，需要登录")
     else:
         valid, reason = _check_cookie_expiry(state_file)
         if valid:
+            on_connect_success("login")
             logger.info(f"✅ 登录有效：{reason}")
             return True
         logger.warning(f"⚠️  登录失效：{reason}，重新登录")
 
-    return asyncio.run(_run_login(state_file))
+    ok = asyncio.run(_run_login(state_file))
+    if ok:
+        on_connect_success("login")
+    return ok
 
 
 # ─────────────────────────────────────────────

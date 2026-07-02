@@ -690,15 +690,10 @@ class DanmuWindow(QMainWindow):
 # ─────────────────────────────────────────────
 # 控制面板（注册为 Tool）
 # ─────────────────────────────────────────────
-def _reg(name, desc="", icon="🔧", order=99):
-    def deco(cls):
-        from tools import _REGISTRY, _ToolMeta
-        _REGISTRY.append(_ToolMeta(cls, name, desc, icon, order))
-        return cls
-    return deco
+from tools import register_tool
 
 
-@_reg(name="弹幕机", desc="透明悬浮弹幕显示窗口", icon="💬", order=1)
+@register_tool(name="弹幕机", desc="透明悬浮弹幕显示窗口", icon="💬", order=1)
 class DanmuTool(QMainWindow):
     """弹幕机控制面板（单例）。"""
 

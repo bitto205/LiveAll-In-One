@@ -1,14 +1,5 @@
 """
-main.py — 应用 Hub + 入口
-
-职责：
-    1. 启动 QApplication 和 MainPage
-    2. 管理 ListenerThread（在独立线程跑 asyncio + Playwright）
-    3. 作为数据中转：listener → App 信号 → 所有订阅者
-       多个工具/页面只需 connect(app.message_received) 就能收到数据
-
-启动：
-    python main.py
+main.py — 应用入口：QApplication + ListenerThread + 消息 Hub
 """
 
 import sys, os
@@ -17,7 +8,7 @@ os.environ["PLAYWRIGHT_BROWSERS_PATH"] = os.path.join(os.path.dirname(os.path.ab
 import asyncio
 
 from PySide6.QtWidgets import QApplication
-from PySide6.QtCore    import QThread, Signal, QObject, QtMsgType, qInstallMessageHandler
+from PySide6.QtCore    import QThread, Signal, QObject, QtMsgType, qInstallMessageHandler, Qt, QTimer
 
 
 def _qt_msg_handler(msg_type, _, msg):  # _ = QMessageLogContext (required by Qt API)
@@ -35,12 +26,11 @@ def _qt_msg_handler(msg_type, _, msg):  # _ = QMessageLogContext (required by Qt
 qInstallMessageHandler(_qt_msg_handler)
 
 from main_page import MainPage
-import pages   # 触发所有 @register
+import pages
+
+logger = __import__("logging").getLogger(__name__)
 
 
-# ─────────────────────────────────────────────
-# ListenerThread — 在独立线程里跑 asyncio
-# ─────────────────────────────────────────────
 class ListenerThread(QThread):
     message_received = Signal(object)
     status_changed   = Signal(bool)
@@ -65,11 +55,9 @@ class ListenerThread(QThread):
             self._loop.run_until_complete(self._listen())
         except RuntimeError as e:
             if "Event loop stopped before Future completed" not in str(e):
-                import logging
-                logging.getLogger(__name__).error(f"ListenerThread error: {e}")
+                logger.error(f"ListenerThread error: {e}")
         except Exception as e:
-            import logging
-            logging.getLogger(__name__).error(f"ListenerThread error: {e}")
+            logger.error(f"ListenerThread error: {e}")
         finally:
             try:
                 pending = asyncio.all_tasks(self._loop)
@@ -114,28 +102,18 @@ class ListenerThread(QThread):
     def stop(self):
         """发出停止信号，不阻塞主线程。"""
         if self._loop and not self._loop.is_closed():
+            if self._route == "3":
+                import listener.listener3 as l3
+                try:
+                    fut = asyncio.run_coroutine_threadsafe(l3.shutdown(), self._loop)
+                    fut.result(timeout=8)
+                except Exception:
+                    pass
             self._loop.call_soon_threadsafe(self._loop.stop)
         self.quit()
-        # 不调 wait()，否则阻塞 Qt 主线程导致 UI 卡住
 
 
-# ─────────────────────────────────────────────
-# App — 应用 Hub
-# ─────────────────────────────────────────────
 class App(QObject):
-    """
-    数据中转中心。
-
-    所有对 listener 数据感兴趣的组件都连接这里的信号：
-        app.message_received.connect(my_handler)
-        app.status_changed.connect(my_status_handler)
-
-    连接 / 断开直播间：
-        app.connect("YOUR_LIVE_ID")
-        app.disconnect()
-    """
-
-    # ── 对外开放的信号（多个页面/工具可同时订阅）──
     message_received = Signal(object)
     status_changed   = Signal(bool)
 
@@ -143,15 +121,13 @@ class App(QObject):
         super().__init__()
         self._qt     = QApplication(argv)
         self._thread: ListenerThread | None = None
-
-        # 创建主窗口
+        self._pending_connect: tuple[str, str] | None = None  # (live_id, route)
+        self._stopping = False
         self._win = MainPage()
 
-        # 把 App 信号接到 MainPage 的广播方法（统一分发给所有已注册页面）
         self.message_received.connect(self._win.broadcast_message)
         self.status_changed.connect(self._win.broadcast_status)
 
-        # 注入 connect/disconnect 到 HomePage
         from pages.home_page import HomePage
         home = self._win.get_page(HomePage)
         if home:
@@ -160,36 +136,83 @@ class App(QObject):
                 on_disconnect = self.disconnect,
             )
 
-    # ── 连接直播间 ────────────────────────────────
     def connect(self, live_id: str, route: str = "2"):
-        """启动 ListenerThread，连接指定直播间。route='1' 用 listener1，'2' 用 listener2。"""
-        self.disconnect()
+        """先结束当前 listener，待线程完全退出后再启动目标线路。"""
+        from pages.home_page import HomePage
+        home = self._win.get_page(HomePage)
+        if home:
+            home.preempt_other_listeners(route)
+
+        self._pending_connect = (live_id, route)
+        if self._thread and not self._thread.isRunning():
+            self._thread = None
+        if self._thread and self._thread.isRunning():
+            if not self._stopping:
+                self._stopping = True
+                self._stop_listener(wait_callback=True)
+            return
+        self._start_listener()
+
+    def _start_listener(self) -> None:
+        pending = self._pending_connect
+        if not pending:
+            return
+        live_id, route = pending
+        self._pending_connect = None
+
         self._thread = ListenerThread(live_id, route=route)
         self._thread.message_received.connect(self.message_received)
         self._thread.status_changed.connect(self.status_changed)
         self._thread.start()
 
-    # ── 断开直播间 ────────────────────────────────
-    def disconnect(self):
-        """停止当前 ListenerThread，不阻塞主线程。"""
-        if self._thread:
-            thread = self._thread
-            self._thread = None
-            # 线程结束后让 Qt 自动回收，主线程不等待
+    def _stop_listener(self, *, wait_callback: bool) -> None:
+        thread = self._thread
+        if not thread:
+            return
+        self._thread = None
+        if wait_callback:
+            thread.finished.connect(self._on_listener_stopped, Qt.ConnectionType.SingleShotConnection)
+        else:
             thread.finished.connect(thread.deleteLater)
-            thread.stop()
+        thread.stop()
 
-    # ── 运行 ──────────────────────────────────────
+    def _on_listener_stopped(self) -> None:
+        self._stopping = False
+        thread = self.sender()
+        if isinstance(thread, QThread):
+            thread.deleteLater()
+        if self._pending_connect:
+            self._start_listener()
+
+    def disconnect(self):
+        """停止当前 ListenerThread；若正在切换线路则取消待启动目标。"""
+        self._pending_connect = None
+        if not self._thread or not self._thread.isRunning():
+            return
+        if not self._stopping:
+            self._stopping = True
+            self._stop_listener(wait_callback=True)
+
+    def disconnect_and_wait(self, timeout_ms: int = 5000) -> None:
+        """退出前同步等待 listener 结束（仅用于应用关闭）。"""
+        self._pending_connect = None
+        if not self._thread:
+            return
+        if self._thread.isRunning():
+            if not self._stopping:
+                self._stopping = True
+                self._stop_listener(wait_callback=False)
+            self._thread.wait(timeout_ms)
+        self._thread = None
+        self._stopping = False
+
     def run(self) -> int:
         self._win.show()
         result = self._qt.exec()
-        self.disconnect()   # 退出前清理
+        self.disconnect_and_wait()
         return result
 
 
-# ─────────────────────────────────────────────
-# 入口
-# ─────────────────────────────────────────────
 def _ensure_admin() -> None:
     """以管理员身份重新启动，若已是管理员则直接返回。"""
     import ctypes
@@ -202,9 +225,14 @@ def _ensure_admin() -> None:
 
 if __name__ == "__main__":
     _ensure_admin()
-    try:
-        from listener.listener4 import save_location
-        save_location()
-    except Exception:
-        pass
-    sys.exit(App(sys.argv).run())
+
+    def _defer_save_location():
+        try:
+            from listener.listener4 import save_location
+            save_location()
+        except Exception:
+            pass
+
+    app = App(sys.argv)
+    QTimer.singleShot(0, _defer_save_location)
+    sys.exit(app.run())

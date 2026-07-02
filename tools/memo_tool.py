@@ -70,6 +70,18 @@ def _qss():
 # _Toggle 已移至 widgets.ThemedToggle，下面直接使用
 
 
+def _gift_diamonds(msg: GiftMessage) -> int | None:
+    from gift.gift_info import get_diamonds, all_gifts
+    d = get_diamonds(msg.gift)
+    if d is not None:
+        return d
+    if msg.gift_id:
+        for info in all_gifts().values():
+            if info.get("gift_id") == msg.gift_id:
+                return info.get("price")
+    return None
+
+
 def _row(label_text: str, widget: QWidget) -> QHBoxLayout:
     row = QHBoxLayout()
     lbl = QLabel(label_text)
@@ -352,13 +364,7 @@ class _MainTab(QWidget):
 # ─────────────────────────────────────────────
 # 主窗口
 # ─────────────────────────────────────────────
-def register_tool(name, desc="", icon="🔧", order=99):
-    """延迟 import 避免循环引用，直接返回装饰器。"""
-    def decorator(cls):
-        from tools import _REGISTRY, _ToolMeta
-        _REGISTRY.append(_ToolMeta(cls, name, desc, icon, order))
-        return cls
-    return decorator
+from tools import register_tool
 
 
 @register_tool(name="备忘录", desc="将礼物、关注、点赞记录为可消除的列表条目",
@@ -377,8 +383,6 @@ class MemoTool(QMainWindow):
 
         # key → _MemoItem，用于叠加查找
         self._item_map: dict[str, _MemoItem] = {}
-        # key → 上次收到的 comboCount，用于增量计算（兼容无 repeatEnd 的 listener2）
-        self._combo_counts: dict[str, int] = {}
 
         self._build()
         self.setStyleSheet(_qss())
@@ -451,8 +455,7 @@ class MemoTool(QMainWindow):
         # 钻石过滤
         min_dia = _cfg.get(_K["gift_min_dia"], 0)
         if min_dia > 0:
-            from gift.gift_prices import get_diamonds
-            diamonds = get_diamonds(msg.gift)
+            diamonds = _gift_diamonds(msg)
             if diamonds is not None and diamonds < min_dia:
                 return
 

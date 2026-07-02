@@ -11,7 +11,7 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Qt
 
 from base_page import BasePage, BaseSetting
-from widgets   import ThemedComboBox, ThemedToggle  # ← 加 ThemedToggle
+from widgets   import ThemedComboBox, ThemedToggle
 
 
 def _C() -> dict:
@@ -130,85 +130,6 @@ class SystemSettings(BaseSetting):
 
         lay.addStretch()
 
-
-
-# ─────────────────────────────────────────────
-# 内置面板：账号
-# ─────────────────────────────────────────────
-class AccountSettings(BaseSetting):
-    name  = "账号"
-    order = 1
-
-    def __init__(self):
-        super().__init__()
-        lay = QVBoxLayout(self)
-        lay.setContentsMargins(28, 24, 28, 24)
-        lay.setSpacing(16)
-
-        t = QLabel("账号")
-        t.setObjectName("SettingPageTitle")
-        lay.addWidget(t)
-
-        card, inner = self.build_section("登录状态")
-        self._status = QLabel("检测中...")
-        self._status.setObjectName("PageSubtitle")
-        inner.addWidget(self._status)
-
-        self._btn = QPushButton("重新登录")
-        self._btn.setFixedHeight(34)
-        self._btn.setCursor(Qt.PointingHandCursor)
-        self._btn.setStyleSheet(f"""
-            QPushButton {{
-                background: {_C()["active_line"]}; color: #fff;
-                border: none; border-radius: 6px;
-                font-size: 13px; padding: 0 16px;
-            }}
-            QPushButton:hover {{ background: #7B9FFF; }}
-        """)
-        self._btn.clicked.connect(self._do_login)
-        inner.addWidget(self._btn)
-        lay.addWidget(card)
-        lay.addStretch()
-
-        self._refresh()
-
-    def _refresh(self):
-        import json, time
-        f = "state.json"
-        if not os.path.exists(f):
-            self._status.setText("未登录")
-            return
-        try:
-            cookies = json.load(open(f)).get("cookies", [])
-            now = time.time()
-            for c in cookies:
-                if c.get("name") == "sessionid":
-                    exp = c.get("expires", -1)
-                    if exp == -1:
-                        self._status.setText("✅  已登录")
-                    elif exp > now:
-                        self._status.setText(
-                            f"✅  已登录，还剩约 {int((exp-now)/86400)} 天"
-                        )
-                    else:
-                        self._status.setText("⚠️  登录已过期")
-                    return
-            self._status.setText("⚠️  未找到登录凭证")
-        except Exception as e:
-            self._status.setText(f"检测失败: {e}")
-
-    def _do_login(self):
-        try:
-            from listener.login import do_login
-            self._btn.setText("登录中...")
-            self._btn.setEnabled(False)
-            do_login()
-            self._refresh()
-        except Exception as e:
-            self._status.setText(f"登录失败: {e}")
-        finally:
-            self._btn.setText("重新登录")
-            self._btn.setEnabled(True)
 
 
 # ─────────────────────────────────────────────

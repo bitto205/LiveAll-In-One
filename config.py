@@ -1,25 +1,45 @@
-"""
-config.py — 本地配置持久化（key-value，存 config.json）
-"""
-import json, os
+"""本地配置持久化（key-value → config.json）"""
+import json
+import os
+from contextlib import contextmanager
 
 _FILE = "config.json"
 
-def get(key: str, default=None):
+
+def _read() -> dict:
+    if not os.path.exists(_FILE):
+        return {}
     try:
-        if os.path.exists(_FILE):
-            return json.load(open(_FILE, encoding="utf-8")).get(key, default)
+        with open(_FILE, encoding="utf-8") as f:
+            return json.load(f)
     except Exception:
-        pass
-    return default
+        return {}
+
+
+def _write(cfg: dict) -> None:
+    with open(_FILE, "w", encoding="utf-8") as f:
+        json.dump(cfg, f, ensure_ascii=False, indent=2)
+
+
+def get(key: str, default=None):
+    return _read().get(key, default)
+
 
 def set(key: str, value):
     try:
-        cfg = {}
-        if os.path.exists(_FILE):
-            cfg = json.load(open(_FILE, encoding="utf-8"))
+        cfg = _read()
         cfg[key] = value
-        json.dump(cfg, open(_FILE, "w", encoding="utf-8"),
-                  ensure_ascii=False, indent=2)
+        _write(cfg)
     except Exception:
         pass
+
+
+@contextmanager
+def transaction():
+    """原子读写 config.json。"""
+    cfg = _read()
+    try:
+        yield cfg
+        _write(cfg)
+    except Exception:
+        raise

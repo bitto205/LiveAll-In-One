@@ -1,145 +1,189 @@
 """
-test.py — 弹幕机本地测试模拟器
+test.py — 本地 UI 测试：绕过真实 listener，注入模拟弹幕。
 
-启动完整的主程序 UI，绕过真实监听器，直接向消息总线注入模拟直播间数据。
-支持：ChatMessage / GiftMessage / LikeMessage / FollowMessage
+用法: python test.py
 
-用法:
-    python test.py
+模拟环境：
+  - 默认「已连接」
+  - 线路 3/4：虚拟 patch / 无系统代理 / proxy_shell 视为运行中
 """
-import sys, os, random, json
+import sys
+import os
+import random
+
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from PySide6.QtCore import QTimer, QObject
 
-from models import ChatMessage, GiftMessage, LikeMessage, FollowMessage
+from models import (
+    ChatMessage, GiftMessage, LikeMessage, FollowMessage,
+    EnterMessage, OnlineMessage, ControlMessage, FansclubMessage,
+)
 import main as _main
 
 
-# ─────────────────────────────────────────────
-# 素材池
-# ─────────────────────────────────────────────
+class _VirtualEnv:
+    """测试用虚拟环境开关。"""
+    route3_index_modified = False   # False = 未 patch，线路 3 可用
+    route4_patched = True         # True = 已 patch，线路 4 可连
+    system_proxy = False
+    proxy_shell_running = True
+
+
+_V = _VirtualEnv()
+
+
+def _install_test_mocks() -> None:
+    import listener.listener3 as l3
+    import listener.listener4 as l4
+
+    def _r3_status():
+        from listener.listener4 import get_companion_path_fields
+        return {
+            **get_companion_path_fields(),
+            "index_modified": _V.route3_index_modified,
+            "system_proxy": _V.system_proxy,
+        }
+
+    l3.get_page_status = _r3_status
+    l3._page_proxy_snapshot = False
+    def _mock_run_page_check_r3():
+        l3._page_proxy_snapshot = _V.system_proxy
+        return _r3_status()
+
+    l3.run_page_check = _mock_run_page_check_r3
+
+    l4.is_patched = lambda: _V.route4_patched
+    l4.is_index_js_modified = lambda: _V.route3_index_modified
+    l4.is_proxy_shell_running = lambda: _V.proxy_shell_running
+    l4._is_proxy_running = lambda: _V.proxy_shell_running
+
+    _orig_build = l4._build_page_status
+
+    def _page_status():
+        s = _orig_build()
+        s["is_patched"] = _V.route4_patched
+        s["patch_needed"] = not _V.route4_patched
+        s["index_modified"] = _V.route3_index_modified
+        return s
+
+    l4.get_page_status = _page_status
+    l4.run_page_check = lambda: _page_status()
+
+
 _NICK_PARTS = [
-    # 前缀
-    ["小", "大", "超级", "可爱的", "暴躁的", "神秘的", "快乐的",
-     "摸鱼的", "努力的", "佛系", "豪横的", "迷路的"],
-    # 主体
-    ["猫咪", "老虎", "咸鱼王", "柠檬精", "夜猫子", "沙雕", "星际旅客",
-     "小丸子", "天才", "吃货", "萌新", "大佬", "路人甲", "吃瓜群众",
-     "小可爱", "炸弹侠"],
+    ["小", "大", "超级", "可爱的", "暴躁的", "神秘的"],
+    ["猫咪", "老虎", "咸鱼王", "柠檬精", "夜猫子", "沙雕"],
 ]
 
 _CHAT_POOL = [
-    "主播加油！", "好好看哦", "哈哈哈哈哈", "666666",
-    "来了来了", "打卡打卡", "冲冲冲！", "主播唱首歌吧",
-    "今天也很开心", "爱你呀", "求带带", "第一次来",
-    "支持主播", "哇好厉害", "笑死我了", "太可爱了吧",
-    "看了很久了", "冲鸭！", "主播辛苦了", "牛啊牛啊",
-    "好的好的", "一直在这里", "天天来", "关注了！",
-    "我超喜欢这个", "真的厉害", "哈哈哈哈太好笑了",
+    "主播加油！", "666666", "来了来了", "哈哈哈哈哈",
+    "", "   ", "x" * 50,
 ]
 
 
 def _rand_nick() -> str:
-    """随机昵称，≤15 字符。"""
-    prefix = random.choice(_NICK_PARTS[0])
-    body   = random.choice(_NICK_PARTS[1])
-    nick   = prefix + body
-    return nick[:15]
+    return (random.choice(_NICK_PARTS[0]) + random.choice(_NICK_PARTS[1]))[:15]
 
 
 def _rand_uid() -> str:
-    """7 位随机用户 ID。"""
     return str(random.randint(1000000, 9999999))
 
 
 def _rand_chat() -> ChatMessage:
     base = random.choice(_CHAT_POOL)
-    # 随机拼接补充，控制在 30 字以内
-    suffix = random.choice(["", "！", "哈哈", "～", "呀", " 666"])
-    text = (base + suffix)[:30]
-    return ChatMessage(user=_rand_nick(), user_id=_rand_uid(), content=text)
+    return ChatMessage(user=_rand_nick(), user_id=_rand_uid(), content=(base or "空弹幕")[:30])
 
 
 def _rand_like() -> LikeMessage:
-    return LikeMessage(
-        user    = _rand_nick(),
-        user_id = _rand_uid(),
-        count   = random.randint(1, 100),
-    )
+    return LikeMessage(user=_rand_nick(), user_id=_rand_uid(), count=random.randint(1, 100))
 
 
 def _rand_follow() -> FollowMessage:
     return FollowMessage(user=_rand_nick(), user_id=_rand_uid())
 
 
-# ── 礼物表 ───────────────────────────────────
-def _load_gifts() -> list[tuple[str, int]]:
-    """从 gift/gift_info.json 读取礼物列表，返回 [(礼物名, gift_id), ...]。"""
+def _rand_enter() -> EnterMessage:
+    return EnterMessage(user=_rand_nick(), user_id=_rand_uid())
+
+
+def _rand_online() -> OnlineMessage:
+    return OnlineMessage(current=random.randint(1, 5000), total=random.randint(1000, 99999))
+
+
+def _rand_control_end() -> ControlMessage:
+    return ControlMessage(status=3)
+
+
+def _rand_fansclub() -> FansclubMessage:
+    return FansclubMessage(user=_rand_nick(), user_id=_rand_uid(), content="加入粉丝团")
+
+
+def _load_gifts():
     try:
         from gift.gift_info import all_gifts
-        return [(name, info["gift_id"]) for name, info in all_gifts().items()]
+        return [(n, i["gift_id"]) for n, i in all_gifts().items()]
     except Exception:
-        return [("爱心", 463), ("玫瑰", 2001), ("嘉年华", 3)]
+        return [("小心心", 463), ("玫瑰", 2001)]
 
 
 _GIFTS = _load_gifts()
 
 
 def _rand_gift() -> GiftMessage:
-    gift_name, gift_id = random.choice(_GIFTS)
+    name, gid = random.choice(_GIFTS)
     return GiftMessage(
-        user       = _rand_nick(),
-        user_id    = _rand_uid(),
-        gift       = gift_name,
-        gift_id    = gift_id,
-        count      = random.randint(1, 100),
-        repeat_end = 1,     # 标记为"连击结束帧"，让处理逻辑正常触发
+        user=_rand_nick(), user_id=_rand_uid(),
+        gift=name, gift_id=gid,
+        count=random.randint(1, 10),
+        repeat_end=1,
     )
 
 
-# ─────────────────────────────────────────────
-# 模拟器
-# ─────────────────────────────────────────────
-class Simulator(QObject):
-    """
-    向 App.message_received 定时注入随机消息。
-    权重：弹幕 50% / 点赞 30% / 关注 10% / 礼物 10%
-    间隔：600~1400ms 随机，模拟真实波动。
-    """
+def _rand_gift_mid_combo() -> GiftMessage:
+    """连击中间帧（repeat_end=0），多数 UI 应忽略。"""
+    name, gid = random.choice(_GIFTS)
+    return GiftMessage(
+        user=_rand_nick(), user_id=_rand_uid(),
+        gift=name, gift_id=gid, count=1, repeat_end=0,
+    )
 
+
+class Simulator(QObject):
     _MAKERS = (
-        [_rand_chat]   * 5 +
-        [_rand_like]   * 3 +
-        [_rand_follow] * 1 +
-        [_rand_gift]   * 1
+        [_rand_chat] * 4
+        + [_rand_like] * 2
+        + [_rand_follow] * 1
+        + [_rand_gift] * 2
+        + [_rand_enter] * 1
+        + [_rand_online] * 1
+        + [_rand_fansclub] * 1
+        + [_rand_gift_mid_combo] * 1
     )
 
     def __init__(self, app: "_main.App"):
         super().__init__()
         self._app = app
-
-        # 通知 UI 进入"已连接"状态
         app.status_changed.emit(True)
-
         self._timer = QTimer(self)
         self._timer.setSingleShot(True)
         self._timer.timeout.connect(self._tick)
         self._schedule()
 
     def _schedule(self):
-        self._timer.start(random.randint(600, 1400))
+        self._timer.start(random.randint(500, 1800))
 
     def _tick(self):
-        msg = random.choice(self._MAKERS)()
+        maker = random.choice(self._MAKERS)
+        msg = maker()
         self._app.message_received.emit(msg)
+        if random.random() < 0.02:
+            self._app.message_received.emit(_rand_control_end())
         self._schedule()
 
 
-# ─────────────────────────────────────────────
-# 入口
-# ─────────────────────────────────────────────
 if __name__ == "__main__":
-    app  = _main.App(sys.argv)
-    _sim = Simulator(app)       # 持有引用，防止被 GC
+    _install_test_mocks()
+    app = _main.App(sys.argv)
+    _sim = Simulator(app)
     sys.exit(app.run())

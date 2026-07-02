@@ -18,213 +18,19 @@ playwright 捕获真实 WebSocket 帧，protobuf 解析，协议级稳定。
 """
 
 import asyncio
-import gzip
 import logging
-import os
-from datetime import datetime
 from typing import Callable
 
 from playwright.async_api import async_playwright
 
-import listener.Live_pb2 as Live_pb2
-from models import (
-    ChatMessage,
-    ControlMessage,
-    EmojiChatMessage,
-    EnterMessage,
-    FansclubMessage,
-    FollowMessage,
-    GiftMessage,
-    LikeMessage,
-    LiveMessage,
-    OnlineMessage,
-    RoomRankMessage,
-    RoomStatsMessage,
-)
+from listener.LiveProtobuf import parse_frame
+from listener.log_util import get_logger, make_msg_logger, on_connect_success
+from models import LiveMessage
 
-# ─────────────────────────────────────────────
-# 目录
-# ─────────────────────────────────────────────
-os.makedirs("log", exist_ok=True)
-os.makedirs("msg_log", exist_ok=True)
-
-_ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-
-# ─────────────────────────────────────────────
-# 主日志：系统事件，不含 msg 内容
-# ─────────────────────────────────────────────
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)s | %(message)s",
-    handlers=[
-        logging.FileHandler(f"log/listener2_{_ts}.log", encoding="utf-8"),
-        logging.StreamHandler(),
-    ],
-)
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
-# ─────────────────────────────────────────────
-# msg 日志：仅 debug=True 时启用
-# ─────────────────────────────────────────────
-def _make_msg_logger(live_id: str) -> logging.Logger:
-    import re
-    # 去掉 Windows 文件名非法字符（* ? : < > | " \ /）
-    safe_id = re.sub(r'[\\/*?:"<>|]', '_', live_id)
-    name = f"msg_{safe_id}_{_ts}"
-    ml = logging.getLogger(name)
-    ml.setLevel(logging.INFO)
-    h = logging.FileHandler(f"msg_log/{safe_id}_{_ts}.log", encoding="utf-8")
-    h.setFormatter(logging.Formatter("%(asctime)s | %(message)s"))
-    ml.addHandler(h)
-    ml.propagate = False
-    return ml
-
-
-# ─────────────────────────────────────────────
-# 兼容工具
-# ─────────────────────────────────────────────
-def _g(obj, *keys, default=""):
-    for k in keys:
-        v = getattr(obj, k, None)
-        if v is not None and v != "" and v != 0:
-            return v
-    return default
-
-def _user_name(user) -> str:
-    return (getattr(user, "nickname", "")
-            or getattr(user, "nick_name", ""))
-
-def _user_id(user) -> str:
-    return str(getattr(user, "id", "") or getattr(user, "id_str", ""))
-
-
-# ─────────────────────────────────────────────
-# 单条消息解析
-# ─────────────────────────────────────────────
-def _parse_item(method: str, payload: bytes) -> LiveMessage | None:
-    try:
-        if method == "WebcastChatMessage":
-            pb = Live_pb2.ChatMessage()
-            pb.ParseFromString(payload)
-            user = _user_name(pb.user)
-            content = getattr(pb, "content", "")
-            if user and content:
-                return ChatMessage(user=user, user_id=_user_id(pb.user), content=content)
-
-        elif method == "WebcastGiftMessage":
-            pb = Live_pb2.GiftMessage()
-            pb.ParseFromString(payload)
-            if pb.repeatEnd != 1:
-                return None
-            user      = _user_name(pb.user)
-            gift_name = pb.gift.name if pb.gift else ""
-            gift_id   = int(pb.gift.id) if pb.gift else 0
-            count     = int(pb.comboCount) if pb.comboCount else 1
-            if user and gift_name:
-                return GiftMessage(user=user, user_id=_user_id(pb.user),
-                                   gift=gift_name, gift_id=gift_id,
-                                   count=count, repeat_end=1)
-
-        elif method == "WebcastLikeMessage":
-            pb = Live_pb2.LikeMessage()
-            pb.ParseFromString(payload)
-            user = _user_name(pb.user)
-            if user:
-                return LikeMessage(user=user, user_id=_user_id(pb.user),
-                                   count=int(_g(pb, "count", default=1)))
-
-        elif method == "WebcastMemberMessage":
-            pb = Live_pb2.MemberMessage()
-            pb.ParseFromString(payload)
-            user = _user_name(pb.user)
-            if user:
-                return EnterMessage(user=user, user_id=_user_id(pb.user))
-
-        elif method == "WebcastSocialMessage":
-            pb = Live_pb2.SocialMessage()
-            pb.ParseFromString(payload)
-            user = _user_name(pb.user)
-            if user:
-                return FollowMessage(user=user, user_id=_user_id(pb.user))
-
-        elif method == "WebcastRoomUserSeqMessage":
-            pb = Live_pb2.RoomUserSeqMessage()
-            pb.ParseFromString(payload)
-            return OnlineMessage(
-                current=int(_g(pb, "total", default=0)),
-                total=int(_g(pb, "totalPvForAnchor", "total_pv_for_anchor", default=0)),
-            )
-
-        elif method == "WebcastFansclubMessage":
-            pb = Live_pb2.FansclubMessage()
-            pb.ParseFromString(payload)
-            return FansclubMessage(
-                user=_user_name(pb.user) if hasattr(pb, "user") else "",
-                user_id=_user_id(pb.user) if hasattr(pb, "user") else "",
-                content=getattr(pb, "content", ""),
-            )
-
-        elif method == "WebcastEmojiChatMessage":
-            pb = Live_pb2.EmojiChatMessage()
-            pb.ParseFromString(payload)
-            return EmojiChatMessage(
-                user=_user_name(pb.user) if hasattr(pb, "user") else "",
-                user_id=_user_id(pb.user) if hasattr(pb, "user") else "",
-                emoji_id=str(_g(pb, "emojiId", "emoji_id", default="")),
-                default_content=str(_g(pb, "defaultContent", "default_content", default="")),
-            )
-
-        elif method == "WebcastRoomStatsMessage":
-            pb = Live_pb2.RoomStatsMessage()
-            pb.ParseFromString(payload)
-            return RoomStatsMessage(
-                display_long=str(_g(pb, "displayLong", "display_long", default="")),
-            )
-
-        elif method == "WebcastRoomRankMessage":
-            pb = Live_pb2.RoomRankMessage()
-            pb.ParseFromString(payload)
-            return RoomRankMessage(
-                ranks=list(_g(pb, "ranksList", "ranks_list", default=[]))
-            )
-
-        elif method == "WebcastControlMessage":
-            pb = Live_pb2.ControlMessage()
-            pb.ParseFromString(payload)
-            return ControlMessage(status=int(getattr(pb, "status", 0)))
-
-        else:
-            logger.debug(f"未处理消息类型: {method}")
-
-    except Exception as e:
-        logger.debug(f"解析失败 [{method}]: {e}")
-
-    return None
-
-
-def _parse_frame(payload: bytes) -> list[LiveMessage]:
-    results: list[LiveMessage] = []
-    try:
-        frame = Live_pb2.PushFrame()
-        frame.ParseFromString(payload)
-        if not frame.payload:
-            return results
-        try:
-            body = gzip.decompress(frame.payload)
-        except Exception:
-            body = frame.payload
-        response = Live_pb2.LiveResponse()
-        response.ParseFromString(body)
-    except Exception as e:
-        logger.debug(f"帧解析失败: {e}")
-        return results
-
-    for item in response.messagesList:
-        msg = _parse_item(item.method, item.payload)
-        if msg is not None:
-            results.append(msg)
-    return results
+# 统一解析接口已迁移到 listener/LiveProtobuf.py
 
 
 # ─────────────────────────────────────────────
@@ -238,7 +44,7 @@ async def _run(
     debug: bool,
     on_status: Callable[[bool], None] | None,
 ):
-    msg_logger = _make_msg_logger(live_id) if debug else None
+    msg_logger = make_msg_logger(live_id) if debug else None
     seen_ws: set[str] = set()
 
     def _emit_status(val: bool):
@@ -288,10 +94,11 @@ async def _run(
             asyncio.create_task(_live_timeout())
 
             def on_frame(raw: bytes):
-                msgs = _parse_frame(raw)
+                msgs = parse_frame(raw)
                 # 第一条消息到达 → 确认直播中
                 if msgs and not _state["live_confirmed"]:
                     _state["live_confirmed"] = True
+                    on_connect_success("listener2")
                     logger.info("✅ 直播间正在直播")
                     _emit_status(True)
                 for msg in msgs:
