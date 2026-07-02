@@ -15,20 +15,8 @@ class ToolsPage(BasePage):
     def __init__(self):
         super().__init__()
         self._open_wins: dict[str, object] = {}   # name → window
-        self._scroll: QScrollArea | None = None
-        self._built = False
-
-        # 根布局只创建一次，_build 往里加 scroll
-        self._root_lay = QVBoxLayout(self)
-        self._root_lay.setContentsMargins(0, 0, 0, 0)
-
-        _theme.on_change(lambda _: self._rebuild() if self._built else None)
-
-    def showEvent(self, event):
-        if not self._built:
-            self._build()
-            self._built = True
-        super().showEvent(event)
+        self._build()
+        _theme.on_change(lambda _: self._rebuild())
 
     def _build(self):
         import tools as _tools
@@ -58,8 +46,9 @@ class ToolsPage(BasePage):
         lay.addStretch()
         scroll.setWidget(inner)
 
-        self._root_lay.addWidget(scroll)
-        self._scroll = scroll
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.addWidget(scroll)
 
     def _make_card(self, meta) -> QFrame:
         C = _theme.get()
@@ -113,13 +102,12 @@ class ToolsPage(BasePage):
         win.activateWindow()
 
     def _rebuild(self):
-        """主题切换时替换 scroll 内容（不重建根布局）。"""
-        if not self._built:
-            return
-        if self._scroll is not None:
-            self._root_lay.removeWidget(self._scroll)
-            self._scroll.deleteLater()
-            self._scroll = None
+        """主题切换时重建 UI。"""
+        # 清除旧布局
+        while self.layout().count():
+            item = self.layout().takeAt(0)
+            if w := item.widget():
+                w.deleteLater()
         self._build()
 
     # ── 消息转发给所有已打开的工具 ──────────────
