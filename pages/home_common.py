@@ -12,7 +12,7 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import Qt, QTimer
 
-import pages.theme as _theme
+import theme as _theme
 import config as _cfg
 
 
