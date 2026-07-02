@@ -1,7 +1,7 @@
 """
-test.py — 本地 UI 测试：绕过真实 listener，注入模拟弹幕。
+listener/test.py — 本地 UI 测试：绕过真实 listener，注入模拟弹幕。
 
-用法: python test.py
+用法: python listener/test.py
 
 模拟环境：
   - 默认「已连接」
@@ -11,11 +11,12 @@ import sys
 import os
 import random
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, _ROOT)
 
 from PySide6.QtCore import QTimer, QObject
 
-from models import (
+from listener.models import (
     ChatMessage, GiftMessage, LikeMessage, FollowMessage,
     EnterMessage, OnlineMessage, ControlMessage, FansclubMessage,
 )
@@ -47,6 +48,7 @@ def _install_test_mocks() -> None:
 
     l3.get_page_status = _r3_status
     l3._page_proxy_snapshot = False
+
     def _mock_run_page_check_r3():
         l3._page_proxy_snapshot = _V.system_proxy
         return _r3_status()

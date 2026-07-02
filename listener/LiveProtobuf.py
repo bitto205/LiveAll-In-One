@@ -93,7 +93,7 @@ if not _descriptor._USE_C_DESCRIPTORS:
 
 import gzip
 
-from models import (
+from listener.models import (
     ChatMessage as ModelChatMessage,
     ControlMessage as ModelControlMessage,
     EmojiChatMessage as ModelEmojiChatMessage,

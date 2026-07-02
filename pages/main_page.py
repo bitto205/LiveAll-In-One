@@ -8,10 +8,10 @@ main_page.py — 主窗口框架（白色系版本）
 """
 
 import sys, os
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pages
-import theme as _theme
+import pages.theme as _theme
 import config as _cfg
 
 from PySide6.QtWidgets import (
@@ -23,7 +23,7 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore  import Qt, QPropertyAnimation, QEasingCurve
 from PySide6.QtGui   import QColor, QIcon, QPixmap, QPainter, QFont
 
-from base_page import get_pages, BasePage
+from pages import get_pages, BasePage
 
 # ─────────────────────────────────────────────
 # 常量

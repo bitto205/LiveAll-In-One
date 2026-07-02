@@ -25,7 +25,7 @@ from playwright.async_api import async_playwright
 
 from listener.LiveProtobuf import parse_frame
 from listener.log_util import get_logger, make_msg_logger, on_connect_success
-from models import LiveMessage
+from listener.models import LiveMessage
 
 logger = get_logger(__name__)
 

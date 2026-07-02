@@ -26,7 +26,7 @@ from typing import Callable
 from playwright.async_api import async_playwright
 
 from listener.log_util import get_logger, make_msg_logger, on_connect_success
-from models import (
+from listener.models import (
     ChatMessage,
     ControlMessage,
     EmojiChatMessage,

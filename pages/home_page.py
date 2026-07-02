@@ -1,4 +1,4 @@
-import sys, os, json, time
+﻿import sys, os, json, time
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from PySide6.QtWidgets import (
@@ -7,9 +7,9 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import Qt, QTimer
 
-import theme as _theme
+import pages.theme as _theme
 import config as _cfg
-from base_page import BasePage, register
+from pages import BasePage, register
 
 
 # ─────────────────────────────────────────────

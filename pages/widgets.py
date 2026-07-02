@@ -5,7 +5,7 @@ widgets.py — 通用主题 Widget 库
 所有控件通过 theme.on_change() 注册回调，切换主题即时生效。
 
 使用:
-    from widgets import ThemedComboBox
+    from pages.widgets import ThemedComboBox
 
     combo = ThemedComboBox()
     combo.addItems(["选项A", "选项B", "选项C"])
@@ -15,7 +15,7 @@ widgets.py — 通用主题 Widget 库
 """
 
 import sys, os
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from PySide6.QtWidgets import (
     QWidget, QFrame, QHBoxLayout, QVBoxLayout,
@@ -25,7 +25,7 @@ from PySide6.QtCore  import Qt, QPoint, Signal, Property, QPropertyAnimation, QE
 from PySide6.QtGui   import QPainter, QColor, QPen, QFont, QBitmap
 from PySide6.QtCore  import QRectF
 
-import theme as _theme
+import pages.theme as _theme
 import config as _cfg
 
 

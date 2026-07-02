@@ -1,4 +1,4 @@
-import sys, os
+﻿import sys, os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from PySide6.QtWidgets import (
@@ -6,8 +6,8 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import Qt
 
-import theme as _theme
-from base_page import BasePage, BaseSetting, register
+import pages.theme as _theme
+from pages import BasePage, BaseSetting, register
 
 
 @register(icon="⚒", name="工具", order=1)

@@ -25,7 +25,7 @@ def _qt_msg_handler(msg_type, _, msg):  # _ = QMessageLogContext (required by Qt
 
 qInstallMessageHandler(_qt_msg_handler)
 
-from main_page import MainPage
+from pages.main_page import MainPage
 import pages
 
 logger = __import__("logging").getLogger(__name__)

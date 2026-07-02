@@ -1,5 +1,6 @@
 ﻿"""
-listener4.py 鈥?绾胯矾 4锛歱atch 鐩存挱浼翠荆 + proxy_shell IPC 鏀跺脊骞曘€?"""
+listener4.py - 线路 4：patch 直播伴侣 + proxy_shell IPC 收消息
+"""
 import asyncio
 import filecmp
 import json
@@ -23,16 +24,17 @@ logger = get_logger(__name__)
 PROXY_PORT        = 19088
 IPC_PORT          = 19098
 _PROXY_VALUE      = f"127.0.0.1:{PROXY_PORT},direct://"
-_TIMEOUT          = 60.0          # 绛夊緟棣栨潯 IPC 娑堟伅鐨勮秴鏃讹紙绉掞級
-_SHELL_PROCESS    = "proxy_shell.exe"   # tasklist 妫€娴嬬敤杩涚▼鍚?_SHELL_MARKER     = "proxy_shell.exe"   # 妫€娴?patch 涓槸鍚﹀凡娉ㄥ叆 spawn
+_TIMEOUT          = 60.0
+_SHELL_PROCESS    = "proxy_shell.exe"   # process name for tasklist
+_SHELL_MARKER     = "proxy_shell.exe"   # marker in patched index.js
 _IPC_CTRL_PREFIX  = b"__LH_CTRL__:"
 _IPC_CTRL_WS_UP   = b"WS_CONNECTED"
 _IPC_CTRL_WS_DOWN = b"WS_DISCONNECTED"
 
 
-# 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
-# CA 璇佷功绠＄悊锛坧atch 鏃剁敱 Python 鐢熸垚骞跺畨瑁咃級
-# 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+# ---------------------------------------------------------
+# CA 证书管理（patch 时由 Python 生成并安装）
+# ---------------------------------------------------------
 
 def _ca_paths() -> tuple[Path, Path]:
     d = Path.home() / ".livehelper"
@@ -40,7 +42,7 @@ def _ca_paths() -> tuple[Path, Path]:
 
 
 def _ensure_ca_cert() -> Path:
-    """鑻?CA 璇佷功涓嶅瓨鍦ㄥ垯鐢?cryptography 搴撶敓鎴愶紝杩斿洖 .crt 璺緞銆?""
+    """Create CA certificate when missing and return crt path."""
     cert_path, key_path = _ca_paths()
     if cert_path.exists() and key_path.exists():
         return cert_path
@@ -74,12 +76,12 @@ def _ensure_ca_cert() -> Path:
         serialization.PrivateFormat.TraditionalOpenSSL,
         serialization.NoEncryption(),
     ))
-    logger.info(f"CA 璇佷功宸茬敓鎴? {cert_path}")
+    logger.info(f"CA 证书已生成: {cert_path}")
     return cert_path
 
 
 def _install_ca_cert() -> None:
-    """灏?CA 璇佷功瀹夎鍒?Windows ROOT 淇′换瀛樺偍锛堥渶瑕佺鐞嗗憳鏉冮檺锛夈€?""
+    """Install the CA cert into Windows ROOT store."""
     cert_path = _ensure_ca_cert()
     try:
         r = subprocess.run(
@@ -87,22 +89,23 @@ def _install_ca_cert() -> None:
             capture_output=True, timeout=30,
         )
         if r.returncode == 0:
-            logger.info("CA 璇佷功宸插畨瑁呭埌 Windows ROOT")
+            logger.info("CA 证书已安装到 Windows ROOT")
         else:
-            logger.warning(f"certutil 杩斿洖闈為浂: {r.returncode}\n{r.stderr.decode(errors='ignore')}")
+            logger.warning(f"certutil 返回非零: {r.returncode}\n{r.stderr.decode(errors='ignore')}")
     except Exception as e:
         logger.warning(f"certutil 寮傚父: {e}")
 
 
-# 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
-# 璺緞娉ㄥ唽锛堜富杞欢鍚姩鏃惰皟鐢紝璁?patch 鑳芥壘鍒?exe锛?# 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+# ---------------------------------------------------------
+# 路径注册（主程序启动时调用，保证 patch 能找到 exe）
+# ---------------------------------------------------------
 
 def _ipc_token_path() -> Path:
     return Path.home() / ".livehelper" / "ipc_token"
 
 
 def _refresh_ipc_token() -> str:
-    """姣忔涓昏蒋浠跺惎鍔ㄦ椂閲嶆柊鐢熸垚 IPC token锛屽啓鍏ョ鐩樺悗杩斿洖銆?""
+    """Refresh IPC token and save to disk."""
     token = secrets.token_hex(32)
     p = _ipc_token_path()
     p.parent.mkdir(parents=True, exist_ok=True)
@@ -111,14 +114,13 @@ def _refresh_ipc_token() -> str:
 
 
 def _shell_source() -> Optional[str]:
-    """婧?proxy_shell.exe锛歭istener4.py 鐨勫悓绾х洰褰曪紝闅忎富杞欢鍙戝竷銆?""
+    """Return bundled proxy_shell.exe path near this file."""
     p = os.path.join(os.path.dirname(os.path.abspath(__file__)), "proxy_shell.exe")
     return p if os.path.isfile(p) else None
 
 
 def _load_shell_exe() -> Optional[str]:
-    """
-    璇诲彇 patch 鏃堕儴缃插埌鐩存挱浼翠荆鐩綍鐨?proxy_shell.exe 璺緞銆?    config.json 閲岀殑 proxy_shell_exe 鐢?patch_companion() 鍐欏叆銆?    """
+    """Read deployed proxy_shell.exe path from config.json."""
     cfg_file = Path.home() / ".livehelper" / "config.json"
     try:
         cfg = json.loads(cfg_file.read_text(encoding="utf-8"))
@@ -131,7 +133,7 @@ def _load_shell_exe() -> Optional[str]:
 
 
 def _save_deployed_exe(dest: str) -> None:
-    """patch_companion() 閮ㄧ讲瀹屾瘯鍚庯紝鎶婄洰鏍囪矾寰勫啓鍏?config.json銆?""
+    """Persist deployed proxy_shell.exe path into config.json."""
     cfg_file = Path.home() / ".livehelper" / "config.json"
     try:
         cfg = json.loads(cfg_file.read_text(encoding="utf-8"))
@@ -143,7 +145,7 @@ def _save_deployed_exe(dest: str) -> None:
 
 
 def save_location() -> None:
-    """灏嗕富杞欢鐩綍鍐欏叆 ~/.livehelper/config.json锛屽埛鏂?IPC token銆?""
+    """Persist current main app location and refresh IPC token."""
     exe_dir = os.path.dirname(os.path.abspath(sys.argv[0]))
     cfg_file = Path.home() / ".livehelper" / "config.json"
     try:
@@ -154,18 +156,18 @@ def save_location() -> None:
     cfg_file.parent.mkdir(parents=True, exist_ok=True)
     cfg_file.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
     _refresh_ipc_token()
-    logger.debug(f"涓昏蒋浠剁洰褰曞凡娉ㄥ唽: {exe_dir}")
+    logger.debug(f"主程序目录已注册: {exe_dir}")
 
 
-# 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
-# 鐩存挱浼翠荆璺緞鏌ユ壘
-# 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+# ---------------------------------------------------------
+# 直播伴侣路径查找
+# ---------------------------------------------------------
 
 _COMPANION_DIR_CFG = "companion_install_dir"
 
 
 def _find_install_dir() -> Optional[str]:
-    """娉ㄥ唽琛ㄦ娴嬬洿鎾即渚ｅ畨瑁呯洰褰曘€?""
+    """Find companion install directory from registry."""
     subkeys = [
         r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall",
         r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall",
@@ -179,7 +181,7 @@ def _find_install_dir() -> Optional[str]:
                             with winreg.OpenKey(root, winreg.EnumKey(root, i)) as entry:
                                 try:
                                     name = winreg.QueryValueEx(entry, "DisplayName")[0]
-                                    if "鐩存挱浼翠荆" not in name:
+                                    if "直播伴侣" not in name:
                                         continue
                                     loc = winreg.QueryValueEx(entry, "InstallLocation")[0]
                                     if loc and os.path.isdir(loc):
@@ -206,18 +208,14 @@ def _read_manual_companion_dir_cfg() -> str:
 
 
 def validate_manual_companion_dir() -> tuple[Optional[str], bool]:
-    """
-    璇诲彇骞舵牎楠屾墜鍔ㄨ矾寰勩€傝嫢鐩綍涓嶅瓨鍦ㄦ垨缂哄皯 index.js锛岃涓烘棤鏁堝苟娓呴櫎 config銆?
-    Returns:
-        (鏈夋晥璺緞鎴?None, 鏄惁鍒氬垽瀹氫负鏃犳晥)
-    """
+    """Validate manual companion directory from config."""
     raw = _read_manual_companion_dir_cfg()
     if not raw:
         return None, False
     p = os.path.normpath(raw)
     if not os.path.isdir(p) or not find_index_js_in_root(p):
         clear_manual_companion_dir()
-        logger.info("[鐩存挱浼翠荆璺緞] 鎵嬪姩璺緞鏃犳晥锛堟棤 index.js 鎴栫洰褰曚笉瀛樺湪锛夛紝宸叉竻闄? %s", raw)
+        logger.info("[companion-path] invalid manual path cleared: %s", raw)
         return None, True
     return p, False
 
@@ -228,18 +226,18 @@ def get_manual_companion_dir() -> Optional[str]:
 
 
 def set_manual_companion_dir(path: str) -> tuple[bool, str]:
-    """鐢ㄦ埛鎵嬪姩鎸囧畾鐩存挱浼翠荆鏍圭洰褰曪紝鍐欏叆 config.json銆?""
+    """Set manual companion root directory."""
     path = os.path.normpath(path.strip().rstrip("\\/"))
     if not path or not os.path.isdir(path):
-        return False, "鐩綍鏃犳晥"
+        return False, "Invalid directory"
     if not find_index_js_in_root(path):
-        return False, "璇ユ寚瀹氱洰褰曟棤鏁?
+        return False, "index.js not found in selected directory"
     try:
         import config as _cfg
         _cfg.set(_COMPANION_DIR_CFG, path)
     except Exception as e:
-        return False, f"淇濆瓨璺緞澶辫触: {e}"
-    return True, "鐩存挱浼翠荆璺緞宸蹭繚瀛?
+        return False, f"Failed to save path: {e}"
+    return True, "Companion path saved"
 
 
 def clear_manual_companion_dir() -> None:
@@ -251,19 +249,18 @@ def clear_manual_companion_dir() -> None:
 
 
 def sync_companion_dir_from_registry() -> bool:
-    """
-    娉ㄥ唽琛ㄦ娴嬪埌鐩存挱浼翠荆鏃讹紝娓呴櫎鎵嬪姩鎸囧畾璺緞锛屼互娉ㄥ唽琛ㄧ洰褰曚负鍑嗐€?    杩斿洖鏄惁鍛戒腑娉ㄥ唽琛ㄣ€?    """
+    """Prefer registry path and clear manual override when present."""
     reg = _find_install_dir()
     if not reg:
         return False
     if _read_manual_companion_dir_cfg():
         clear_manual_companion_dir()
-        logger.info("[鐩存挱浼翠荆璺緞] 娉ㄥ唽琛ㄤ紭鍏堬紝宸叉竻闄ゆ墜鍔ㄨ矾寰勶紙娉ㄥ唽琛? %s锛?, reg)
+        logger.info("[companion-path] registry path takes precedence: %s", reg)
     return True
 
 
 def get_companion_install_dir() -> Optional[str]:
-    """浼樺厛娉ㄥ唽琛紝鍚﹀垯浣跨敤鐢ㄦ埛鎵嬪姩鎸囧畾鐨勮矾寰勩€?""
+    """Return companion path from registry first, fallback manual config."""
     reg = _find_install_dir()
     if reg:
         return reg
@@ -299,15 +296,16 @@ def find_index_js_in_root(root: str) -> Optional[str]:
 
 
 def find_index_js() -> Optional[str]:
-    """杩斿洖鐩存挱浼翠荆 index.js 鐨勫畬鏁磋矾寰勩€傛敮鎸?Launcher 澶氱増鏈洰褰曠粨鏋勩€?""
+    """Return full path of companion index.js."""
     root = get_companion_install_dir()
     if not root:
         return None
     return find_index_js_in_root(root)
 
 
-# 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
-# index.js / exe 妫€娴?# 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+# ---------------------------------------------------------
+# index.js / exe 检测
+# ---------------------------------------------------------
 
 def _index_js_paths() -> tuple[Optional[str], Optional[str]]:
     path = find_index_js()
@@ -324,7 +322,7 @@ def _deployed_shell_path() -> Optional[str]:
 
 
 def is_index_js_modified() -> bool:
-    """绾胯矾 3锛歩ndex.js 鏄惁鐩稿 .bak 琚敼鍐欙紙浠绘剰宸紓锛夈€?""
+    """Whether index.js differs from backup baseline."""
     path, bak = _index_js_paths()
     if not path:
         return False
@@ -342,7 +340,7 @@ def is_index_js_modified() -> bool:
 
 
 def is_exe_identical_to_source(deployed: Optional[str] = None) -> bool:
-    """绾胯矾 4锛氶儴缃茬殑 proxy_shell.exe 鏄惁涓庡彂甯冨寘鍐呮簮鏂囦欢瀛楄妭绾т竴鑷淬€?""
+    """Whether deployed proxy_shell.exe matches bundled source bytes."""
     src = _shell_source()
     dest = deployed or _deployed_shell_path()
     if not src or not dest or not os.path.isfile(dest):
@@ -351,8 +349,7 @@ def is_exe_identical_to_source(deployed: Optional[str] = None) -> bool:
 
 
 def _build_patched_content(original: str, dest: str) -> tuple[Optional[str], str]:
-    """
-    浠庡師濮?index.js 鐢熸垚瀹屾暣 patch 鏂囨湰锛堣鐩栧紡锛氬缁堜互 .bak 涓哄熀鍑嗭紝涓嶅閲忓彔鍔狅級銆?    """
+    """Build complete patched index.js content from original backup."""
     new_content = original
 
     proxy_re = re.compile(
@@ -364,7 +361,7 @@ def _build_patched_content(original: str, dest: str) -> tuple[Optional[str], str
         ready_re = re.compile(r"(\b(\w+)\.on\s*\(\s*['\"]ready['\"])")
         m = ready_re.search(new_content)
         if not m:
-            return None, "鏈壘鍒板悎閫傜殑娉ㄥ叆鐐癸紝index.js 缁撴瀯鍙兘宸插彉鏇?
+            return None, "No suitable injection point found in index.js"
         app_var = m.group(2)
         proxy_inject = (
             f'{app_var}.commandLine.appendSwitch("proxy-server","{_PROXY_VALUE}");'
@@ -387,7 +384,7 @@ def _build_patched_content(original: str, dest: str) -> tuple[Optional[str], str
 
 
 def get_expected_patched_index_js() -> Optional[str]:
-    """绾胯矾 4锛氭牴鎹?.bak 璁＄畻鏈熸湜鐨?index.js 鍏ㄦ枃锛堢簿纭尮閰嶇敤锛夈€?""
+    """Compute expected fully-patched index.js from backup."""
     path, bak = _index_js_paths()
     if not path or not bak or not os.path.exists(bak):
         return None
@@ -397,13 +394,13 @@ def get_expected_patched_index_js() -> Optional[str]:
         dest,
     )
     if content is None:
-        logger.warning(f"鏃犳硶鐢熸垚鏈熸湜 patch 鏂囨湰: {err}")
+        logger.warning(f"无法生成预期 patch 文本: {err}")
         return None
     return content
 
 
 def is_index_js_exactly_patched() -> bool:
-    """绾胯矾 4锛氬綋鍓?index.js 鏄惁涓庢湡鏈?patch 鏂囨湰瀹屽叏涓€鑷达紙涓嶈兘澶氬啓涓嶈兘灏戝啓锛夈€?""
+    """Whether current index.js exactly matches expected patched output."""
     path, _ = _index_js_paths()
     expected = get_expected_patched_index_js()
     if not path or expected is None:
@@ -416,27 +413,23 @@ def is_index_js_exactly_patched() -> bool:
 
 
 def is_patched() -> bool:
-    """绾胯矾 4 涓ユ牸 patch 鐘舵€侊細exe 涓€鑷?+ index.js 绮剧‘鍖归厤銆?""
+    """Strict patch status: exe match + exact index.js match."""
     return is_exe_identical_to_source() and is_index_js_exactly_patched()
 
 
-# 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+# ---------------------------------------------------------
 # Patch / Unpatch
-# 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+# ---------------------------------------------------------
 
 def patch_companion() -> tuple[bool, str]:
-    """
-    鍚戠洿鎾即渚?index.js 娉ㄥ叆锛?      1. 鎶?proxy_shell.exe 浠?listener/ 鎷疯礉鍒?index.js 鍚岀骇鐩綍
-      2. spawn 鎷疯礉鍚庣殑 proxy_shell.exe
-      3. --proxy-server 鍙傛暟锛堟祦閲忚蛋 8888锛?      4. 瀹屾暣鎬ф牎楠岀粫杩?      5. 鐢熸垚骞跺畨瑁?CA 璇佷功
-    """
+    """Patch companion index.js and deploy proxy_shell.exe."""
     path = find_index_js()
     if not path:
-        return False, "鏈壘鍒扮洿鎾即渚ｅ畨瑁呯洰褰?
+        return False, "Companion install directory not found"
 
     src = _shell_source()
     if not src:
-        return False, "鏈壘鍒版簮 proxy_shell.exe锛坙istener/ 鐩綍锛夛紝璇风‘璁よ蒋浠跺畬鏁存€?
+        return False, "Bundled proxy_shell.exe not found in listener directory"
 
     dest = os.path.join(os.path.dirname(path), _SHELL_PROCESS)
     bak = path + ".bak"
@@ -445,25 +438,25 @@ def patch_companion() -> tuple[bool, str]:
         try:
             shutil.copy2(path, bak)
         except Exception as e:
-            return False, f"澶囦唤 index.js 澶辫触: {e}"
+            return False, f"备份 index.js 失败: {e}"
 
     try:
         original = open(bak, encoding="utf-8", errors="ignore").read()
     except Exception as e:
-        return False, f"璇诲彇澶囦唤 index.js 澶辫触: {e}"
+        return False, f"读取备份 index.js 失败: {e}"
 
     new_content, err = _build_patched_content(original, dest)
     if new_content is None:
         return False, err
 
     if is_index_js_exactly_patched() and is_exe_identical_to_source(dest):
-        return True, "宸茬粡鏄?patch 鐘舵€?
+        return True, "Already patched"
 
     try:
         shutil.copy2(src, dest)
-        logger.info(f"proxy_shell.exe 宸查儴缃插埌: {dest}")
+        logger.info(f"proxy_shell.exe 已部署到: {dest}")
     except Exception as e:
-        return False, f"鎷疯礉 proxy_shell.exe 澶辫触: {e}"
+        return False, f"复制 proxy_shell.exe 失败: {e}"
 
     _save_deployed_exe(dest)
 
@@ -471,28 +464,28 @@ def patch_companion() -> tuple[bool, str]:
         with open(path, "w", encoding="utf-8") as f:
             f.write(new_content)
     except Exception as e:
-        return False, f"鍐欏叆 index.js 澶辫触: {e}"
+        return False, f"写入 index.js 失败: {e}"
 
     _install_ca_cert()
-    return True, "Patch 鎴愬姛锛佽閲嶅惎鐩存挱浼翠荆浣胯缃敓鏁?
+    return True, "Patch successful. Restart companion app to take effect."
 
 
 def unpatch_companion() -> tuple[bool, str]:
     path = find_index_js()
     if not path:
-        return False, "鏈壘鍒扮洿鎾即渚?
+        return False, "Companion install not found"
     bak = path + ".bak"
     if not os.path.exists(bak):
-        return False, "鏈壘鍒板浠芥枃浠?
+        return False, "Backup file not found"
     try:
         shutil.copy2(bak, path)
-        return True, "宸茶繕鍘熷師濮?index.js"
+        return True, "已还原原始 index.js"
     except Exception as e:
-        return False, f"杩樺師澶辫触: {e}"
+        return False, f"还原失败: {e}"
 
 
 def check_path_mismatch() -> bool:
-    """妫€鏌?index.js 涓敞鍏ョ殑 proxy_shell.exe 璺緞鏄惁涓庡綋鍓嶈矾寰勪竴鑷淬€?""
+    """Check whether injected proxy_shell path mismatches current path."""
     path = find_index_js()
     if not path:
         return False
@@ -507,11 +500,12 @@ def check_path_mismatch() -> bool:
         return False
 
 
-# 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
-# 杩愯鏃惰瘖鏂?# 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+# ---------------------------------------------------------
+# 运行时诊断
+# ---------------------------------------------------------
 
 def _is_ca_installed() -> bool:
-    """妫€鏌?LiveHelper CA 璇佷功鏄惁宸插畨瑁呭埌 Windows ROOT 淇′换瀛樺偍銆?""
+    """Check whether LiveHelper CA is installed in Windows ROOT store."""
     cert_path, _ = _ca_paths()
     if not cert_path.exists():
         return False
@@ -528,7 +522,7 @@ def _is_ca_installed() -> bool:
 
 
 def _is_proxy_running() -> bool:
-    """妫€娴?proxy_shell.exe 鏄惁鍦ㄨ繘绋嬪垪琛ㄤ腑銆?""
+    """Check whether proxy_shell.exe process is running."""
     try:
         r = subprocess.run(
             ["tasklist", "/FI", f"IMAGENAME eq {_SHELL_PROCESS}", "/NH"],
@@ -544,7 +538,7 @@ def is_proxy_shell_running() -> bool:
 
 
 def get_companion_path_fields() -> dict:
-    """绾胯矾 3/4 鍏变韩锛氫即渚ｈ矾寰勬娴嬶紙鍚墜鍔ㄨ矾寰勬棤鏁堝垽瀹氾級銆?""
+    """Route 3/4 shared companion path status fields."""
     _, manual_invalid = validate_manual_companion_dir()
     install_dir = get_companion_install_dir()
     return {
@@ -557,7 +551,7 @@ def get_companion_path_fields() -> dict:
 
 
 def _build_page_status() -> dict:
-    """缁勮绾胯矾 4 椤甸潰鐘舵€侊紙涓嶈鏃ュ織锛夈€?""
+    """Build route 4 page status without logging."""
     path_fields = get_companion_path_fields()
     exe_identical = is_exe_identical_to_source()
     index_exact = is_index_js_exactly_patched()
@@ -575,11 +569,11 @@ def _build_page_status() -> dict:
 
 
 def run_page_check() -> dict:
-    """杩涘叆绾胯矾 4 瀛愰〉闈㈡椂璋冪敤锛堟湭杩炴帴鐩存挱闂存椂锛夈€傛娴?patch 鐘舵€佸苟璁板綍鏃ュ織銆?""
+    """Run route 4 page check and log current patch status."""
     status = _build_page_status()
     logger.info(
-        "[绾胯矾4 椤甸潰妫€娴媇 娉ㄥ唽琛?%s | 浼翠荆鐩綍=%s | index.js=%s | 涓ユ牸patch=%s | "
-        "exe涓€鑷?%s | index绮剧‘=%s | 璇佷功宸茶=%s",
+        "[route4 page check] registry=%s | companion=%s | index.js=%s | strict_patch=%s | "
+        "exe_identical=%s | index_exact=%s | ca_installed=%s",
         status["companion_in_registry"], status["companion_installed"],
         status["index_js_found"],
         status["is_patched"], status["exe_identical"], status["index_exact"],
@@ -589,18 +583,12 @@ def run_page_check() -> dict:
 
 
 def get_page_status() -> dict:
-    """绾胯矾 4 UI 鐘舵€侊紙璇诲彇褰撳墠 patch / exe / index 妫€娴嬶級銆?""
+    """Return route 4 UI status from current checks."""
     return _build_page_status()
 
 
 def get_route4_connect_check() -> dict:
-    """
-    杩炴帴鐩存挱闂村墠璋冪敤锛屽仛鍙屽悜璺緞 + 杩涚▼璇婃柇骞跺啓 log銆?
-    Keys:
-        exe_known_to_main        listener4 鑳芥壘鍒?proxy_shell.exe
-        main_location_registered config.json 涓?exe_dir 涓庡綋鍓?main 璺緞涓€鑷?        path_mismatch            index.js 涓敞鍏ヨ矾寰勪笌褰撳墠 exe 璺緞涓嶇
-        exe_running              proxy_shell.exe 杩涚▼姝ｅ湪杩愯
-    """
+    """Run route 4 pre-connect diagnostics."""
     shell_exe = _load_shell_exe()
     exe_known = bool(shell_exe and os.path.isfile(shell_exe))
 
@@ -626,20 +614,19 @@ def get_route4_connect_check() -> dict:
     }
 
     logger.info(
-        "[绾胯矾4 杩炴帴璇婃柇] exe璺緞宸茬煡=%s | main浣嶇疆宸叉敞鍐?%s | "
-        "璺緞鍙樺姩=%s | 杩涚▼杩愯=%s",
+        "[route4 pre-connect] exe_known=%s | main_registered=%s | "
+        "path_mismatch=%s | process_running=%s",
         exe_known, main_location_registered, mismatch, exe_running,
     )
     if mismatch:
         logger.warning(
-            "proxy_shell.exe 璺緞宸插彉鍔紙杞欢鐩綍琚Щ鍔紵锛夛紝寤鸿閲嶆柊 Patch 鐩存挱浼翠荆"
+            "proxy_shell.exe path mismatch detected; re-patch companion is recommended"
         )
     if not main_location_registered:
-        logger.warning("涓昏蒋浠朵綅缃湭娉ㄥ唽鎴栧凡鍙樺姩锛屽缓璁噸鍚富杞欢浠ユ洿鏂拌矾寰?)
+        logger.warning("main executable path is missing or changed; restart app to refresh saved path")
     if not exe_running:
         logger.warning(
-            "proxy_shell.exe 鏈娴嬪埌杩愯涓紙鐩存挱浼翠荆鍚姩鍚庝細鑷姩 spawn锛?
-            "鑻ヤ即渚ｅ凡寮€鍚妫€鏌?patch 鐘舵€侊級"
+            "proxy_shell.exe not detected in process list (it should be spawned by companion app)"
         )
 
     return result
@@ -649,19 +636,17 @@ async def start_listener(
     callback: Callable,
     on_status: Optional[Callable] = None,
 ) -> None:
-    """
-    杩炴帴 proxy_shell 鐨?IPC 绔彛锛?8998锛夛紝鎺ユ敹鍘熷 PushFrame 瀛楄妭甯э紙4瀛楄妭闀垮害鍓嶇紑锛夛紝
-    鏈湴 protobuf 瑙ｆ瀽鍚庤浆鍙戠粰 callback銆?0 绉掑唴鏃犻鏉℃秷鎭垯瓒呮椂銆?    """
-    logger.info("=== 绾胯矾 4 杩炴帴鍚姩 ===")
+    """Connect to proxy_shell IPC and forward parsed messages to callback."""
+    logger.info("=== route 4 connect start ===")
     if not is_patched():
-        logger.error("鐩存挱浼翠荆鏈?patch锛岃鍏堟墽琛?Patch 鎿嶄綔")
+        logger.error("Companion is not patched; run Patch first")
         if on_status:
             on_status(False)
         return
 
     check = get_route4_connect_check()
     if not check["exe_running"]:
-        logger.error("proxy_shell.exe 鏈繍琛岋紝鏃犳硶寤虹珛 IPC 杩炴帴")
+        logger.error("proxy_shell.exe is not running; cannot establish IPC")
         if on_status:
             on_status(False)
         return
@@ -672,27 +657,30 @@ async def start_listener(
             timeout=10,
         )
     except Exception as e:
-        logger.error(f"杩炴帴 IPC 绔彛 {IPC_PORT} 澶辫触: {e}锛坧roxy_shell 鏄惁宸查殢鐩存挱浼翠荆鍚姩锛燂級")
+        logger.error(f"Failed to connect IPC port {IPC_PORT}: {e}")
         if on_status:
             on_status(False)
         return
 
-    # 鍙戦€?token 瀹屾垚韬唤楠岃瘉锛圙o 鍦?3 绉掑唴鏍￠獙锛?    try:
+    # Send auth token for IPC handshake.
+    try:
         token = _ipc_token_path().read_text(encoding="ascii").strip()
         writer.write(token.encode("ascii") + b"\n")
         await writer.drain()
     except Exception as e:
-        logger.error(f"IPC token 鍙戦€佸け璐? {e}")
+        logger.error(f"Failed to send IPC token: {e}")
         writer.close()
         if on_status:
             on_status(False)
         return
 
-    logger.info(f"宸茶繛鎺?proxy_shell IPC锛坽IPC_PORT}锛夛紝绛夊緟寮瑰箷娑堟伅鈥︼紙{_TIMEOUT:.0f}s 瓒呮椂锛?)
+    logger.info(f"Connected to proxy_shell IPC ({IPC_PORT}), waiting for messages ({_TIMEOUT:.0f}s timeout)")
+
+    ws_active = False
 
     async def _recv() -> None:
+        nonlocal ws_active
         first = True
-        ws_active = False
         while True:
             # 4-byte big-endian length prefix (with timeout only before first message)
             if first:
@@ -722,18 +710,18 @@ async def start_listener(
                     first = False
                     ws_active = True
                     on_connect_success("listener4")
-                    logger.info("鉁?棣栨潯寮瑰箷宸插埌杈撅紝IPC 閫氶亾姝ｅ父锛屽紑濮嬭浆鍙?)
+                    logger.info("First message received, IPC channel is healthy")
                     if on_status:
                         on_status(True)
                 try:
                     callback(msg)
                 except Exception as e:
-                    logger.debug(f"callback 寮傚父: {e}")
+                    logger.debug(f"callback 异常: {e}")
 
     try:
         await _recv()
     except asyncio.TimeoutError:
-        logger.warning(f"{_TIMEOUT:.0f}s 鍐呮湭鏀跺埌娑堟伅锛岃纭鐩存挱浼翠荆宸查噸鍚苟寮€鎾?)
+        logger.warning(f"No IPC message received within {_TIMEOUT:.0f}s")
     except asyncio.IncompleteReadError:
         if ws_active:
             logger.warning("IPC 连接断开（直播通道已中断）")
@@ -742,7 +730,7 @@ async def start_listener(
     except asyncio.CancelledError:
         pass
     except Exception as e:
-        logger.error(f"IPC 鎺ユ敹寮傚父: {e}")
+        logger.error(f"IPC 接收异常: {e}")
     finally:
         try:
             writer.close()

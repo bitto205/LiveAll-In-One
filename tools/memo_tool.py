@@ -15,10 +15,10 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui  import QColor
 
-import theme as _theme
+import pages.theme as _theme
 import config as _cfg
-from widgets import ThemedToggle
-from models import GiftMessage, FollowMessage, LikeMessage, FansclubMessage
+from pages.widgets import ThemedToggle
+from listener.models import GiftMessage, FollowMessage, LikeMessage, FansclubMessage
 
 
 # ─────────────────────────────────────────────

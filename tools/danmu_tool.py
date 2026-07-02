@@ -27,7 +27,7 @@ from PySide6.QtGui   import (
     QLinearGradient, QFont, QFontMetrics, QPixmap,
 )
 
-import theme as _theme
+import pages.theme as _theme
 
 # ─────────────────────────────────────────────
 # 常量
@@ -663,7 +663,7 @@ class DanmuWindow(QMainWindow):
         bubble.show()
 
     def add_message(self, msg, suffix: str = ""):
-        from models import ChatMessage, GiftMessage, LikeMessage, FollowMessage
+        from listener.models import ChatMessage, GiftMessage, LikeMessage, FollowMessage
 
         cw_widget = self._root._content
         if isinstance(msg, ChatMessage):
@@ -1028,7 +1028,7 @@ class DanmuTool(QMainWindow):
         if not (self._danmu_win and self._danmu_win.isVisible()):
             return
         import config as _cfg
-        from models import ChatMessage, GiftMessage, FollowMessage, LikeMessage
+        from listener.models import ChatMessage, GiftMessage, FollowMessage, LikeMessage
         if isinstance(msg, ChatMessage):
             suffix = _cfg.get("danmu_chat_suffix", "")
         elif isinstance(msg, GiftMessage):
@@ -1128,7 +1128,7 @@ class DanmuTool(QMainWindow):
             self._like_accum_btn.setStyleSheet(on_style if accum_on else off_style)
 
     def process_message(self, msg):
-        from models import ChatMessage, GiftMessage, FollowMessage, LikeMessage
+        from listener.models import ChatMessage, GiftMessage, FollowMessage, LikeMessage
         import config as _cfg
 
         if isinstance(msg, ChatMessage):
