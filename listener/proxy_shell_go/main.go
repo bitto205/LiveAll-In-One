@@ -228,6 +228,11 @@ func (s *ipcServer) handshake(conn net.Conn) {
 		old.Close()
 	}
 
+	// 若 WSS 已建立但早于本次 IPC 连接，补发 WS_CONNECTED 避免 Python 空等首条弹幕
+	if isLiveActive() {
+		s.push([]byte(ipcCtrlPrefix + ctrlWSConnected))
+	}
+
 	// Keep alive until client disconnects
 	io.Copy(io.Discard, conn)
 	conn.Close()

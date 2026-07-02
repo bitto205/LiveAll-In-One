@@ -680,22 +680,33 @@ async def start_listener(
 
     async def _recv() -> None:
         nonlocal ws_active
-        first = True
+        awaiting_first = True
+        live_confirmed = False
+
+        def _confirm_live(source: str) -> None:
+            nonlocal awaiting_first, live_confirmed
+            ws_active = True
+            if live_confirmed:
+                return
+            live_confirmed = True
+            awaiting_first = False
+            on_connect_success("listener4")
+            logger.info(f"{source}，连接成功")
+            if on_status:
+                on_status(True)
+
         while True:
-            # 4-byte big-endian length prefix (with timeout only before first message)
-            if first:
+            if awaiting_first:
                 hdr = await asyncio.wait_for(reader.readexactly(4), timeout=_TIMEOUT)
             else:
                 hdr = await reader.readexactly(4)
             length = struct.unpack(">I", hdr)[0]
             data = await reader.readexactly(length)
 
-            # Go 主动上报的控制消息（非 protobuf PushFrame）
             if data.startswith(_IPC_CTRL_PREFIX):
                 ctrl = data[len(_IPC_CTRL_PREFIX):].strip()
                 if ctrl == _IPC_CTRL_WS_UP:
-                    ws_active = True
-                    logger.info("IPC 控制消息: WS_CONNECTED")
+                    _confirm_live("IPC 控制消息: WS_CONNECTED")
                 elif ctrl == _IPC_CTRL_WS_DOWN:
                     ws_active = False
                     logger.warning("IPC 控制消息: WS_DISCONNECTED，结束当前连接")
@@ -705,14 +716,9 @@ async def start_listener(
                 continue
 
             msgs = parse_frame(data)
+            if msgs and not live_confirmed:
+                _confirm_live("收到首条直播消息")
             for msg in msgs:
-                if first:
-                    first = False
-                    ws_active = True
-                    on_connect_success("listener4")
-                    logger.info("First message received, IPC channel is healthy")
-                    if on_status:
-                        on_status(True)
                 try:
                     callback(msg)
                 except Exception as e:

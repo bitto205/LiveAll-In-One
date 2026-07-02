@@ -52,6 +52,9 @@ class ListenerThread(QThread):
         self._loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self._loop)
         try:
+            from listener.log_util import ensure_console_logging
+            ensure_console_logging()
+            logger.info("ListenerThread 启动，线路=%s", self._route)
             self._loop.run_until_complete(self._listen())
         except RuntimeError as e:
             if "Event loop stopped before Future completed" not in str(e):
@@ -59,6 +62,13 @@ class ListenerThread(QThread):
         except Exception as e:
             logger.error(f"ListenerThread error: {e}")
         finally:
+            if self._route == "3":
+                try:
+                    from listener.listener3 import _teardown_local_redirector
+                    if self._loop and not self._loop.is_closed():
+                        self._loop.run_until_complete(_teardown_local_redirector())
+                except Exception:
+                    pass
             try:
                 pending = asyncio.all_tasks(self._loop)
                 for t in pending:
@@ -109,7 +119,8 @@ class ListenerThread(QThread):
                     fut.result(timeout=8)
                 except Exception:
                     pass
-            self._loop.call_soon_threadsafe(self._loop.stop)
+            if self._loop.is_running():
+                self._loop.call_soon_threadsafe(self._loop.stop)
         self.quit()
 
 
@@ -147,10 +158,14 @@ class App(QObject):
         if self._thread and not self._thread.isRunning():
             self._thread = None
         if self._thread and self._thread.isRunning():
+            if home:
+                home.begin_listener_switch(route)
             if not self._stopping:
                 self._stopping = True
                 self._stop_listener(wait_callback=True)
             return
+        if home:
+            home.end_listener_switch()
         self._start_listener()
 
     def _start_listener(self) -> None:
@@ -181,12 +196,17 @@ class App(QObject):
         thread = self.sender()
         if isinstance(thread, QThread):
             thread.deleteLater()
+        from pages.home_page import HomePage
+        home = self._win.get_page(HomePage)
+        if home:
+            home.end_listener_switch()
         if self._pending_connect:
             self._start_listener()
 
-    def disconnect(self):
-        """停止当前 ListenerThread；若正在切换线路则取消待启动目标。"""
-        self._pending_connect = None
+    def disconnect(self, *, switching: bool = False):
+        """停止当前 ListenerThread；若正在切换线路则保留待启动目标。"""
+        if not switching:
+            self._pending_connect = None
         if not self._thread or not self._thread.isRunning():
             return
         if not self._stopping:
@@ -225,6 +245,10 @@ def _ensure_admin() -> None:
 
 if __name__ == "__main__":
     _ensure_admin()
+
+    from listener.log_util import ensure_console_logging
+    ensure_console_logging()
+    logger.info("LiveHelper 启动")
 
     def _defer_save_location():
         try:

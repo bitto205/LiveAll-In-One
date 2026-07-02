@@ -62,14 +62,10 @@ def _preempt_msg(by_route: str) -> str:
 
 
 def _apply_listener_preempt(page, by_route: str, home) -> None:
-    msg = _preempt_msg(by_route)
     page._preempted = True
     page._was_connecting = False
-    page.set_conn_state(_Btn.ERROR)
-    page._conn_label.setText(f"⚠️  {msg}")
-    page._conn_label.setStyleSheet(_theme.qss_error_label())
-    page._conn_label.setVisible(True)
-    home.toast.show_msg(msg, error=True)
+    page.set_conn_state(_Btn.IDLE)
+    page._conn_label.setVisible(False)
 
 
 def _step_card(num: int, title: str) -> tuple[QFrame, QVBoxLayout]:
@@ -177,18 +173,25 @@ class ConnPageMixin:
             if self._preempted:
                 self._preempted = False
                 return
-            if self._was_connecting:
+            was_connected = self._btn_state == _Btn.CONNECTED
+            if self._was_connecting and not was_connected:
                 self.set_conn_state(_Btn.ERROR)
                 self._conn_label.setText("⚠️  直播间已断开或没有连接")
                 self._conn_label.setStyleSheet(_theme.qss_error_label())
                 self._conn_label.setVisible(True)
                 self._home.toast.show_msg("直播间已断开", error=True)
+            else:
+                self.set_conn_state(_Btn.IDLE)
+                self._conn_label.setVisible(False)
+                if was_connected:
+                    self._home.toast.show_msg("直播已断开", error=True)
             self._was_connecting = False
+            self.disconnect_listener()
 
     def disconnect_listener(self):
         self._home._connected_route = None
         if self._home._disconnect_cb:
-            self._home._disconnect_cb()
+            self._home._disconnect_cb(switching=self._home.is_switching_listener())
 
 
 class _LoginThread(QThread):
@@ -483,7 +486,11 @@ class _WebRoutePage(QWidget, ConnPageMixin):
             self._conn_btn.setStyleSheet(_theme.qss_outlined(C, h=44))
             self._conn_label.setVisible(False)
         elif state == _Btn.CONNECTING:
-            self._conn_btn.setText("连接中...")
+            waiting = (
+                self._home.is_switching_listener()
+                and self._home.get_active_listener_route() == self._route
+            )
+            self._conn_btn.setText("等待其他线路退出…" if waiting else "连接中...")
             self._conn_btn.setEnabled(False)
             self._conn_btn.setStyleSheet(_theme.qss_disabled(C, h=44))
             self._conn_label.setVisible(False)
@@ -716,6 +723,13 @@ class _Route3Page(QWidget, ConnPageMixin):
             if self._home._disconnect_cb:
                 self._home._disconnect_cb()
             self._home.toast.show_msg("已取消连接")
+        elif self._btn_state == _Btn.CONNECTED:
+            self.set_conn_state(_Btn.IDLE)
+            self._was_connecting = False
+            self._home._connected_route = None
+            if self._home._disconnect_cb:
+                self._home._disconnect_cb()
+            self._home.toast.show_msg("已断开连接")
 
     def set_conn_state(self, state: str):
         self._btn_state = state
@@ -734,15 +748,25 @@ class _Route3Page(QWidget, ConnPageMixin):
             )
             self._conn_label.setVisible(False)
         elif state == _Btn.CONNECTING:
-            self._conn_btn.setText("连接中,等待开播...点击取消连接")
-            self._conn_btn.setEnabled(True)
-            self._conn_btn.setStyleSheet(_theme.qss_outlined(C, h=44))
+            waiting = self._home.is_switching_listener()
+            self._conn_btn.setText(
+                "等待其他线路退出…" if waiting else "连接中,等待开播...点击取消连接"
+            )
+            self._conn_btn.setEnabled(not waiting)
+            self._conn_btn.setStyleSheet(
+                _theme.qss_outlined(C, h=44) if not waiting else _theme.qss_disabled(C, h=44)
+            )
             self._conn_label.setVisible(False)
         elif state == _Btn.CONNECTED:
-            self._conn_btn.setText("连接成功")
-            self._conn_btn.setEnabled(False)
-            self._conn_btn.setStyleSheet(_theme.qss_success(C, h=44))
-            self._conn_label.setVisible(False)
+            self._conn_btn.setText("断开连接")
+            self._conn_btn.setEnabled(True)
+            self._conn_btn.setStyleSheet(_theme.qss_danger(C, h=44))
+            self._conn_label.setText("✅  已连接")
+            self._conn_label.setStyleSheet(
+                f"background: transparent; font-size: 13px;"
+                f" color: {C['active_line']};"
+            )
+            self._conn_label.setVisible(True)
         elif state == _Btn.ERROR:
             self._conn_btn.setText("连接直播间")
             self._conn_btn.setEnabled(ready)
@@ -991,7 +1015,8 @@ class _Route4Page(QWidget, ConnPageMixin):
             )
             self._conn_label.setVisible(False)
         elif state == _Btn.CONNECTING:
-            self._conn_btn.setText("连接中...")
+            waiting = self._home.is_switching_listener()
+            self._conn_btn.setText("等待其他线路退出…" if waiting else "连接中...")
             self._conn_btn.setEnabled(False)
             self._conn_btn.setStyleSheet(_theme.qss_disabled(C, h=44))
             self._conn_label.setVisible(False)
@@ -1051,6 +1076,7 @@ class HomePage(BasePage):
         self._connected_route: str | None = None
         self._route3_page: _Route3Page | None = None
         self._route4_page: _Route4Page | None = None
+        self._switching_listener = False
         self._build()
         _theme.on_change(lambda _: self._refresh_theme())
 
@@ -1072,6 +1098,33 @@ class HomePage(BasePage):
         if self._route4_page and self._route4_page._btn_state in (_Btn.CONNECTING, _Btn.CONNECTED):
             return "4"
         return None
+
+    def is_switching_listener(self) -> bool:
+        return self._switching_listener
+
+    def begin_listener_switch(self, target_route: str) -> None:
+        """其他线路仍在退出时，目标线路保持连接中并显示等待。"""
+        self._switching_listener = True
+        if target_route in self._web_pages:
+            page = self._web_pages[target_route]
+            if page._btn_state == _Btn.CONNECTING:
+                page.set_conn_state(_Btn.CONNECTING)
+        elif target_route == "3" and self._route3_page:
+            if self._route3_page._btn_state == _Btn.CONNECTING:
+                self._route3_page.set_conn_state(_Btn.CONNECTING)
+        elif target_route == "4" and self._route4_page:
+            if self._route4_page._btn_state == _Btn.CONNECTING:
+                self._route4_page.set_conn_state(_Btn.CONNECTING)
+
+    def end_listener_switch(self) -> None:
+        self._switching_listener = False
+        for page in self._web_pages.values():
+            if page._btn_state == _Btn.CONNECTING:
+                page.set_conn_state(_Btn.CONNECTING)
+        if self._route3_page and self._route3_page._btn_state == _Btn.CONNECTING:
+            self._route3_page.set_conn_state(_Btn.CONNECTING)
+        if self._route4_page and self._route4_page._btn_state == _Btn.CONNECTING:
+            self._route4_page.set_conn_state(_Btn.CONNECTING)
 
     def preempt_other_listeners(self, new_route: str) -> None:
         """新线路连接前，中断其他正在运行/等待中的 listener。"""
@@ -1155,26 +1208,25 @@ class HomePage(BasePage):
     def on_status_change(self, connected: bool):
         if connected:
             self._connected_route = _cfg.get("route")
+            route = self._connected_route
+            if route and route in self._web_pages:
+                self._web_pages[route].on_status_change(True)
+            elif route == "3" and self._route3_page:
+                self._route3_page.on_status_change(True)
+            elif route == "4" and self._route4_page:
+                self._route4_page.on_status_change(True)
+            self._reset_other_listener_pages(route)
+            return
+
         route = self._connected_route
         if route and route in self._web_pages:
-            if connected:
-                self._web_pages[route].on_status_change(True)
-            else:
-                self._web_pages[route].on_status_change(False)
-                self._connected_route = None
+            self._web_pages[route].on_status_change(False)
         elif route == "3" and self._route3_page:
-            if connected:
-                self._route3_page.on_status_change(True)
-            else:
-                self._route3_page.on_status_change(False)
-                self._connected_route = None
+            self._route3_page.on_status_change(False)
         elif route == "4" and self._route4_page:
-            if connected:
-                self._route4_page.on_status_change(True)
-            else:
-                self._route4_page.on_status_change(False)
-                self._connected_route = None
-        self._reset_other_listener_pages(route if connected else None)
+            self._route4_page.on_status_change(False)
+        self._connected_route = None
+        self._reset_other_listener_pages(self.get_active_listener_route())
 
     def _build(self):
         self._toast = _Toast(self)
