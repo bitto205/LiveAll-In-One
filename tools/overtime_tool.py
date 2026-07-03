@@ -322,9 +322,12 @@ _MODE_W = 56
 _UNIT_W = 52
 _VAL_W = 42
 _VAL_W_TIME = 52
-_RANDOM_ROW_W = 12 + _VAL_W + 24 + 12 + _VAL_W
+_LBL_NEG_W = 14
+_LBL_TO_W = 24
+_LBL_POS_W = 14
+_RANDOM_ROW_W = _LBL_NEG_W + _VAL_W + _LBL_TO_W + _LBL_POS_W + _VAL_W
 _RIGHT_W = max(_MODE_W, _VAL_W, _RANDOM_ROW_W, _UNIT_W)
-_MODULE_W = _GIFT_LEFT_W + 2 + _RIGHT_W + 8
+_MODULE_W = _GIFT_LEFT_W + _RIGHT_W + 8
 _MODULE_H = _CTRL_H * 3 + _CTRL_GAP * 2 + 8
 _GRID_GAP = 8
 _SECTION_BODY_MX = 16   # _SectionBlock.content 左右各 8px
@@ -625,7 +628,7 @@ class _GiftRuleModule(QFrame):
         self.setObjectName("OvertimeGiftModule")
         root = QHBoxLayout(self)
         root.setContentsMargins(4, 4, 4, 4)
-        root.setSpacing(2)
+        root.setSpacing(0)
 
         left_wrap = QWidget()
         left_wrap.setAttribute(Qt.WA_TranslucentBackground)
@@ -654,6 +657,7 @@ class _GiftRuleModule(QFrame):
         right = QVBoxLayout(right_wrap)
         right.setContentsMargins(0, 0, 0, 0)
         right.setSpacing(_CTRL_GAP)
+        right.setAlignment(Qt.AlignTop | Qt.AlignLeft)
 
         self._mode = _SettingsCombo()
         self._mode.addItems(list(MODES))
@@ -662,33 +666,37 @@ class _GiftRuleModule(QFrame):
         right.addWidget(self._mode, 0, Qt.AlignLeft)
 
         self._row_stack = QStackedWidget()
-        self._row_stack.setFixedSize(_RIGHT_W, _CTRL_H)
+        self._row_stack.setFixedSize(_VAL_W, _CTRL_H)
 
         self._simple = QWidget()
+        self._simple.setFixedSize(_VAL_W, _CTRL_H)
         sr = QHBoxLayout(self._simple)
         sr.setContentsMargins(0, 0, 0, 0)
-        sr.setSpacing(2)
+        sr.setSpacing(0)
+        sr.setAlignment(Qt.AlignLeft)
         self._value = _IntField(max_val=999, char_w=3, min_width=_VAL_W)
         self._value.valueCommitted.connect(lambda: self._emit_change())
-        sr.addWidget(self._value)
+        sr.addWidget(self._value, 0, Qt.AlignLeft)
         self._row_stack.addWidget(self._simple)
 
         self._random = QWidget()
+        self._random.setFixedSize(_RANDOM_ROW_W, _CTRL_H)
         rr = QHBoxLayout(self._random)
         rr.setContentsMargins(0, 0, 0, 0)
-        rr.setSpacing(1)
-        rr.addWidget(self._lbl("-"))
+        rr.setSpacing(0)
+        rr.setAlignment(Qt.AlignLeft)
+        rr.addWidget(self._lbl("负"))
         self._rand_neg = _IntField(max_val=999, char_w=3, min_width=_VAL_W)
         self._rand_neg.valueCommitted.connect(lambda: self._emit_change())
-        rr.addWidget(self._rand_neg)
+        rr.addWidget(self._rand_neg, 0, Qt.AlignLeft)
         rr.addWidget(self._lbl("到 "))
-        rr.addWidget(self._lbl("+"))
+        rr.addWidget(self._lbl("正"))
         self._rand_pos = _IntField(max_val=999, char_w=3, min_width=_VAL_W)
         self._rand_pos.valueCommitted.connect(lambda: self._emit_change())
-        rr.addWidget(self._rand_pos)
+        rr.addWidget(self._rand_pos, 0, Qt.AlignLeft)
         self._row_stack.addWidget(self._random)
 
-        right.addWidget(self._row_stack)
+        right.addWidget(self._row_stack, 0, Qt.AlignLeft)
 
         self._unit_row = QWidget()
         self._unit_row.setFixedHeight(_CTRL_H)
@@ -710,10 +718,8 @@ class _GiftRuleModule(QFrame):
     def _lbl(text: str) -> QLabel:
         lb = QLabel(text)
         lb.setStyleSheet("background:transparent;")
-        lb.setFixedSize(
-            12 if text in ("-", "+") else (24 if text == "到 " else 20),
-            _CTRL_H,
-        )
+        widths = {"负": _LBL_NEG_W, "正": _LBL_POS_W, "到 ": _LBL_TO_W}
+        lb.setFixedSize(widths.get(text, 20), _CTRL_H)
         f = QFont("Microsoft YaHei")
         f.setPixelSize(11)
         lb.setFont(f)
@@ -771,6 +777,9 @@ class _GiftRuleModule(QFrame):
     def _sync_mode(self):
         is_rand = self._mode.currentText() == "随机"
         self._row_stack.setCurrentIndex(1 if is_rand else 0)
+        self._row_stack.setFixedSize(
+            _RANDOM_ROW_W if is_rand else _VAL_W, _CTRL_H,
+        )
 
     def _load_rule(self, rule: dict):
         self._rule = dict(rule)
