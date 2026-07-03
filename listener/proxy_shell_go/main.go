@@ -45,8 +45,12 @@ func exeDir() string {
 	return filepath.Dir(exe)
 }
 
-func livehelperDir() string {
+func aioDir() string {
 	home, _ := os.UserHomeDir()
+	aio := filepath.Join(home, ".liveaio")
+	if _, err := os.Stat(aio); err == nil {
+		return aio
+	}
 	return filepath.Join(home, ".livehelper")
 }
 
@@ -75,7 +79,7 @@ var (
 )
 
 func loadCA() error {
-	dir := livehelperDir()
+	dir := aioDir()
 	certPath := filepath.Join(dir, "proxy_shell_ca.crt")
 	keyPath := filepath.Join(dir, "proxy_shell_ca.key")
 
@@ -150,7 +154,7 @@ func leafCert(hostname string) (*tls.Certificate, error) {
 // Wire format: [uint32 big-endian length][raw PushFrame bytes]
 
 func readIPCToken() string {
-	data, err := os.ReadFile(filepath.Join(livehelperDir(), "ipc_token"))
+	data, err := os.ReadFile(filepath.Join(aioDir(), "ipc_token"))
 	if err != nil {
 		return ""
 	}

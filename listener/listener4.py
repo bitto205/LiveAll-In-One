@@ -31,13 +31,35 @@ _IPC_CTRL_PREFIX  = b"__LH_CTRL__:"
 _IPC_CTRL_WS_UP   = b"WS_CONNECTED"
 _IPC_CTRL_WS_DOWN = b"WS_DISCONNECTED"
 
+_AIO_DIR = Path.home() / ".liveaio"
+_LEGACY_DIR = Path.home() / ".livehelper"
+
+
+def _aio_data_dir() -> Path:
+    """LiveAIO 用户数据目录（首次自动从旧 .livehelper 迁移）。"""
+    if _AIO_DIR.exists():
+        return _AIO_DIR
+    if _LEGACY_DIR.exists():
+        try:
+            shutil.copytree(_LEGACY_DIR, _AIO_DIR)
+            logger.info("已从 .livehelper 迁移到 .liveaio")
+        except Exception as e:
+            logger.warning("迁移 .livehelper 失败: %s", e)
+            return _LEGACY_DIR
+    _AIO_DIR.mkdir(parents=True, exist_ok=True)
+    return _AIO_DIR
+
+
+def _aio_cfg_file() -> Path:
+    return _aio_data_dir() / "config.json"
+
 
 # ---------------------------------------------------------
 # CA 证书管理（patch 时由 Python 生成并安装）
 # ---------------------------------------------------------
 
 def _ca_paths() -> tuple[Path, Path]:
-    d = Path.home() / ".livehelper"
+    d = _aio_data_dir()
     return d / "proxy_shell_ca.crt", d / "proxy_shell_ca.key"
 
 
@@ -56,8 +78,8 @@ def _ensure_ca_cert() -> Path:
     cert_path.parent.mkdir(parents=True, exist_ok=True)
     key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
     name = x509.Name([
-        x509.NameAttribute(NameOID.ORGANIZATION_NAME, "LiveHelper"),
-        x509.NameAttribute(NameOID.COMMON_NAME, "LiveHelper Proxy CA"),
+        x509.NameAttribute(NameOID.ORGANIZATION_NAME, "LiveAIO"),
+        x509.NameAttribute(NameOID.COMMON_NAME, "LiveAIO Proxy CA"),
     ])
     now = datetime.datetime.utcnow()
     cert = (
@@ -101,7 +123,7 @@ def _install_ca_cert() -> None:
 # ---------------------------------------------------------
 
 def _ipc_token_path() -> Path:
-    return Path.home() / ".livehelper" / "ipc_token"
+    return _aio_data_dir() / "ipc_token"
 
 
 def _refresh_ipc_token() -> str:
@@ -121,7 +143,7 @@ def _shell_source() -> Optional[str]:
 
 def _load_shell_exe() -> Optional[str]:
     """Read deployed proxy_shell.exe path from config.json."""
-    cfg_file = Path.home() / ".livehelper" / "config.json"
+    cfg_file = _aio_cfg_file()
     try:
         cfg = json.loads(cfg_file.read_text(encoding="utf-8"))
         p = cfg.get("proxy_shell_exe", "")
@@ -134,7 +156,7 @@ def _load_shell_exe() -> Optional[str]:
 
 def _save_deployed_exe(dest: str) -> None:
     """Persist deployed proxy_shell.exe path into config.json."""
-    cfg_file = Path.home() / ".livehelper" / "config.json"
+    cfg_file = _aio_cfg_file()
     try:
         cfg = json.loads(cfg_file.read_text(encoding="utf-8"))
     except Exception:
@@ -147,7 +169,7 @@ def _save_deployed_exe(dest: str) -> None:
 def save_location() -> None:
     """Persist current main app location and refresh IPC token."""
     exe_dir = os.path.dirname(os.path.abspath(sys.argv[0]))
-    cfg_file = Path.home() / ".livehelper" / "config.json"
+    cfg_file = _aio_cfg_file()
     try:
         cfg = json.loads(cfg_file.read_text(encoding="utf-8"))
     except Exception:
@@ -505,15 +527,16 @@ def check_path_mismatch() -> bool:
 # ---------------------------------------------------------
 
 def _is_ca_installed() -> bool:
-    """Check whether LiveHelper CA is installed in Windows ROOT store."""
+    """Check whether LiveAIO CA is installed in Windows ROOT store."""
     cert_path, _ = _ca_paths()
     if not cert_path.exists():
         return False
     try:
         r = subprocess.run(
             ["powershell", "-NoProfile", "-Command",
-             "(Get-ChildItem Cert:\\LocalMachine\\Root | "
-             "Where-Object Subject -like '*LiveHelper*').Count -gt 0"],
+             "$s = Get-ChildItem Cert:\\LocalMachine\\Root | "
+             "Where-Object { $_.Subject -like '*LiveAIO*' -or $_.Subject -like '*LiveHelper*' }; "
+             "($s.Count -gt 0)"],
             capture_output=True, timeout=10, encoding="utf-8", errors="ignore",
         )
         return "True" in r.stdout
@@ -594,9 +617,7 @@ def get_route4_connect_check() -> dict:
 
     main_location_registered = False
     try:
-        cfg = json.loads(
-            (Path.home() / ".livehelper" / "config.json").read_text(encoding="utf-8")
-        )
+        cfg = json.loads(_aio_cfg_file().read_text(encoding="utf-8"))
         current = os.path.normcase(os.path.dirname(os.path.abspath(sys.argv[0])))
         stored  = os.path.normcase(cfg.get("exe_dir", ""))
         main_location_registered = bool(stored) and current == stored

@@ -228,15 +228,15 @@ async def _run(
             text = msg.text
             if not text.startswith("DY_MSG:"):
                 return
+            if not _state["live_confirmed"]:
+                _state["live_confirmed"] = True
+                on_connect_success("listener1")
+                logger.info("✅ WSS 已收到消息，连接成功")
+                _emit_status(True)
             try:
                 raw   = json.loads(text[7:])
                 built = _build(raw)
                 if built:
-                    if not _state["live_confirmed"]:
-                        _state["live_confirmed"] = True
-                        on_connect_success("listener1")
-                        logger.info("✅ 直播间正在直播")
-                        _emit_status(True)
                     if msg_logger:
                         msg_logger.info(built)
                     callback(built)
@@ -252,11 +252,10 @@ async def _run(
             wait_until="commit",
         )
 
-        # 10 秒内无消息 → 判定未开播
         async def _live_timeout():
-            await asyncio.sleep(10)
+            await asyncio.sleep(30)
             if not _state["live_confirmed"]:
-                logger.warning("10 秒内未收到直播消息，判定为未开播")
+                logger.warning("30 秒内未收到 WSS 消息，连接失败")
                 _emit_status(False)
 
         asyncio.create_task(_live_timeout())

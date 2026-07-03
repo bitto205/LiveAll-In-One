@@ -604,6 +604,10 @@ class DanmuWindow(QMainWindow):
         })
 
     def closeEvent(self, event):
+        from tools.tool_common import is_app_shutting_down
+        if is_app_shutting_down():
+            event.accept()
+            return
         event.ignore()
         self.hide()
         self.closed.emit()
@@ -691,18 +695,12 @@ class DanmuWindow(QMainWindow):
 # 控制面板（注册为 Tool）
 # ─────────────────────────────────────────────
 from tools import register_tool
+from tools.tool_common import ToolSingleton
 
 
 @register_tool(name="弹幕机", desc="透明悬浮弹幕显示窗口", icon="💬", order=1)
-class DanmuTool(QMainWindow):
+class DanmuTool(ToolSingleton, QMainWindow):
     """弹幕机控制面板（单例）。"""
-
-    _instance: "DanmuTool | None" = None
-
-    def __new__(cls, parent=None):
-        if cls._instance is None:
-            cls._instance = super().__new__(cls)
-        return cls._instance
 
     # config 键名
     _SWITCH_KEYS = {
@@ -713,9 +711,8 @@ class DanmuTool(QMainWindow):
     }
 
     def __init__(self, parent=None):
-        if hasattr(self, "_initialized"):
+        if not ToolSingleton.guard_init(self):
             return
-        self._initialized = True
         super().__init__(parent, Qt.Window)
         self.setWindowTitle("弹幕机")
         self.setMinimumSize(360, 460)
@@ -1183,6 +1180,10 @@ class DanmuTool(QMainWindow):
 
     def closeEvent(self, event):
         """关闭时隐藏而非销毁（保持单例可用）。"""
+        from tools.tool_common import is_app_shutting_down
+        if is_app_shutting_down():
+            event.accept()
+            return
         event.ignore()
         self.hide()
 

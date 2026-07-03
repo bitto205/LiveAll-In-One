@@ -30,6 +30,26 @@ import pages
 
 logger = __import__("logging").getLogger(__name__)
 
+APP_NAME = "LiveAIO"
+
+
+def _set_process_name(name: str) -> None:
+    """Windows 10+：任务管理器「描述」列显示为 LiveAIO。"""
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        SetProcessDescription = ctypes.windll.kernel32.SetProcessDescription
+        SetProcessDescription.argtypes = (wintypes.HANDLE, wintypes.LPCWSTR)
+        SetProcessDescription.restype = wintypes.HRESULT
+        SetProcessDescription(
+            ctypes.windll.kernel32.GetCurrentProcess(), name,
+        )
+    except Exception:
+        pass
+
 
 class ListenerThread(QThread):
     message_received = Signal(object)
@@ -130,7 +150,12 @@ class App(QObject):
 
     def __init__(self, argv: list):
         super().__init__()
-        self._qt     = QApplication(argv)
+        self._qt = QApplication(argv)
+        self._qt.setApplicationName(APP_NAME)
+        self._qt.setApplicationDisplayName(APP_NAME)
+        self._qt.setOrganizationName(APP_NAME)
+        self._qt.setQuitOnLastWindowClosed(False)
+        _set_process_name(APP_NAME)
         self._thread: ListenerThread | None = None
         self._pending_connect: tuple[str, str] | None = None  # (live_id, route)
         self._stopping = False
@@ -248,7 +273,7 @@ if __name__ == "__main__":
 
     from listener.log_util import ensure_console_logging
     ensure_console_logging()
-    logger.info("LiveHelper 启动")
+    logger.info("%s 启动", APP_NAME)
 
     def _defer_save_location():
         try:

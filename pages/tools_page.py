@@ -93,10 +93,21 @@ class ToolsPage(BasePage):
 
     def _open_tool(self, meta):
         name = meta.name
-        win  = self._open_wins.get(name)
-        if win is None or not win.isVisible():
-            win = meta.cls()
-            self._open_wins[name] = win
+        win = self._open_wins.get(name)
+        if win is not None:
+            win.show()
+            win.raise_()
+            win.activateWindow()
+            return
+        from PySide6.QtCore import QTimer
+        QTimer.singleShot(0, lambda m=meta: self._open_tool_deferred(m))
+
+    def _open_tool_deferred(self, meta):
+        name = meta.name
+        if self._open_wins.get(name) is not None:
+            return
+        win = meta.cls()
+        self._open_wins[name] = win
         win.show()
         win.raise_()
         win.activateWindow()
@@ -112,15 +123,33 @@ class ToolsPage(BasePage):
 
     # ── 消息转发给所有已打开的工具 ──────────────
     def on_message(self, msg):
-        for name, win in self._open_wins.items():
-            if win and win.isVisible() and hasattr(win, "process_message"):
-                try:
-                    win.process_message(msg)
-                except Exception as e:
-                    import logging
-                    logging.getLogger(__name__).error(
-                        f"[ToolsPage] {name}.process_message 异常: {e}", exc_info=True
-                    )
+        import logging
+        logger = logging.getLogger(__name__)
+        seen: set[int] = set()
+
+        def _dispatch(win):
+            if not win or id(win) in seen:
+                return
+            seen.add(id(win))
+            if not hasattr(win, "process_message"):
+                return
+            try:
+                win.process_message(msg)
+            except Exception as e:
+                logger.error(
+                    f"[ToolsPage] process_message 异常: {e}", exc_info=True,
+                )
+
+        for win in self._open_wins.values():
+            _dispatch(win)
+
+        # 单例工具：悬浮窗可独立于设置页运行
+        from tools.memo_tool import MemoTool
+        from tools.danmu_tool import DanmuTool
+        from tools.overtime_tool import OvertimeTool
+        _dispatch(MemoTool())
+        _dispatch(DanmuTool())
+        _dispatch(OvertimeTool())
 
 
 class ToolsSettings(BaseSetting):

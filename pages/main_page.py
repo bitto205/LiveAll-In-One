@@ -484,7 +484,7 @@ class Sidebar(QWidget):
 class MainPage(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("LiveHelper")
+        self.setWindowTitle("LiveAIO")
         self.setMinimumSize(900 + WIN_SHADOW_MARGIN * 2,
                             600 + WIN_SHADOW_MARGIN * 2)
         self.resize(1200 + WIN_SHADOW_MARGIN * 2,
@@ -612,11 +612,11 @@ class MainPage(QMainWindow):
         f.setBold(True)
         f.setPixelSize(14)
         p.setFont(f)
-        p.drawText(pix.rect(), Qt.AlignCenter, "L")
+        p.drawText(pix.rect(), Qt.AlignCenter, "A")
         p.end()
 
         self._tray = QSystemTrayIcon(QIcon(pix), self)
-        self._tray.setToolTip("LiveHelper")
+        self._tray.setToolTip("LiveAIO")
 
         menu = QMenu()
         show_action = menu.addAction("显示主窗口")
@@ -624,11 +624,12 @@ class MainPage(QMainWindow):
         quit_action = menu.addAction("退出")
 
         show_action.triggered.connect(self._restore_from_tray)
-        quit_action.triggered.connect(QApplication.instance().quit)
+        quit_action.triggered.connect(self._quit_application)
 
         self._tray.setContextMenu(menu)
         self._tray.activated.connect(self._on_tray_activated)
-        self._tray.show()
+        if _cfg.get("minimize_to_tray", True):
+            self._tray.show()
 
     def _on_tray_activated(self, reason):
         if reason == QSystemTrayIcon.DoubleClick:
@@ -638,20 +639,31 @@ class MainPage(QMainWindow):
         self.showNormal()
         self.activateWindow()
 
+    def _quit_application(self):
+        """完全退出：关闭所有工具窗并结束主进程。"""
+        if hasattr(self, "_tray"):
+            self._tray.hide()
+        from tools.tool_common import shutdown_all_tools
+        shutdown_all_tools()
+        QApplication.instance().quit()
+
     def closeEvent(self, event):
         """关闭按钮：若开启"缩小到托盘"则隐藏窗口而非退出。"""
         if _cfg.get("minimize_to_tray", True):
             event.ignore()
             self.hide()
             if hasattr(self, "_tray"):
+                if not self._tray.isVisible():
+                    self._tray.show()
                 self._tray.showMessage(
-                    "LiveHelper",
+                    "LiveAIO",
                     "程序已最小化到任务栏，右键图标可退出",
                     QSystemTrayIcon.Information,
                     2000,
                 )
         else:
             event.accept()
+            self._quit_application()
 
 
 # ─────────────────────────────────────────────

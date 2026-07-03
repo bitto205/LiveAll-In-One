@@ -19,8 +19,6 @@ _page_proxy_snapshot: Optional[bool] = None
 _shutdown_fn: Optional[Callable[[], Awaitable[None]]] = None
 _stop_event: Optional[asyncio.Event] = None
 
-_CONNECT_TIMEOUT = 60.0
-
 
 def check_system_proxy() -> dict:
     try:
@@ -255,9 +253,7 @@ async def start_listener(
     master.addons.add(_DouyinWsAddon(callback, on_status, connected, session_lost, loop))
 
     logger.info(f"local 模式已启动，拦截进程: {target_process}")
-    logger.info(
-        f"请在直播伴侣中断开并重新连接直播间，触发新的 WSS 握手（{_CONNECT_TIMEOUT:.0f}s 超时）"
-    )
+    logger.info("请在直播伴侣中断开并重新连接直播间，触发新的 WSS 握手")
 
     master_task = asyncio.create_task(master.run())
 
@@ -276,13 +272,7 @@ async def start_listener(
     _shutdown_fn = _stop_master
 
     try:
-        await asyncio.wait_for(_wait_connect_or_stop(connected), timeout=_CONNECT_TIMEOUT)
-    except asyncio.TimeoutError:
-        logger.warning(f"[线路3] {_CONNECT_TIMEOUT:.0f}s 内未检测到 WSS 连接，连接失败")
-        await _stop_master()
-        if on_status:
-            on_status(False)
-        return
+        await _wait_connect_or_stop(connected)
     except asyncio.CancelledError:
         await _stop_master()
         return

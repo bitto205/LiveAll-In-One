@@ -367,15 +367,20 @@ class _MainTab(QWidget):
 from tools import register_tool
 
 
+from tools.tool_common import ToolSingleton
+
+
 @register_tool(name="备忘录", desc="将礼物、关注、点赞记录为可消除的列表条目",
                icon="📋", order=0)
-class MemoTool(QMainWindow):
+class MemoTool(ToolSingleton, QMainWindow):
     """
     备忘录工具窗口。
     外部调用 process_message(msg) 传入直播消息。
     """
 
     def __init__(self, parent=None):
+        if not ToolSingleton.guard_init(self):
+            return
         super().__init__(parent, Qt.Window)
         self.setWindowTitle("备忘录")
         self.setMinimumSize(380, 560)

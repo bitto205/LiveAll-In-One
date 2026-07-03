@@ -84,23 +84,24 @@ async def _run(
             seen_ws.add(ws.url)
             logger.info("✅ WebSocket 已捕获，等待直播消息确认...")
 
-            # 10 秒内没有任何消息 → 判定为未开播
             async def _live_timeout():
-                await asyncio.sleep(10)
+                await asyncio.sleep(30)
                 if not _state["live_confirmed"]:
-                    logger.warning("10 秒内未收到直播消息，判定为未开播")
+                    logger.warning("30 秒内未收到 WSS 消息，连接失败")
                     _emit_status(False)
 
             asyncio.create_task(_live_timeout())
 
             def on_frame(raw: bytes):
-                msgs = parse_frame(raw)
-                # 第一条消息到达 → 确认直播中
-                if msgs and not _state["live_confirmed"]:
+                if not _state["live_confirmed"]:
                     _state["live_confirmed"] = True
                     on_connect_success("listener2")
-                    logger.info("✅ 直播间正在直播")
+                    logger.info("✅ WSS 已收到消息，连接成功")
                     _emit_status(True)
+                try:
+                    msgs = parse_frame(raw)
+                except Exception:
+                    return
                 for msg in msgs:
                     try:
                         if msg_logger:
