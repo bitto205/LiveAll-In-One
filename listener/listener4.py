@@ -1,4 +1,4 @@
-﻿"""
+"""
 listener4.py - 线路 4：patch 直播伴侣 + proxy_shell IPC 收消息
 """
 import asyncio
@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from listener.log_util import get_logger, on_connect_success
-from listener.LiveProtobuf import parse_frame
+from listener.LiveProtobuf import parse_frame, try_parse_frame
 
 logger = get_logger(__name__)
 
@@ -25,10 +25,12 @@ PROXY_PORT        = 19088
 IPC_PORT          = 19098
 _PROXY_VALUE      = f"127.0.0.1:{PROXY_PORT},direct://"
 _TIMEOUT          = 60.0
+_LIVE_DATA_TIMEOUT = 10.0  # WS 建立后等待初始 PushFrame
 _SHELL_PROCESS    = "proxy_shell.exe"   # process name for tasklist
 _SHELL_MARKER     = "proxy_shell.exe"   # marker in patched index.js
 _IPC_CTRL_PREFIX  = b"__LH_CTRL__:"
-_IPC_CTRL_WS_UP   = b"WS_CONNECTED"
+_IPC_CTRL_WS_OPEN = b"WS_OPEN"
+_IPC_CTRL_WS_DATA = b"WS_CONNECTED"
 _IPC_CTRL_WS_DOWN = b"WS_DISCONNECTED"
 
 _AIO_DIR = Path.home() / ".liveaio"
@@ -695,60 +697,102 @@ async def start_listener(
             on_status(False)
         return
 
-    logger.info(f"Connected to proxy_shell IPC ({IPC_PORT}), waiting for messages ({_TIMEOUT:.0f}s timeout)")
+    logger.info(f"Connected to proxy_shell IPC ({IPC_PORT}), waiting for WebSocket…")
 
     ws_active = False
 
+    async def _read_packet(timeout: float | None) -> bytes:
+        if timeout is not None:
+            hdr = await asyncio.wait_for(reader.readexactly(4), timeout=timeout)
+        else:
+            hdr = await reader.readexactly(4)
+        length = struct.unpack(">I", hdr)[0]
+        return await reader.readexactly(length)
+
     async def _recv() -> None:
         nonlocal ws_active
-        awaiting_first = True
+        ws_seen = False
         live_confirmed = False
+        loop = asyncio.get_running_loop()
 
-        def _confirm_live(source: str) -> None:
-            nonlocal awaiting_first, live_confirmed
+        def _confirm_live() -> None:
+            nonlocal live_confirmed
             ws_active = True
             if live_confirmed:
                 return
             live_confirmed = True
-            awaiting_first = False
             on_connect_success("listener4")
-            logger.info(f"{source}，连接成功")
+            logger.info("✅ 直播间正在直播")
             if on_status:
                 on_status(True)
 
-        while True:
-            if awaiting_first:
-                hdr = await asyncio.wait_for(reader.readexactly(4), timeout=_TIMEOUT)
-            else:
-                hdr = await reader.readexactly(4)
-            length = struct.unpack(">I", hdr)[0]
-            data = await reader.readexactly(length)
-
+        def _handle_data(data: bytes) -> None:
+            nonlocal ws_seen, ws_active, live_confirmed
             if data.startswith(_IPC_CTRL_PREFIX):
                 ctrl = data[len(_IPC_CTRL_PREFIX):].strip()
-                if ctrl == _IPC_CTRL_WS_UP:
-                    _confirm_live("IPC 控制消息: WS_CONNECTED")
+                if ctrl == _IPC_CTRL_WS_OPEN:
+                    if not ws_seen:
+                        ws_seen = True
+                        logger.info(
+                            f"IPC: WebSocket 已建立，{_LIVE_DATA_TIMEOUT:.0f}s 内等待初始直播数据…"
+                        )
+                    ws_active = True
+                elif ctrl == _IPC_CTRL_WS_DATA:
+                    ws_active = True
                 elif ctrl == _IPC_CTRL_WS_DOWN:
                     ws_active = False
                     logger.warning("IPC 控制消息: WS_DISCONNECTED，结束当前连接")
                     if on_status:
                         on_status(False)
-                    return
-                continue
+                    raise _WsDisconnected()
+                return
 
-            msgs = parse_frame(data)
-            if msgs and not live_confirmed:
-                _confirm_live("收到首条直播消息")
+            channel_ok, msgs = try_parse_frame(data)
+            if channel_ok and not live_confirmed:
+                _confirm_live()
             for msg in msgs:
                 try:
                     callback(msg)
                 except Exception as e:
                     logger.debug(f"callback 异常: {e}")
 
+        class _WsDisconnected(Exception):
+            pass
+
+        # 阶段 1：等待 WebSocket 建立（无超时）
+        while not ws_seen:
+            data = await _read_packet(None)
+            try:
+                _handle_data(data)
+            except _WsDisconnected:
+                return
+
+        # 阶段 2：WS 已建立，10s 内等待可解析的初始 PushFrame
+        deadline = loop.time() + _LIVE_DATA_TIMEOUT
+        while not live_confirmed:
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                raise asyncio.TimeoutError()
+            data = await _read_packet(remaining)
+            try:
+                _handle_data(data)
+            except _WsDisconnected:
+                return
+
+        # 阶段 3：持续收消息
+        while True:
+            data = await _read_packet(None)
+            try:
+                _handle_data(data)
+            except _WsDisconnected:
+                return
+
     try:
         await _recv()
     except asyncio.TimeoutError:
-        logger.warning(f"No IPC message received within {_TIMEOUT:.0f}s")
+        logger.warning(
+            f"WebSocket 建立后 {_LIVE_DATA_TIMEOUT:.0f}s 内未收到初始直播数据，连接失败"
+        )
     except asyncio.IncompleteReadError:
         if ws_active:
             logger.warning("IPC 连接断开（直播通道已中断）")

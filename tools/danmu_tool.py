@@ -523,6 +523,7 @@ class DanmuWindow(QMainWindow):
             Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint,
         )
         self.setAttribute(Qt.WA_TranslucentBackground)
+        self.setAttribute(Qt.WA_QuitOnClose, False)
         self.setMinimumSize(200, 150)
         self._restore_geometry()      # 优先用上次保存的位置/大小
 
@@ -698,6 +699,45 @@ from tools import register_tool
 from tools.tool_common import ToolSingleton
 
 
+_DANMU_TOOL_W = 448
+_DANMU_TOOL_H = 520
+_DANMU_SIDE = 24       # 卡片距窗口左右等宽留白
+_DANMU_SCROLL_GUTTER = 8  # 预留给竖向滚动条，避免内容区左右视觉不对称
+
+
+def _danmu_spin_qss(C: dict) -> str:
+    bg = C["card"]
+    arrow = C["text_muted"]
+    return (
+        f"QSpinBox {{ background: {bg}; color: {C['text']};"
+        f" border: 1px solid {C['border']}; border-radius: 5px;"
+        f" font-size: 12px; padding: 2px 4px; padding-right: 18px; min-height: 28px; }}"
+        f"QSpinBox QLineEdit {{ background: {bg}; color: {C['text']};"
+        f" border: none; padding: 0 2px;"
+        f" selection-background-color: {C['active_line']}; }}"
+        f"QSpinBox::up-button {{"
+        f" subcontrol-origin: border; subcontrol-position: top right;"
+        f" background: {C['hover']}; border: none; margin: 0; padding: 0;"
+        f" width: 16px; height: 14px; border-top-right-radius: 4px; }}"
+        f"QSpinBox::down-button {{"
+        f" subcontrol-origin: border; subcontrol-position: bottom right;"
+        f" background: {C['hover']}; border: none; margin: 0; padding: 0;"
+        f" width: 16px; height: 14px; border-bottom-right-radius: 4px; }}"
+        f"QSpinBox::up-button:hover, QSpinBox::down-button:hover {{"
+        f" background: {C['active']}; }}"
+        f"QSpinBox::up-arrow {{"
+        f" image: none; width: 0; height: 0;"
+        f" border-left: 3px solid transparent;"
+        f" border-right: 3px solid transparent;"
+        f" border-bottom: 4px solid {arrow}; margin-bottom: 1px; }}"
+        f"QSpinBox::down-arrow {{"
+        f" image: none; width: 0; height: 0;"
+        f" border-left: 3px solid transparent;"
+        f" border-right: 3px solid transparent;"
+        f" border-top: 4px solid {arrow}; margin-top: 1px; }}"
+    )
+
+
 @register_tool(name="弹幕机", desc="透明悬浮弹幕显示窗口", icon="💬", order=1)
 class DanmuTool(ToolSingleton, QMainWindow):
     """弹幕机控制面板（单例）。"""
@@ -714,9 +754,9 @@ class DanmuTool(ToolSingleton, QMainWindow):
         if not ToolSingleton.guard_init(self):
             return
         super().__init__(parent, Qt.Window)
+        self.setAttribute(Qt.WA_QuitOnClose, False)
         self.setWindowTitle("弹幕机")
-        self.setMinimumSize(360, 460)
-        self.resize(380, 520)
+        self.setFixedSize(_DANMU_TOOL_W, _DANMU_TOOL_H)
         self._danmu_win: DanmuWindow | None = None
         self._switch_btns: dict[str, QPushButton] = {}
         self._gift_spin:      QSpinBox    | None = None
@@ -724,9 +764,13 @@ class DanmuTool(ToolSingleton, QMainWindow):
         self._like_accum_btn: QPushButton | None = None
         self._like_accum:     dict        = {}   # uid → {"user": str, "count": int}
         self._suffix_edits:   dict        = {}   # key → QLineEdit
+        self._apply_btns:    list[QPushButton] = []
+        self._active:         dict        = {}
         self._build()
+        self._load_active()
         self._cur_nav  = 0
         self.setStyleSheet(self._qss())
+        self._refresh_switches(sync_from_config=True)
         _theme.on_change(lambda _: (
             self.setStyleSheet(self._qss()),
             self._refresh_switches(),
@@ -748,7 +792,10 @@ class DanmuTool(ToolSingleton, QMainWindow):
         #DanmuNavBtn[active=true] {{ background: transparent; color: {C['text']};
                                      font-weight: 600;
                                      border-bottom: 2px solid {C['active_line']}; }}
-        #DanmuContent   {{ background: {C['bg']}; }}
+        #DanmuContent   {{ background: {C['bg']}; border: none; }}
+        #DanmuContent > QWidget > QWidget {{
+            background: {C['bg']};
+        }}
         #DanmuCard      {{ background: {C['card']}; border-radius: 10px;
                            border: 1px solid {C['border']}; }}
         #DanmuPageTitle {{ font-size: 20px; font-weight: 600; color: {C['text']}; }}
@@ -759,12 +806,20 @@ class DanmuTool(ToolSingleton, QMainWindow):
                                        min-height: 20px; }}
         QScrollBar::add-line:vertical,
         QScrollBar::sub-line:vertical {{ height: 0; }}
+        QLineEdit {{
+            background: {C['card']}; color: {C['text']};
+            border: 1px solid {C['border']}; border-radius: 5px;
+            font-size: 12px; padding: 2px 6px;
+            selection-background-color: {C['active_line']};
+        }}
+        {_danmu_spin_qss(C)}
         """
 
     # ── 布局助手 ─────────────────────────────────
     def _make_card(self) -> QFrame:
         card = QFrame()
         card.setObjectName("DanmuCard")
+        card.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         lay = QVBoxLayout(card)
         lay.setContentsMargins(20, 16, 20, 16)
         lay.setSpacing(14)
@@ -787,12 +842,37 @@ class DanmuTool(ToolSingleton, QMainWindow):
         edit.setPlaceholderText("最多10字")
         edit.setFixedWidth(150)
         edit.setText(_cfg.get(f"danmu_{key}_suffix", ""))
-        edit.textChanged.connect(lambda t, k=key: _cfg.set(f"danmu_{k}_suffix", t))
         self._suffix_edits[key] = edit
         row.addWidget(lbl)
         row.addStretch()
         row.addWidget(edit)
         card_lay.addLayout(row)
+
+    def _make_apply_btn(self, handler) -> QPushButton:
+        btn = QPushButton("应用")
+        btn.setFixedSize(72, 34)
+        btn.setCursor(Qt.PointingHandCursor)
+        btn.clicked.connect(handler)
+        self._apply_btns.append(btn)
+        return btn
+
+    def _add_apply_row(self, lay: QVBoxLayout, handler) -> None:
+        row = QHBoxLayout()
+        row.setContentsMargins(0, 8, 0, 0)
+        row.addStretch(1)
+        row.addWidget(self._make_apply_btn(handler))
+        lay.addLayout(row)
+
+    def _style_apply_btn(self, btn: QPushButton) -> None:
+        C = _theme.get()
+        btn.setStyleSheet(f"""
+            QPushButton {{
+                background: {C['active_line']}; color: #fff;
+                border: none; border-radius: 6px;
+                font-size: 13px; font-weight: 600;
+            }}
+            QPushButton:hover {{ background: {C['hover']}; color: {C['text']}; }}
+        """)
 
     def _add_toggle_row(self, card_lay, key: str, name: str, tip: str):
         """在卡片布局里添加一行开关（名称+tip+按钮）。"""
@@ -821,6 +901,7 @@ class DanmuTool(ToolSingleton, QMainWindow):
         C = _theme.get()
         title = QLabel("设置")
         title.setObjectName("DanmuPageTitle")
+        title.setAlignment(Qt.AlignHCenter)
         lay.addWidget(title)
 
         card = self._make_card()
@@ -849,6 +930,7 @@ class DanmuTool(ToolSingleton, QMainWindow):
         cl.addWidget(self._make_sep())
         self._add_suffix_row(cl, "chat")
         lay.addWidget(card)
+        self._add_apply_row(lay, self._apply_chat)
 
     def _build_gift_panel(self, lay):
         import config as _cfg
@@ -863,9 +945,8 @@ class DanmuTool(ToolSingleton, QMainWindow):
         spin = QSpinBox()
         spin.setRange(0, 999999)
         spin.setSuffix(" 钻")
-        spin.setFixedWidth(110)
+        spin.setFixedSize(110, 28)
         spin.setValue(_cfg.get("danmu_gift_min_diamonds", 0))
-        spin.valueChanged.connect(lambda v: _cfg.set("danmu_gift_min_diamonds", v))
         self._gift_spin = spin
         row.addWidget(lbl)
         row.addStretch()
@@ -874,6 +955,7 @@ class DanmuTool(ToolSingleton, QMainWindow):
         cl.addWidget(self._make_sep())
         self._add_suffix_row(cl, "gift")
         lay.addWidget(card)
+        self._add_apply_row(lay, self._apply_gift)
 
     def _build_follow_panel(self, lay):
         lay.addWidget(self._page_title("关注"))
@@ -883,6 +965,7 @@ class DanmuTool(ToolSingleton, QMainWindow):
         cl.addWidget(self._make_sep())
         self._add_suffix_row(cl, "follow")
         lay.addWidget(card)
+        self._add_apply_row(lay, self._apply_follow)
 
     def _build_like_panel(self, lay):
         import config as _cfg
@@ -896,9 +979,8 @@ class DanmuTool(ToolSingleton, QMainWindow):
         lbl = QLabel("数量阈值")
         spin = QSpinBox()
         spin.setRange(1, 99999)
-        spin.setFixedWidth(90)
+        spin.setFixedSize(90, 28)
         spin.setValue(_cfg.get("danmu_like_threshold", 1))
-        spin.valueChanged.connect(lambda v: _cfg.set("danmu_like_threshold", v))
         self._like_spin = spin
         row.addWidget(lbl)
         row.addStretch()
@@ -928,11 +1010,13 @@ class DanmuTool(ToolSingleton, QMainWindow):
         cl.addWidget(self._make_sep())
         self._add_suffix_row(cl, "like")
         lay.addWidget(card)
+        self._add_apply_row(lay, self._apply_like)
 
     @staticmethod
     def _page_title(text: str) -> QLabel:
         lbl = QLabel(text)
         lbl.setObjectName("DanmuPageTitle")
+        lbl.setAlignment(Qt.AlignHCenter)
         return lbl
 
     # ── 主构建入口 ───────────────────────────────
@@ -973,15 +1057,23 @@ class DanmuTool(ToolSingleton, QMainWindow):
             tb_lay.addWidget(nav_btn)
 
             inner = QWidget()
+            inner.setObjectName("DanmuPage")
             inner_lay = QVBoxLayout(inner)
-            inner_lay.setContentsMargins(24, 24, 24, 24)
+            inner_lay.setContentsMargins(
+                _DANMU_SIDE + _DANMU_SCROLL_GUTTER // 2,
+                20,
+                _DANMU_SIDE + _DANMU_SCROLL_GUTTER // 2,
+                20,
+            )
             inner_lay.setSpacing(16)
             builder(inner_lay)
             inner_lay.addStretch()
 
             scroll = QScrollArea()
             scroll.setWidgetResizable(True)
+            scroll.setFrameShape(QFrame.NoFrame)
             scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+            scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
             scroll.setObjectName("DanmuContent")
             scroll.setWidget(inner)
             self._stack.addWidget(scroll)
@@ -992,7 +1084,6 @@ class DanmuTool(ToolSingleton, QMainWindow):
 
         self._navigate(0)
         self._refresh_btn()
-        self._refresh_switches()
 
     # ── 导航 ─────────────────────────────────────
     def _navigate(self, index: int):
@@ -1003,37 +1094,99 @@ class DanmuTool(ToolSingleton, QMainWindow):
             btn.style().unpolish(btn)
             btn.style().polish(btn)
 
+    def _load_active(self) -> None:
+        import config as _cfg
+        self._active = {
+            "danmu_chat_on": bool(_cfg.get("danmu_chat_on", True)),
+            "danmu_chat_suffix": _cfg.get("danmu_chat_suffix", "") or "",
+            "danmu_gift_on": bool(_cfg.get("danmu_gift_on", True)),
+            "danmu_gift_min_diamonds": int(_cfg.get("danmu_gift_min_diamonds", 0) or 0),
+            "danmu_gift_suffix": _cfg.get("danmu_gift_suffix", "") or "",
+            "danmu_follow_on": bool(_cfg.get("danmu_follow_on", True)),
+            "danmu_follow_suffix": _cfg.get("danmu_follow_suffix", "") or "",
+            "danmu_like_on": bool(_cfg.get("danmu_like_on", True)),
+            "danmu_like_threshold": max(1, int(_cfg.get("danmu_like_threshold", 1) or 1)),
+            "danmu_like_accumulate": bool(_cfg.get("danmu_like_accumulate", False)),
+            "danmu_like_suffix": _cfg.get("danmu_like_suffix", "") or "",
+        }
+
+    def _apply_chat(self) -> None:
+        import config as _cfg
+        on = self._switch_btns["chat"].text() == "已开启"
+        suffix = self._suffix_edits["chat"].text()
+        _cfg.set("danmu_chat_on", on)
+        _cfg.set("danmu_chat_suffix", suffix)
+        self._active["danmu_chat_on"] = on
+        self._active["danmu_chat_suffix"] = suffix
+
+    def _apply_gift(self) -> None:
+        import config as _cfg
+        on = self._switch_btns["gift"].text() == "已开启"
+        min_d = self._gift_spin.value()
+        suffix = self._suffix_edits["gift"].text()
+        _cfg.set("danmu_gift_on", on)
+        _cfg.set("danmu_gift_min_diamonds", min_d)
+        _cfg.set("danmu_gift_suffix", suffix)
+        self._active["danmu_gift_on"] = on
+        self._active["danmu_gift_min_diamonds"] = min_d
+        self._active["danmu_gift_suffix"] = suffix
+
+    def _apply_follow(self) -> None:
+        import config as _cfg
+        on = self._switch_btns["follow"].text() == "已开启"
+        suffix = self._suffix_edits["follow"].text()
+        _cfg.set("danmu_follow_on", on)
+        _cfg.set("danmu_follow_suffix", suffix)
+        self._active["danmu_follow_on"] = on
+        self._active["danmu_follow_suffix"] = suffix
+
+    def _apply_like(self) -> None:
+        import config as _cfg
+        on = self._switch_btns["like"].text() == "已开启"
+        threshold = max(1, self._like_spin.value())
+        accum = self._like_accum_btn.text() == "累加：已开启"
+        suffix = self._suffix_edits["like"].text()
+        old_th = self._active.get("danmu_like_threshold", 1)
+        old_acc = self._active.get("danmu_like_accumulate", False)
+        _cfg.set("danmu_like_on", on)
+        _cfg.set("danmu_like_threshold", threshold)
+        _cfg.set("danmu_like_accumulate", accum)
+        _cfg.set("danmu_like_suffix", suffix)
+        self._active["danmu_like_on"] = on
+        self._active["danmu_like_threshold"] = threshold
+        self._active["danmu_like_accumulate"] = accum
+        self._active["danmu_like_suffix"] = suffix
+        if threshold != old_th or accum != old_acc:
+            self._like_accum.clear()
+
+    def _active_on(self, cfg_key: str) -> bool:
+        return bool(self._active.get(cfg_key, True))
+
+    def _active_suffix(self, cfg_key: str) -> str:
+        return self._active.get(cfg_key, "") or ""
+
     # ── spin / accumulate 辅助 ──────────────────
     def _spin_qss(self, C: dict) -> str:
-        return (
-            f"QSpinBox {{ background: {C['hover']}; color: {C['text']};"
-            f" border: 1px solid {C['border']}; border-radius: 5px;"
-            f" font-size: 12px; padding: 2px 4px; }}"
-            f"QSpinBox::up-button {{ border: none; width: 16px; }}"
-            f"QSpinBox::down-button {{ border: none; width: 16px; }}"
-        )
+        return _danmu_spin_qss(C)
 
     def _on_toggle_accum(self):
-        import config as _cfg
-        new_val = not _cfg.get("danmu_like_accumulate", False)
-        _cfg.set("danmu_like_accumulate", new_val)
-        if not new_val:
-            self._like_accum.clear()
+        btn = self._like_accum_btn
+        on = btn.text() == "累加：已开启"
+        btn.setText("累加：已关闭" if on else "累加：已开启")
         self._refresh_switches()
 
     def _send_to_danmu(self, msg):
         if not (self._danmu_win and self._danmu_win.isVisible()):
             return
-        import config as _cfg
         from listener.models import ChatMessage, GiftMessage, FollowMessage, LikeMessage
         if isinstance(msg, ChatMessage):
-            suffix = _cfg.get("danmu_chat_suffix", "")
+            suffix = self._active_suffix("danmu_chat_suffix")
         elif isinstance(msg, GiftMessage):
-            suffix = _cfg.get("danmu_gift_suffix", "")
+            suffix = self._active_suffix("danmu_gift_suffix")
         elif isinstance(msg, FollowMessage):
-            suffix = _cfg.get("danmu_follow_suffix", "")
+            suffix = self._active_suffix("danmu_follow_suffix")
         elif isinstance(msg, LikeMessage):
-            suffix = _cfg.get("danmu_like_suffix", "")
+            suffix = self._active_suffix("danmu_like_suffix")
         else:
             suffix = ""
         self._danmu_win.add_message(msg, suffix)
@@ -1077,17 +1230,13 @@ class DanmuTool(ToolSingleton, QMainWindow):
             """)
 
     # ── 开关读写 ─────────────────────────────
-    def _switch_on(self, key: str) -> bool:
-        import config as _cfg
-        return _cfg.get(self._SWITCH_KEYS[key], True)
-
     def _on_toggle(self, key: str):
-        import config as _cfg
-        cfg_key = self._SWITCH_KEYS[key]
-        _cfg.set(cfg_key, not _cfg.get(cfg_key, True))
+        btn = self._switch_btns[key]
+        on = btn.text() == "已开启"
+        btn.setText("已关闭" if on else "已开启")
         self._refresh_switches()
 
-    def _refresh_switches(self):
+    def _refresh_switches(self, sync_from_config: bool = False):
         import config as _cfg
         C = _theme.get()
         on_style = (
@@ -1103,15 +1252,19 @@ class DanmuTool(ToolSingleton, QMainWindow):
             f"QPushButton:hover {{ background: {C['hover']}; }}"
         )
         for key, btn in self._switch_btns.items():
-            on = self._switch_on(key)
-            btn.setText("已开启" if on else "已关闭")
+            if sync_from_config:
+                on = bool(_cfg.get(self._SWITCH_KEYS[key], True))
+                btn.setText("已开启" if on else "已关闭")
+            else:
+                on = btn.text() == "已开启"
             btn.setStyleSheet(on_style if on else off_style)
 
         sqss = self._spin_qss(C)
         eqss = (
-            f"QLineEdit {{ background: {C['hover']}; color: {C['text']};"
+            f"QLineEdit {{ background: {C['card']}; color: {C['text']};"
             f" border: 1px solid {C['border']}; border-radius: 5px;"
-            f" font-size: 12px; padding: 2px 6px; }}"
+            f" font-size: 12px; padding: 2px 6px;"
+            f" selection-background-color: {C['active_line']}; }}"
         )
         if self._gift_spin:
             self._gift_spin.setStyleSheet(sqss)
@@ -1120,23 +1273,27 @@ class DanmuTool(ToolSingleton, QMainWindow):
         for edit in self._suffix_edits.values():
             edit.setStyleSheet(eqss)
         if self._like_accum_btn:
-            accum_on = _cfg.get("danmu_like_accumulate", False)
-            self._like_accum_btn.setText("累加：已开启" if accum_on else "累加：已关闭")
+            if sync_from_config:
+                accum_on = bool(_cfg.get("danmu_like_accumulate", False))
+                self._like_accum_btn.setText("累加：已开启" if accum_on else "累加：已关闭")
+            else:
+                accum_on = self._like_accum_btn.text() == "累加：已开启"
             self._like_accum_btn.setStyleSheet(on_style if accum_on else off_style)
+        for btn in self._apply_btns:
+            self._style_apply_btn(btn)
 
     def process_message(self, msg):
         from listener.models import ChatMessage, GiftMessage, FollowMessage, LikeMessage
-        import config as _cfg
 
         if isinstance(msg, ChatMessage):
-            if not self._switch_on("chat"):
+            if not self._active_on("danmu_chat_on"):
                 return
             self._send_to_danmu(msg)
 
         elif isinstance(msg, GiftMessage):
-            if not self._switch_on("gift"):
+            if not self._active_on("danmu_gift_on"):
                 return
-            min_d = _cfg.get("danmu_gift_min_diamonds", 0)
+            min_d = int(self._active.get("danmu_gift_min_diamonds", 0) or 0)
             if min_d > 0:
                 from gift.gift_info import get_diamonds
                 if (get_diamonds(msg.gift) or 0) < min_d:
@@ -1144,15 +1301,15 @@ class DanmuTool(ToolSingleton, QMainWindow):
             self._send_to_danmu(msg)
 
         elif isinstance(msg, FollowMessage):
-            if not self._switch_on("follow"):
+            if not self._active_on("danmu_follow_on"):
                 return
             self._send_to_danmu(msg)
 
         elif isinstance(msg, LikeMessage):
-            if not self._switch_on("like"):
+            if not self._active_on("danmu_like_on"):
                 return
-            threshold = max(1, _cfg.get("danmu_like_threshold", 1))
-            if _cfg.get("danmu_like_accumulate", False):
+            threshold = max(1, int(self._active.get("danmu_like_threshold", 1) or 1))
+            if self._active.get("danmu_like_accumulate", False):
                 entry = self._like_accum.setdefault(
                     msg.user_id, {"user": msg.user, "count": 0}
                 )
@@ -1170,57 +1327,26 @@ class DanmuTool(ToolSingleton, QMainWindow):
                     return
                 self._send_to_danmu(msg)
 
-    def toggle_danmu_window(self):
-        """切换悬浮弹幕窗显示/隐藏（供托盘调用）。"""
-        self._toggle_danmu_win()
+    def showEvent(self, event):
+        super().showEvent(event)
+        self._refresh_btn()
 
-    def danmu_window_active(self) -> bool:
-        """悬浮弹幕窗当前是否可见（供托盘标签切换）。"""
-        return self._danmu_win is not None and self._danmu_win.isVisible()
+    def _stop_overlay(self):
+        """关闭设置窗时同步收起悬浮窗，避免后台继续运行。"""
+        if self._danmu_win is not None:
+            self._danmu_win.hide()
+        self._refresh_btn()
 
     def closeEvent(self, event):
-        """关闭时隐藏而非销毁（保持单例可用）。"""
         from tools.tool_common import is_app_shutting_down
         if is_app_shutting_down():
             event.accept()
             return
+        self._stop_overlay()
         event.ignore()
         self.hide()
 
 
 # ─────────────────────────────────────────────
-# 托盘注册（模块导入时执行）
+# 模块注册（ToolSingleton 由 tools/__init__.py import 触发）
 # ─────────────────────────────────────────────
-def _tray_register():
-    from tools.tray_registry import register_tray, TrayAction
-
-    def _is_active() -> bool:
-        return DanmuTool().danmu_window_active()
-
-    def _toggle():
-        inst = DanmuTool()
-        if _is_active():
-            # 关闭：隐藏悬浮窗 + 控制面板，不留任何可见后台
-            if inst._danmu_win:
-                inst._danmu_win.hide()
-            inst.hide()
-        else:
-            # 启动：只打开悬浮窗
-            inst.toggle_danmu_window()
-
-    def _open_settings():
-        t = DanmuTool()
-        t.show()
-        t.activateWindow()
-
-    register_tray("弹幕机", lambda: [
-        TrayAction("已关闭", lambda: None,
-                   text_when_active="运行中", is_active=_is_active,
-                   disabled=True),
-        TrayAction("启动弹幕机", _toggle,
-                   text_when_active="关闭弹幕机", is_active=_is_active),
-        TrayAction("打开设置页面", _open_settings),
-    ])
-
-
-_tray_register()

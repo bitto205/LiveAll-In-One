@@ -24,10 +24,14 @@ from typing import Callable
 from playwright.async_api import async_playwright
 
 from listener.LiveProtobuf import parse_frame
+from listener.models import RoomRankMessage
 from listener.log_util import get_logger, make_msg_logger, on_connect_success
 from listener.models import LiveMessage
 
 logger = get_logger(__name__)
+
+_WS_TIMEOUT = 10.0       # 进入直播间后等待 WebSocket 建立的秒数
+_RANK_TIMEOUT = 10.0     # WebSocket 建立后等待榜单消息的秒数
 
 
 # 统一解析接口已迁移到 listener/LiveProtobuf.py
@@ -45,7 +49,6 @@ async def _run(
     on_status: Callable[[bool], None] | None,
 ):
     msg_logger = make_msg_logger(live_id) if debug else None
-    seen_ws: set[str] = set()
 
     def _emit_status(val: bool):
         if on_status:
@@ -74,34 +77,75 @@ async def _run(
         """)
         page = await context.new_page()
 
-        _state = {"live_confirmed": False}
+        _state = {"live_confirmed": False, "stopped": False}
+        stop_event = asyncio.Event()
+        seen_ws: set[str] = set()
+        ws_connected = False
+        rank_timer: asyncio.Task | None = None
+
+        async def _shutdown():
+            if _state["stopped"]:
+                if not stop_event.is_set():
+                    stop_event.set()
+                return
+            _state["stopped"] = True
+            nonlocal rank_timer
+            if rank_timer and not rank_timer.done():
+                rank_timer.cancel()
+            try:
+                await browser.close()
+            except Exception:
+                pass
+            stop_event.set()
+
+        async def _fail_unlive(reason: str):
+            if _state["live_confirmed"] or _state["stopped"]:
+                return
+            logger.warning(reason)
+            _emit_status(False)
+            await _shutdown()
+
+        async def _start_rank_wait():
+            nonlocal rank_timer
+            if rank_timer and not rank_timer.done():
+                rank_timer.cancel()
+
+            async def _rank_timeout():
+                await asyncio.sleep(_RANK_TIMEOUT)
+                if not _state["live_confirmed"]:
+                    await _fail_unlive(
+                        f"WebSocket 建立后 {_RANK_TIMEOUT:.0f}s 内未收到榜单消息，判定为未开播"
+                    )
+
+            rank_timer = asyncio.create_task(_rank_timeout())
 
         def on_websocket(ws):
+            nonlocal ws_connected
             if "/push/v2/" not in ws.url:
                 return
             if ws.url in seen_ws:
                 return
             seen_ws.add(ws.url)
-            logger.info("✅ WebSocket 已捕获，等待直播消息确认...")
-
-            async def _live_timeout():
-                await asyncio.sleep(30)
-                if not _state["live_confirmed"]:
-                    logger.warning("30 秒内未收到 WSS 消息，连接失败")
-                    _emit_status(False)
-
-            asyncio.create_task(_live_timeout())
+            if ws_connected:
+                return
+            ws_connected = True
+            logger.info(
+                f"✅ WebSocket 已建立，{_RANK_TIMEOUT:.0f}s 内等待榜单消息…"
+            )
+            asyncio.ensure_future(_start_rank_wait())
 
             def on_frame(raw: bytes):
+                msgs = parse_frame(raw)
                 if not _state["live_confirmed"]:
-                    _state["live_confirmed"] = True
-                    on_connect_success("listener2")
-                    logger.info("✅ WSS 已收到消息，连接成功")
-                    _emit_status(True)
-                try:
-                    msgs = parse_frame(raw)
-                except Exception:
-                    return
+                    if any(isinstance(m, RoomRankMessage) for m in msgs):
+                        _state["live_confirmed"] = True
+                        if rank_timer and not rank_timer.done():
+                            rank_timer.cancel()
+                        on_connect_success("listener2")
+                        logger.info("✅ 直播间正在直播")
+                        _emit_status(True)
+                    else:
+                        return
                 for msg in msgs:
                     try:
                         if msg_logger:
@@ -111,13 +155,22 @@ async def _run(
                         logger.error(f"callback 异常: {e}")
 
             def on_ws_close():
+                if _state["stopped"]:
+                    return
                 logger.warning("WebSocket 已断开")
                 _emit_status(False)
 
             ws.on("framereceived", on_frame)
             ws.on("close", on_ws_close)
 
-        page.on("close", lambda _: _emit_status(False))
+        def _on_page_close(_):
+            if _state["stopped"]:
+                return
+            if _state["live_confirmed"]:
+                _emit_status(False)
+            asyncio.ensure_future(_shutdown())
+
+        page.on("close", _on_page_close)
         page.on("websocket", on_websocket)
 
         logger.info(f"✅ 已进入直播间: {live_id}")
@@ -125,7 +178,16 @@ async def _run(
             f"https://live.douyin.com/{live_id}",
             wait_until="commit",
         )
-        await asyncio.Event().wait()
+
+        async def _ws_wait_timeout():
+            await asyncio.sleep(_WS_TIMEOUT)
+            if not ws_connected:
+                await _fail_unlive(
+                    f"{_WS_TIMEOUT:.0f}s 内未建立 WebSocket，判定为未开播"
+                )
+
+        asyncio.create_task(_ws_wait_timeout())
+        await stop_event.wait()
 
 
 # ─────────────────────────────────────────────

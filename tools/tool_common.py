@@ -50,7 +50,7 @@ def shutdown_all_tools() -> None:
         inst = getattr(meta.cls, "_instance", None)
         if inst is None:
             continue
-        for attr in ("_danmu_win", "_overtime_win"):
+        for attr in ("_danmu_win", "_overtime_win", "_user_time_win"):
             sub = getattr(inst, attr, None)
             if sub is not None:
                 sub.close()

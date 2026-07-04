@@ -235,13 +235,14 @@ def parse_item(method: str, payload: bytes) -> LiveMessage | None:
     return None
 
 
-def parse_frame(payload: bytes) -> list[LiveMessage]:
+def try_parse_frame(payload: bytes) -> tuple[bool, list[LiveMessage]]:
+    """解析 PushFrame/LiveResponse。channel_ok 表示收到通道初始数据（messages 可为空）。"""
     results: list[LiveMessage] = []
     try:
         frame = globals()["PushFrame"]()
         frame.ParseFromString(payload)
         if not frame.payload:
-            return results
+            return False, results
         try:
             body = gzip.decompress(frame.payload)
         except Exception:
@@ -249,10 +250,15 @@ def parse_frame(payload: bytes) -> list[LiveMessage]:
         response = globals()["LiveResponse"]()
         response.ParseFromString(body)
     except Exception:
-        return results
+        return False, results
 
     for item in response.messagesList:
         msg = parse_item(item.method, item.payload)
         if msg is not None:
             results.append(msg)
-    return results
+    return True, results
+
+
+def parse_frame(payload: bytes) -> list[LiveMessage]:
+    _, msgs = try_parse_frame(payload)
+    return msgs

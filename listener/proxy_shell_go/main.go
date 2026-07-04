@@ -30,8 +30,9 @@ const (
 )
 
 const (
-	ipcCtrlPrefix  = "__LH_CTRL__:"
-	ctrlWSConnected = "WS_CONNECTED"
+	ipcCtrlPrefix      = "__LH_CTRL__:"
+	ctrlWSOpen         = "WS_OPEN"
+	ctrlWSConnected    = "WS_CONNECTED"
 	ctrlWSDisconnected = "WS_DISCONNECTED"
 )
 
@@ -167,25 +168,53 @@ type ipcServer struct {
 	conn net.Conn
 }
 
-var liveActive uint32 // 1=live websocket active, 0=inactive
+var (
+	wsRelayActive uint32 // 1=webcast WSS relay running (101 upgrade done)
+	liveActive    uint32 // 1=received at least one server binary frame
+)
+
+func isWSRelayActive() bool {
+	return atomic.LoadUint32(&wsRelayActive) == 1
+}
 
 func isLiveActive() bool {
 	return atomic.LoadUint32(&liveActive) == 1
 }
 
+func pushIPCControl(ipc *ipcServer, state string) {
+	ipc.push([]byte(ipcCtrlPrefix + state))
+}
+
 func setLiveActive(active bool, ipc *ipcServer, host string) {
 	var next uint32
-	state := ctrlWSDisconnected
 	if active {
 		next = 1
-		state = ctrlWSConnected
 	}
 	prev := atomic.SwapUint32(&liveActive, next)
 	if prev == next {
 		return
 	}
-	logger.Printf("live state changed: %v (host=%s)", active, host)
-	ipc.push([]byte(ipcCtrlPrefix + state))
+	if active {
+		logger.Printf("live data channel active (host=%s)", host)
+		pushIPCControl(ipc, ctrlWSConnected)
+	}
+}
+
+func beginWSRelay(ipc *ipcServer, host string) {
+	if atomic.SwapUint32(&wsRelayActive, 1) == 1 {
+		return
+	}
+	logger.Printf("WS relay open: %s", host)
+	pushIPCControl(ipc, ctrlWSOpen)
+}
+
+func endWSRelay(ipc *ipcServer, host string) {
+	if atomic.SwapUint32(&wsRelayActive, 0) == 0 {
+		return
+	}
+	atomic.StoreUint32(&liveActive, 0)
+	logger.Printf("WS relay closed: %s", host)
+	pushIPCControl(ipc, ctrlWSDisconnected)
 }
 
 func (s *ipcServer) serve() {
@@ -232,9 +261,12 @@ func (s *ipcServer) handshake(conn net.Conn) {
 		old.Close()
 	}
 
-	// 若 WSS 已建立但早于本次 IPC 连接，补发 WS_CONNECTED 避免 Python 空等首条弹幕
+	// 晚连 IPC：按当前 relay 状态补发控制消息
+	if isWSRelayActive() {
+		pushIPCControl(s, ctrlWSOpen)
+	}
 	if isLiveActive() {
-		s.push([]byte(ipcCtrlPrefix + ctrlWSConnected))
+		pushIPCControl(s, ctrlWSConnected)
 	}
 
 	// Keep alive until client disconnects
@@ -344,11 +376,20 @@ func writeWSFrame(w io.Writer, opcode byte, payload []byte, fin bool) error {
 func relayWS(clientR io.Reader, clientW io.Writer,
 	serverR io.Reader, serverW io.Writer,
 	host string, ipc *ipcServer) {
-	setLiveActive(true, ipc, host)
+	beginWSRelay(ipc, host)
+	defer endWSRelay(ipc, host)
+
+	var liveSignaled bool
+	signalLive := func() {
+		if liveSignaled {
+			return
+		}
+		liveSignaled = true
+		setLiveActive(true, ipc, host)
+	}
 
 	// server → client: reassemble fragmented frames, push complete payloads to IPC
 	go func() {
-		defer setLiveActive(false, ipc, host)
 		var acc []byte
 		var curOpcode byte
 		for {
@@ -365,7 +406,8 @@ func relayWS(clientR io.Reader, clientW io.Writer,
 			} else { // continuation frame
 				acc = append(acc, payload...)
 			}
-			if fin && curOpcode == 2 { // complete binary message
+			if fin && curOpcode == 2 { // complete binary message from server
+				signalLive()
 				ipc.push(acc)
 				acc = nil
 			}
@@ -376,11 +418,9 @@ func relayWS(clientR io.Reader, clientW io.Writer,
 	for {
 		opcode, payload, fin, err := readWSFrame(clientR)
 		if err != nil {
-			setLiveActive(false, ipc, host)
 			return
 		}
 		if writeWSFrame(serverW, opcode, payload, fin) != nil {
-			setLiveActive(false, ipc, host)
 			return
 		}
 	}

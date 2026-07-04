@@ -49,15 +49,10 @@ def get_tools() -> list[_ToolMeta]:
 
 
 # ─────────────────────────────────────────────
-# 托盘注册表（先于工具 import，供工具模块使用）
-# ─────────────────────────────────────────────
-from tools.tray_registry import _TRAY_REGISTRY, TrayAction, TrayEntry, register_tray  # noqa
-
-# ─────────────────────────────────────────────
-# 注册所有工具（在这里 import 触发 @_reg / 托盘 register_tray）
+# 注册所有工具（在这里 import 触发 @register_tool）
 # ─────────────────────────────────────────────
 from tools.memo_tool     import MemoTool     # noqa
-from tools.danmu_tool    import DanmuTool    # noqa  触发装饰器 + 托盘注册
+from tools.danmu_tool    import DanmuTool    # noqa
 from tools.overtime_tool import OvertimeTool # noqa
 
 from tools.tool_common import shutdown_all_tools  # noqa: E402
@@ -65,5 +60,4 @@ from tools.tool_common import shutdown_all_tools  # noqa: E402
 __all__ = [
     "MemoTool", "DanmuTool", "OvertimeTool",
     "get_tools", "register_tool", "shutdown_all_tools",
-    "_TRAY_REGISTRY", "TrayAction", "TrayEntry", "register_tray",
 ]

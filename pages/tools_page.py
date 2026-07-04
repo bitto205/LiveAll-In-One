@@ -1,4 +1,4 @@
-﻿import sys, os
+import sys, os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from PySide6.QtWidgets import (
@@ -143,13 +143,14 @@ class ToolsPage(BasePage):
         for win in self._open_wins.values():
             _dispatch(win)
 
-        # 单例工具：悬浮窗可独立于设置页运行
         from tools.memo_tool import MemoTool
         from tools.danmu_tool import DanmuTool
         from tools.overtime_tool import OvertimeTool
-        _dispatch(MemoTool())
-        _dispatch(DanmuTool())
-        _dispatch(OvertimeTool())
+
+        for tool_cls in (MemoTool, DanmuTool, OvertimeTool):
+            inst = getattr(tool_cls, "_instance", None)
+            if inst is not None:
+                _dispatch(inst)
 
 
 class ToolsSettings(BaseSetting):

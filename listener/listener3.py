@@ -1,4 +1,4 @@
-﻿"""线路 3：mitmproxy local 模式拦截直播伴侣 WSS。"""
+"""线路 3：mitmproxy local 模式拦截直播伴侣 WSS。"""
 import asyncio
 import logging
 import os
@@ -9,7 +9,7 @@ from typing import Awaitable, Callable, Optional
 from mitmproxy import http, options
 from mitmproxy.tools.dump import DumpMaster
 
-from listener.LiveProtobuf import parse_frame
+from listener.LiveProtobuf import parse_frame, try_parse_frame
 from listener.log_util import get_logger, on_connect_success, ensure_console_logging
 from listener.models import ControlMessage
 
@@ -18,6 +18,7 @@ logger = get_logger(__name__)
 _page_proxy_snapshot: Optional[bool] = None
 _shutdown_fn: Optional[Callable[[], Awaitable[None]]] = None
 _stop_event: Optional[asyncio.Event] = None
+_LIVE_DATA_TIMEOUT = 10.0  # WS 建立后等待初始 PushFrame 数据的秒数
 
 
 def check_system_proxy() -> dict:
@@ -128,22 +129,26 @@ class _DouyinWsAddon:
         callback: Callable,
         on_status: Optional[Callable],
         connected: asyncio.Event,
+        ws_ready: asyncio.Event,
         session_lost: asyncio.Event,
         loop: asyncio.AbstractEventLoop,
     ):
         self.callback = callback
         self.on_status = on_status
         self._connected = connected
+        self._ws_ready = ws_ready
         self._session_lost = session_lost
         self._loop = loop
-        self._seen_first = False
+        self._ws_seen = False
+        self._live_confirmed = False
         self._session_active = False
 
     def _end_session(self, reason: str) -> None:
         if not self._session_active:
             return
         self._session_active = False
-        self._seen_first = False
+        self._ws_seen = False
+        self._live_confirmed = False
         logger.info(reason)
         if self.on_status:
             self.on_status(False)
@@ -154,6 +159,14 @@ class _DouyinWsAddon:
             if _is_webcast_flow(flow):
                 logger.info(f"WS 升级请求: {flow.request.host}{flow.request.path[:80]}")
 
+    def websocket_start(self, flow: http.HTTPFlow):
+        if not _is_webcast_flow(flow):
+            return
+        if not self._ws_seen:
+            self._ws_seen = True
+            self._ws_ready.set()
+            logger.info("✅ WebSocket 已建立，等待直播消息确认...")
+
     def websocket_message(self, flow: http.HTTPFlow):
         if not _is_webcast_flow(flow):
             return
@@ -163,20 +176,19 @@ class _DouyinWsAddon:
         if message.from_client:
             return
 
-        if not self._seen_first:
-            self._seen_first = True
+        channel_ok, msgs = try_parse_frame(message.content)
+        if not channel_ok:
+            logger.debug("帧解析失败或非直播 PushFrame")
+            return
+
+        if not self._live_confirmed:
+            self._live_confirmed = True
             self._session_active = True
             self._connected.set()
             on_connect_success("listener3")
-            logger.info("监听到目标 WSS 连接，开始解析消息")
+            logger.info("✅ 直播间正在直播")
             if self.on_status:
                 self.on_status(True)
-
-        try:
-            msgs = parse_frame(message.content)
-        except Exception as e:
-            logger.debug(f"帧解析失败: {e}")
-            return
 
         for msg in msgs:
             if isinstance(msg, ControlMessage) and msg.status == 3:
@@ -205,6 +217,26 @@ async def shutdown() -> None:
         await fn()
     else:
         await _teardown_local_redirector()
+
+
+async def _wait_ws_or_stop(ws_ready: asyncio.Event) -> None:
+    assert _stop_event is not None
+    ws_task = asyncio.create_task(ws_ready.wait())
+    stop_task = asyncio.create_task(_stop_event.wait())
+    done, pending = await asyncio.wait(
+        {ws_task, stop_task},
+        return_when=asyncio.FIRST_COMPLETED,
+    )
+    for t in pending:
+        t.cancel()
+        try:
+            await t
+        except asyncio.CancelledError:
+            pass
+    if stop_task in done:
+        raise asyncio.CancelledError("listener3 stopped")
+    if not ws_ready.is_set():
+        raise RuntimeError("ws wait ended without connection")
 
 
 async def _wait_connect_or_stop(connected: asyncio.Event) -> None:
@@ -236,6 +268,7 @@ async def start_listener(
     global _shutdown_fn, _stop_event
     _stop_event = asyncio.Event()
     connected = asyncio.Event()
+    ws_ready = asyncio.Event()
     session_lost = asyncio.Event()
     loop = asyncio.get_running_loop()
 
@@ -250,7 +283,7 @@ async def start_listener(
         return
 
     _install_mitmproxy_cert()
-    master.addons.add(_DouyinWsAddon(callback, on_status, connected, session_lost, loop))
+    master.addons.add(_DouyinWsAddon(callback, on_status, connected, ws_ready, session_lost, loop))
 
     logger.info(f"local 模式已启动，拦截进程: {target_process}")
     logger.info("请在直播伴侣中断开并重新连接直播间，触发新的 WSS 握手")
@@ -272,7 +305,16 @@ async def start_listener(
     _shutdown_fn = _stop_master
 
     try:
-        await _wait_connect_or_stop(connected)
+        await _wait_ws_or_stop(ws_ready)
+        logger.info(f"WebSocket 已建立，{_LIVE_DATA_TIMEOUT:.0f}s 内等待初始直播数据…")
+        try:
+            await asyncio.wait_for(_wait_connect_or_stop(connected), timeout=_LIVE_DATA_TIMEOUT)
+        except asyncio.TimeoutError:
+            logger.warning(f"WebSocket 建立后 {_LIVE_DATA_TIMEOUT:.0f}s 内未收到初始直播数据，连接失败")
+            await _stop_master()
+            if on_status:
+                on_status(False)
+            return
     except asyncio.CancelledError:
         await _stop_master()
         return

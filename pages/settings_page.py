@@ -1,4 +1,4 @@
-﻿import sys, os
+import sys, os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pages.theme as _theme
@@ -11,7 +11,7 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Qt
 
 from pages import BasePage, BaseSetting
-from pages.widgets import ThemedComboBox, ThemedToggle
+from pages.widgets import ThemedComboBox
 
 
 def _C() -> dict:
@@ -111,22 +111,6 @@ class SystemSettings(BaseSetting):
 
         inner.addLayout(row)
         lay.addWidget(card)
-
-        # 行为卡片
-        card2, inner2 = self.build_section("行为")
-
-        row2 = QHBoxLayout()
-        row2.setSpacing(12)
-        lbl2 = QLabel("关闭时缩小到任务栏")
-        lbl2.setStyleSheet("background: transparent; font-size: 14px;")
-        row2.addWidget(lbl2)
-        row2.addStretch()
-
-        self._tray_toggle = ThemedToggle("minimize_to_tray", default=True)
-        row2.addWidget(self._tray_toggle)
-
-        inner2.addLayout(row2)
-        lay.addWidget(card2)
 
         lay.addStretch()
 

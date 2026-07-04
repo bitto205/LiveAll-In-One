@@ -43,6 +43,9 @@ from listener.models import (
 
 logger = get_logger(__name__)
 
+_WS_TIMEOUT = 10.0       # 进入直播间后等待 WebSocket 建立的秒数
+_RANK_TIMEOUT = 10.0     # WebSocket 建立后等待榜单消息的秒数
+
 
 # ─────────────────────────────────────────────
 # 注入 JS
@@ -221,30 +224,98 @@ async def _run(
         page = await context.new_page()
         await page.add_init_script(_HOOK_JS)
 
-        # JS hook 激活视为"连接成功"，页面关闭视为"断开"
-        _state = {"live_confirmed": False}
+        # 两阶段：10s 内建立 WS → WS 后 10s 内收到榜单消息
+        _state = {"live_confirmed": False, "stopped": False}
+        stop_event = asyncio.Event()
+        seen_ws: set[str] = set()
+        ws_connected = False
+        rank_timer: asyncio.Task | None = None
+
+        async def _shutdown():
+            if _state["stopped"]:
+                if not stop_event.is_set():
+                    stop_event.set()
+                return
+            _state["stopped"] = True
+            nonlocal rank_timer
+            if rank_timer and not rank_timer.done():
+                rank_timer.cancel()
+            try:
+                await browser.close()
+            except Exception:
+                pass
+            stop_event.set()
+
+        async def _fail_unlive(reason: str):
+            if _state["live_confirmed"] or _state["stopped"]:
+                return
+            logger.warning(reason)
+            _emit_status(False)
+            await _shutdown()
+
+        async def _start_rank_wait():
+            nonlocal rank_timer
+            if rank_timer and not rank_timer.done():
+                rank_timer.cancel()
+
+            async def _rank_timeout():
+                await asyncio.sleep(_RANK_TIMEOUT)
+                if not _state["live_confirmed"]:
+                    await _fail_unlive(
+                        f"WebSocket 建立后 {_RANK_TIMEOUT:.0f}s 内未收到榜单消息，判定为未开播"
+                    )
+
+            rank_timer = asyncio.create_task(_rank_timeout())
+
+        def _on_websocket(ws):
+            nonlocal ws_connected
+            if "/push/v2/" not in ws.url:
+                return
+            if ws.url in seen_ws:
+                return
+            seen_ws.add(ws.url)
+            if ws_connected:
+                return
+            ws_connected = True
+            logger.info(
+                f"✅ WebSocket 已建立，{_RANK_TIMEOUT:.0f}s 内等待榜单消息…"
+            )
+            asyncio.ensure_future(_start_rank_wait())
 
         def handle_console(msg):
             text = msg.text
             if not text.startswith("DY_MSG:"):
                 return
-            if not _state["live_confirmed"]:
-                _state["live_confirmed"] = True
-                on_connect_success("listener1")
-                logger.info("✅ WSS 已收到消息，连接成功")
-                _emit_status(True)
             try:
                 raw   = json.loads(text[7:])
                 built = _build(raw)
-                if built:
-                    if msg_logger:
-                        msg_logger.info(built)
-                    callback(built)
+                if not built:
+                    return
+                if isinstance(built, RoomRankMessage) and not _state["live_confirmed"]:
+                    _state["live_confirmed"] = True
+                    if rank_timer and not rank_timer.done():
+                        rank_timer.cancel()
+                    on_connect_success("listener1")
+                    logger.info("✅ 直播间正在直播")
+                    _emit_status(True)
+                if not _state["live_confirmed"]:
+                    return
+                if msg_logger:
+                    msg_logger.info(built)
+                callback(built)
             except Exception as e:
                 logger.debug(f"console 解析失败: {e}")
 
-        page.on("close", lambda _: _emit_status(False))
+        def _on_page_close(_):
+            if _state["stopped"]:
+                return
+            if _state["live_confirmed"]:
+                _emit_status(False)
+            asyncio.ensure_future(_shutdown())
+
+        page.on("close", _on_page_close)
         page.on("console", handle_console)
+        page.on("websocket", _on_websocket)
 
         logger.info(f"✅ 已进入直播间: {live_id}")
         await page.goto(
@@ -252,14 +323,15 @@ async def _run(
             wait_until="commit",
         )
 
-        async def _live_timeout():
-            await asyncio.sleep(30)
-            if not _state["live_confirmed"]:
-                logger.warning("30 秒内未收到 WSS 消息，连接失败")
-                _emit_status(False)
+        async def _ws_wait_timeout():
+            await asyncio.sleep(_WS_TIMEOUT)
+            if not ws_connected:
+                await _fail_unlive(
+                    f"{_WS_TIMEOUT:.0f}s 内未建立 WebSocket，判定为未开播"
+                )
 
-        asyncio.create_task(_live_timeout())
-        await asyncio.Event().wait()
+        asyncio.create_task(_ws_wait_timeout())
+        await stop_event.wait()
 
 
 # ─────────────────────────────────────────────

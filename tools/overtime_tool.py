@@ -13,9 +13,11 @@ from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
     QLabel, QPushButton, QFrame, QSizePolicy,
     QScrollArea, QStackedWidget, QLineEdit, QTextEdit,
+    QTableWidget, QTableWidgetItem, QHeaderView,
+    QGraphicsDropShadowEffect, QAbstractItemView,
 )
 from PySide6.QtCore import (
-    Qt, QPoint, QRect, Signal,
+    Qt, QPoint, QRect, QRectF, Signal, QObject,
     QVariantAnimation, QEasingCurve, QTimer,
 )
 from PySide6.QtGui import (
@@ -88,6 +90,54 @@ DEFAULT_SETTINGS: dict = {
     "custom_text": "可以输入自定义的文字",
     "custom_align": "居中",
 }
+
+
+class OvertimeUserLedger(QObject):
+    """加班机单次运行期间，按用户累计礼物带来的加减秒数。"""
+
+    changed = Signal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._add: dict[str, int] = {}
+        self._sub: dict[str, int] = {}
+
+    def clear(self) -> None:
+        self._add.clear()
+        self._sub.clear()
+        self.changed.emit()
+
+    def record(self, user_key: str, delta_seconds: int) -> None:
+        if delta_seconds == 0:
+            return
+        key = (user_key or "").strip() or "(未知)"
+        if delta_seconds >= 0:
+            self._add[key] = self._add.get(key, 0) + delta_seconds
+        else:
+            self._sub[key] = self._sub.get(key, 0) + abs(delta_seconds)
+        self.changed.emit()
+
+    def rows(self) -> list[tuple[str, int, int, int]]:
+        keys = sorted(set(self._add) | set(self._sub))
+        out: list[tuple[str, int, int, int]] = []
+        for key in keys:
+            add_s = self._add.get(key, 0)
+            sub_s = self._sub.get(key, 0)
+            if add_s == 0 and sub_s == 0:
+                continue
+            out.append((key, add_s, sub_s, add_s - sub_s))
+        return out
+
+    def is_empty(self) -> bool:
+        return not self._add and not self._sub
+
+
+def _gift_user_key(msg) -> str:
+    uid = (getattr(msg, "user_id", None) or "").strip()
+    if uid:
+        return uid
+    name = (getattr(msg, "user", None) or "").strip()
+    return name or "(未知)"
 
 
 
@@ -273,6 +323,47 @@ def format_delta_log(delta_seconds: int) -> str:
     return sign + "".join(parts)
 
 
+def _format_duration_positive(seconds: int) -> str:
+    if seconds <= 0:
+        return "—"
+    return format_delta_log(seconds).lstrip("+")
+
+
+def _format_stats_duration(
+    seconds: int,
+    *,
+    signed: bool = False,
+    plus: bool = False,
+    minus: bool = False,
+) -> str:
+    """统计窗专用：固定 时/分/秒 三段，便于列宽对齐。"""
+    if seconds == 0:
+        return "—"
+    sign = ""
+    if plus:
+        sign = "+"
+    elif minus:
+        sign = "-"
+    elif signed:
+        sign = "+" if seconds > 0 else "-"
+    s = abs(int(seconds))
+    h = min(s // 3600, 999)
+    m = (s % 3600) // 60
+    sec = s % 60
+    return f"{sign}{h}时{m:02d}分{sec:02d}秒"
+
+
+def _stats_window_metrics() -> tuple[int, int, int]:
+    """按极限文案测算列宽与窗口最小宽度：(id列宽, 数据列宽, 窗口最小宽)。"""
+    font = QFont("Microsoft YaHei", 13)
+    fm = QFontMetrics(font)
+    cell_pad = 36   # 与 QTableWidget::item padding 18*2 一致
+    id_w = fm.horizontalAdvance("0" * 15) + cell_pad
+    dur_w = fm.horizontalAdvance("+999时59分59秒") + cell_pad
+    win_w = 16 * 2 + id_w + dur_w * 3 + 24  # 边距 + 列 + 滚动条余量
+    return id_w, dur_w, win_w
+
+
 def rule_slot_label(rule: dict) -> str:
     mode = rule.get("mode", "加")
     if mode == "随机":
@@ -333,6 +424,11 @@ _GRID_GAP = 8
 _SECTION_BODY_MX = 16   # _SectionBlock.content 左右各 8px
 _GRID_CONTENT_W = _MODULE_W * 2 + _GRID_GAP
 _PANEL_W = _GRID_CONTENT_W + _SECTION_BODY_MX
+_OVERTIME_SIDE = 24
+_OVERTIME_SCROLL_GUTTER = 8
+_OVERTIME_PAD = _OVERTIME_SIDE + _OVERTIME_SCROLL_GUTTER // 2
+_TOOL_WIN_W = _PANEL_W + 2 * _OVERTIME_PAD
+_TOOL_WIN_H = 720
 _PICKER_COLS = 4
 _PICKER_ROWS = 4
 _PICKER_CELL = 64
@@ -957,13 +1053,14 @@ class OvertimeSimGiftWidget(QFrame):
 
 
 class OvertimeSettingsPanel(QWidget):
-    applyRequested = Signal(dict)
+    timeApplyRequested = Signal(dict)
+    otherApplyRequested = Signal(dict)
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self._data = load_settings()
         self.setFixedWidth(_PANEL_W)
-        self.setMinimumHeight(720)
+        self.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Maximum)
         self._gift_picker = _GiftPickerPopup(self)
         self._gift_picker.giftSelected.connect(self._on_shared_gift_picked)
         self._gift_pick_target: _GiftRuleModule | None = None
@@ -971,30 +1068,32 @@ class OvertimeSettingsPanel(QWidget):
         _theme.on_change(lambda _: self._apply_theme())
 
     def _apply_theme(self):
-        self._style_apply_btn()
+        self._style_apply_btn(self._time_apply_btn)
+        self._style_apply_btn(self._other_apply_btn)
 
     def _build(self):
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(12)
 
-        top = QHBoxLayout()
-        top.addStretch()
-        self._apply_btn = QPushButton("应用")
-        self._apply_btn.setFixedSize(72, 34)
-        self._apply_btn.setCursor(Qt.PointingHandCursor)
-        self._apply_btn.clicked.connect(self._on_apply)
-        top.addWidget(self._apply_btn)
-        root.addLayout(top)
+        self._time_apply_btn = QPushButton("应用")
+        self._time_apply_btn.setFixedSize(72, 34)
+        self._time_apply_btn.setCursor(Qt.PointingHandCursor)
+        self._time_apply_btn.clicked.connect(self._on_time_apply)
+
+        self._other_apply_btn = QPushButton("应用")
+        self._other_apply_btn.setFixedSize(72, 34)
+        self._other_apply_btn.setCursor(Qt.PointingHandCursor)
+        self._other_apply_btn.clicked.connect(self._on_other_apply)
+
         root.addWidget(self._block_time())
         root.addWidget(self._block_gifts())
         root.addWidget(self._block_custom())
-        root.addStretch()
-        self._style_apply_btn()
+        self._apply_theme()
 
-    def _style_apply_btn(self):
+    def _style_apply_btn(self, btn: QPushButton):
         C = _C()
-        self._apply_btn.setStyleSheet(f"""
+        btn.setStyleSheet(f"""
             QPushButton {{
                 background: {C['active_line']}; color: #fff;
                 border: none; border-radius: 6px;
@@ -1027,6 +1126,8 @@ class OvertimeSettingsPanel(QWidget):
             inner.addWidget(lb)
         row.addStretch()
         row.addLayout(inner)
+        row.addSpacing(8)
+        row.addWidget(self._time_apply_btn)
         row.addStretch()
         sec.content.addLayout(row)
         return sec
@@ -1095,6 +1196,12 @@ class OvertimeSettingsPanel(QWidget):
         ar.addWidget(self._align)
         ar.addStretch()
         sec.content.addLayout(ar)
+
+        apply_row = QHBoxLayout()
+        apply_row.setContentsMargins(0, 6, 0, 0)
+        apply_row.addStretch()
+        apply_row.addWidget(self._other_apply_btn)
+        sec.content.addLayout(apply_row)
         return sec
 
     def _save_time(self):
@@ -1125,14 +1232,325 @@ class OvertimeSettingsPanel(QWidget):
         self._data["custom_align"] = self._align.currentText()
         save_settings(self._data)
 
-    def _on_apply(self):
+    def _on_time_apply(self):
         self._save_time()
+        self.timeApplyRequested.emit(dict(self._data))
+
+    def _on_other_apply(self):
         self._save_rules()
         self._save_custom()
-        self.applyRequested.emit(dict(self._data))
+        self.otherApplyRequested.emit(dict(self._data))
 
     def current_settings(self) -> dict:
         return dict(self._data)
+
+
+class _TableCornerFill(QWidget):
+    """用窗口背景色填充圆角外缘四角，盖住方表尖角。"""
+
+    def __init__(self, radius: int, parent: QWidget | None = None):
+        super().__init__(parent)
+        self._radius = radius
+        self.setAttribute(Qt.WA_TransparentForMouseEvents)
+        self.setAttribute(Qt.WA_TranslucentBackground)
+        self.setAutoFillBackground(False)
+
+    def paintEvent(self, _event):
+        C = _theme.get()
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        full = QPainterPath()
+        full.addRect(QRectF(self.rect()))
+        rounded = QPainterPath()
+        rounded.addRoundedRect(QRectF(self.rect()), self._radius, self._radius)
+        p.fillPath(full.subtracted(rounded), QColor(C["bg"]))
+        p.end()
+
+
+class _TableRoundBorder(QWidget):
+    """圆角边框描边。"""
+
+    def __init__(self, radius: int, parent: QWidget | None = None):
+        super().__init__(parent)
+        self._radius = radius
+        self.setAttribute(Qt.WA_TransparentForMouseEvents)
+        self.setAttribute(Qt.WA_TranslucentBackground)
+        self.setAutoFillBackground(False)
+
+    def paintEvent(self, _event):
+        C = _theme.get()
+        w, h = self.width(), self.height()
+        if w < 2 or h < 2:
+            return
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        pen = QPen(QColor(C["border"]))
+        pen.setWidthF(1.0)
+        p.setPen(pen)
+        p.setBrush(Qt.NoBrush)
+        p.drawRoundedRect(QRectF(0.5, 0.5, w - 1.0, h - 1.0), self._radius, self._radius)
+        p.end()
+
+
+class _RoundedTableFrame(QWidget):
+    """方表 + 圆角边框；四角外缘用背景色手绘覆盖。"""
+
+    def __init__(self, table: QTableWidget, radius: int = 8, parent=None):
+        super().__init__(parent)
+        self._radius = radius
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(0)
+        lay.addWidget(table)
+        self._table = table
+        self._corners = _TableCornerFill(radius, self)
+        self._border = _TableRoundBorder(radius, self)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        geo = self.rect()
+        self._corners.setGeometry(geo)
+        self._border.setGeometry(geo)
+        self._corners.raise_()
+        self._border.raise_()
+
+    def refresh_chrome(self) -> None:
+        self._corners.update()
+        self._border.update()
+
+
+class OvertimeUserTimeWindow(QMainWindow):
+    """只读展示：当前加班机运行期间各用户的加减时长（实时更新）。"""
+
+    _WIN_MARGIN = 14
+    _WIN_RADIUS = 10
+    _TABLE_RADIUS = 8
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowFlags(Qt.FramelessWindowHint | Qt.Window)
+        self.setAttribute(Qt.WA_TranslucentBackground)
+        self.setAttribute(Qt.WA_QuitOnClose, False)
+        self.setWindowTitle("用户时长统计")
+        id_w, dur_w, min_w = _stats_window_metrics()
+        self._col_id_w = id_w
+        self._col_data_w = dur_w
+        content_min_w = min_w - self._WIN_MARGIN * 2
+        self.setMinimumSize(min_w, 400 + self._WIN_MARGIN * 2)
+        self.resize(min_w + 40, 460 + self._WIN_MARGIN * 2)
+        self._drag_pos: QPoint | None = None
+        self._bound_ledger: OvertimeUserLedger | None = None
+        self._hint = QLabel()
+        self._table = QTableWidget(0, 4)
+        self._table.setObjectName("UserTimeStatsTable")
+        self._table.setHorizontalHeaderLabels(["抖音 ID", "增加", "减少", "总和"])
+        self._table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Fixed)
+        self._table.setColumnWidth(0, self._col_id_w)
+        for col in (1, 2, 3):
+            self._table.horizontalHeader().setSectionResizeMode(col, QHeaderView.Fixed)
+            self._table.setColumnWidth(col, self._col_data_w)
+        self._table.verticalHeader().setVisible(False)
+        self._table.setFrameShape(QFrame.NoFrame)
+        self._table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self._table.setSelectionMode(QTableWidget.NoSelection)
+        self._table.setFocusPolicy(Qt.NoFocus)
+        self._table.setShowGrid(False)
+        self._table.setAlternatingRowColors(True)
+        self._table.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self._table.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self._table.setVerticalScrollMode(QAbstractItemView.ScrollPerPixel)
+        self._table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self._table.setMinimumWidth(content_min_w)
+
+        self._table_frame = _RoundedTableFrame(self._table, self._TABLE_RADIUS)
+        self._table_frame.setObjectName("UserTimeTableFrame")
+
+        outer = QWidget()
+        outer_lay = QVBoxLayout(outer)
+        outer_lay.setContentsMargins(
+            self._WIN_MARGIN, self._WIN_MARGIN,
+            self._WIN_MARGIN, self._WIN_MARGIN,
+        )
+        outer_lay.setSpacing(0)
+
+        self._card = QFrame()
+        self._card.setObjectName("UserTimeWindowCard")
+        shadow = QGraphicsDropShadowEffect(self._card)
+        shadow.setBlurRadius(32)
+        shadow.setOffset(0, 4)
+        shadow.setColor(QColor(0, 0, 0, 55))
+        self._card.setGraphicsEffect(shadow)
+
+        lay = QVBoxLayout(self._card)
+        lay.setContentsMargins(16, 12, 16, 16)
+        lay.setSpacing(12)
+
+        title_bar = QWidget()
+        title_bar.setObjectName("UserTimeTitleBar")
+        tb_lay = QHBoxLayout(title_bar)
+        tb_lay.setContentsMargins(0, 0, 0, 0)
+        tb_lay.setSpacing(8)
+        title = QLabel("用户时长统计")
+        title.setObjectName("OvertimePageTitle")
+        close_btn = QPushButton("✕")
+        close_btn.setObjectName("UserTimeCloseBtn")
+        close_btn.setFixedSize(32, 32)
+        close_btn.setCursor(Qt.PointingHandCursor)
+        close_btn.clicked.connect(self.close)
+        tb_lay.addWidget(title)
+        tb_lay.addStretch()
+        tb_lay.addWidget(close_btn)
+        self._title_bar = title_bar
+        lay.addWidget(title_bar)
+
+        self._hint.setWordWrap(True)
+        lay.addWidget(self._hint)
+        lay.addWidget(self._table_frame, 1)
+        outer_lay.addWidget(self._card)
+        self.setCentralWidget(outer)
+        self._apply_theme()
+        _theme.on_change(lambda _: self._apply_theme())
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        QTimer.singleShot(0, self._fit_table_columns)
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        QTimer.singleShot(0, self._fit_table_columns)
+
+    def _fit_table_columns(self) -> None:
+        """在不低于最小列宽的前提下，让表格横向铺满视口。"""
+        viewport_w = self._table.viewport().width()
+        if viewport_w <= 0:
+            return
+        min_total = self._col_id_w + self._col_data_w * 3
+        if viewport_w <= min_total:
+            self._table.setColumnWidth(0, self._col_id_w)
+            for col in (1, 2, 3):
+                self._table.setColumnWidth(col, self._col_data_w)
+            return
+        extra = viewport_w - min_total
+        id_extra = int(extra * 0.34)
+        dur_extra = (extra - id_extra) // 3
+        dur_rem = extra - id_extra - dur_extra * 3
+        self._table.setColumnWidth(0, self._col_id_w + id_extra)
+        for i, col in enumerate((1, 2, 3)):
+            w = self._col_data_w + dur_extra + (1 if i < dur_rem else 0)
+            self._table.setColumnWidth(col, w)
+
+    def _apply_theme(self):
+        C = _theme.get()
+        self.setStyleSheet(f"""
+            QWidget {{ background: transparent; color: {C['text']};
+                       font-family: "Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;
+                       font-size: 13px; }}
+            #UserTimeWindowCard {{
+                background: {C['bg']};
+                border-radius: {self._WIN_RADIUS}px;
+                border: 1px solid {C.get('win_edge', C['border'])};
+            }}
+            #UserTimeTitleBar {{ background: transparent; }}
+            #UserTimeCloseBtn {{
+                background: transparent; border: none;
+                color: {C['text_muted']}; font-size: 13px;
+                border-radius: 6px;
+            }}
+            #UserTimeCloseBtn:hover {{
+                background: {C['close_hover']}; color: #ffffff;
+            }}
+            #UserTimeTableFrame {{ background: transparent; }}
+            #UserTimeStatsTable {{
+                background: {C['card']}; color: {C['text']};
+                border: none;
+                gridline-color: transparent;
+                alternate-background-color: {C['hover']};
+            }}
+            #UserTimeStatsTable::item {{
+                padding: 8px 18px;
+            }}
+            #UserTimeStatsTable QHeaderView::section {{
+                background: {C['sidebar']}; color: {C['text_muted']};
+                border: none; border-bottom: 1px solid {C['border']};
+                padding: 10px 18px; font-weight: 600;
+            }}
+            #UserTimeStatsTable QScrollBar:vertical {{
+                background: {C['hover']}; width: 8px; margin: 6px 2px 6px 0;
+                border-radius: 4px;
+            }}
+            #UserTimeStatsTable QScrollBar::handle:vertical {{
+                background: {C['border']}; border-radius: 4px; min-height: 28px;
+            }}
+            #UserTimeStatsTable QScrollBar::add-line:vertical,
+            #UserTimeStatsTable QScrollBar::sub-line:vertical {{ height: 0; }}
+            #UserTimeStatsTable QScrollBar::add-page:vertical,
+            #UserTimeStatsTable QScrollBar::sub-page:vertical {{ background: transparent; }}
+        """)
+        self._hint.setStyleSheet(f"color: {C['text_muted']}; font-size: 12px; background: transparent;")
+        self._table_frame.refresh_chrome()
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            pos = event.position().toPoint()
+            bar_top = self._title_bar.mapTo(self, QPoint(0, 0))
+            bar_rect = QRect(bar_top, self._title_bar.size())
+            if bar_rect.contains(pos):
+                self._drag_pos = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if event.buttons() == Qt.LeftButton and self._drag_pos is not None:
+            self.move(event.globalPosition().toPoint() - self._drag_pos)
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        self._drag_pos = None
+        super().mouseReleaseEvent(event)
+
+    def bind_ledger(self, ledger: OvertimeUserLedger | None) -> None:
+        if self._bound_ledger is not None:
+            try:
+                self._bound_ledger.changed.disconnect(self._on_ledger_changed)
+            except (RuntimeError, TypeError):
+                pass
+        self._bound_ledger = ledger
+        if ledger is not None:
+            ledger.changed.connect(self._on_ledger_changed)
+        self.refresh(ledger)
+
+    def _on_ledger_changed(self) -> None:
+        if self.isVisible():
+            self.refresh(self._bound_ledger)
+
+    def refresh(self, ledger: OvertimeUserLedger | None) -> None:
+        if ledger is None or ledger.is_empty():
+            self._hint.setText("当前没有统计数据。请先打开加班机并接收礼物后再查看。")
+            self._table.setRowCount(0)
+            return
+        self._hint.setText("以下为本次加班机运行期间，各用户礼物触发的加减时长汇总（实时更新）。")
+        rows = ledger.rows()
+        self._table.setRowCount(len(rows))
+        for i, (uid, add_s, sub_s, _) in enumerate(rows):
+            net_s = add_s - sub_s
+            id_item = QTableWidgetItem(uid)
+            add_item = QTableWidgetItem(_format_stats_duration(add_s, plus=True))
+            sub_item = QTableWidgetItem(_format_stats_duration(sub_s, minus=True))
+            net_item = QTableWidgetItem(_format_stats_duration(net_s, signed=True))
+            for item in (add_item, sub_item, net_item):
+                item.setTextAlignment(Qt.AlignCenter)
+            self._table.setItem(i, 0, id_item)
+            self._table.setItem(i, 1, add_item)
+            self._table.setItem(i, 2, sub_item)
+            self._table.setItem(i, 3, net_item)
+
+    def closeEvent(self, event):
+        from tools.tool_common import is_app_shutting_down
+        if is_app_shutting_down():
+            event.accept()
+            return
+        self.bind_ledger(None)
+        event.ignore()
+        self.hide()
 
 # ═══════════════════════════════════════════
 # 悬浮窗 + 控制面板
@@ -1937,6 +2355,7 @@ class OvertimeWindow(QMainWindow):
             Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint,
         )
         self.setAttribute(Qt.WA_TranslucentBackground)
+        self.setAttribute(Qt.WA_QuitOnClose, False)
         dw, dh = _default_window_size()
         self.setMinimumSize(int(dw * 0.75), int(dh * 0.75))
         self.resize(dw, dh)
@@ -1950,6 +2369,7 @@ class OvertimeWindow(QMainWindow):
 
         self._settings = load_settings()
         self._remaining_seconds = 0
+        self._ledger = OvertimeUserLedger(self)
         self._tick = QTimer(self)
         self._tick.setInterval(1000)
         self._tick.timeout.connect(self._on_tick)
@@ -1960,6 +2380,10 @@ class OvertimeWindow(QMainWindow):
     @property
     def block(self) -> _OvertimeBlock:
         return self._root.block
+
+    @property
+    def user_ledger(self) -> OvertimeUserLedger:
+        return self._ledger
 
     @staticmethod
     def aspect_ratio() -> float:
@@ -1995,6 +2419,7 @@ class OvertimeWindow(QMainWindow):
 
     def hideEvent(self, event):
         self._tick.stop()
+        self._ledger.clear()
         super().hideEvent(event)
 
     def _init_shown(self):
@@ -2006,6 +2431,29 @@ class OvertimeWindow(QMainWindow):
         self.apply_settings(load_settings())
         self._root.layout_block()
         self._tick.start()
+
+    def apply_time_only(self, settings: dict):
+        """仅应用剩余时间到悬浮窗倒计时。"""
+        self._settings["hours"] = _clamp_int(settings.get("hours"), 0, 999)
+        self._settings["minutes"] = _clamp_int(settings.get("minutes"), 0, 60)
+        self._settings["seconds"] = _clamp_int(settings.get("seconds"), 0, 60)
+        self._remaining_seconds = total_seconds(
+            self._settings["hours"],
+            self._settings["minutes"],
+            self._settings["seconds"],
+        )
+        self._refresh_timer_display()
+
+    def apply_other_only(self, settings: dict):
+        """仅应用礼物规则与自定义文字，不改变当前倒计时。"""
+        if "rules" in settings:
+            self._settings["rules"] = settings["rules"]
+        if "custom_text" in settings:
+            self._settings["custom_text"] = settings["custom_text"]
+        if "custom_align" in settings:
+            self._settings["custom_align"] = settings["custom_align"]
+        self._root.block.apply_settings(self._settings)
+        self._root.layout_block()
 
     def apply_settings(self, settings: dict | None = None):
         if settings is None:
@@ -2032,6 +2480,7 @@ class OvertimeWindow(QMainWindow):
         delta = rule_to_seconds(rule, count=msg.count)
         if delta == 0:
             return False
+        self._ledger.record(_gift_user_key(msg), delta)
         self._remaining_seconds = max(0, self._remaining_seconds + delta)
         self._refresh_timer_display()
         self._root.block.set_gift_log(
@@ -2074,10 +2523,11 @@ class OvertimeTool(ToolSingleton, QMainWindow):
         if not ToolSingleton.guard_init(self):
             return
         super().__init__(parent, Qt.Window)
+        self.setAttribute(Qt.WA_QuitOnClose, False)
         self.setWindowTitle("加班机")
-        self.setMinimumSize(_PANEL_W + 40, 760)
-        self.resize(_PANEL_W + 48, 780)
+        self.setFixedSize(_TOOL_WIN_W, _TOOL_WIN_H)
         self._overtime_win: OvertimeWindow | None = None
+        self._user_time_win: OvertimeUserTimeWindow | None = None
         self._open_btn: QPushButton | None = None
         self._cur_nav = 0
         self._overtime_tab_built = False
@@ -2088,6 +2538,7 @@ class OvertimeTool(ToolSingleton, QMainWindow):
             self.setStyleSheet(self._qss()),
             self._navigate(self._cur_nav),
             self._refresh_btn(),
+            self._style_user_time_btn(),
         ))
 
     def _qss(self) -> str:
@@ -2105,7 +2556,7 @@ class OvertimeTool(ToolSingleton, QMainWindow):
         #OvertimeNavBtn[active=true] {{ background: transparent; color: {C['text']};
                                         font-weight: 600;
                                         border-bottom: 2px solid {C['active_line']}; }}
-        #OvertimeContent {{ background: {C['bg']}; }}
+        #OvertimeContent {{ background: {C['bg']}; border: none; }}
         #OvertimeCard   {{ background: {C['card']}; border-radius: 10px;
                            border: 1px solid {C['border']}; }}
         #OvertimeSection {{ background: transparent; border: none; }}
@@ -2139,10 +2590,15 @@ class OvertimeTool(ToolSingleton, QMainWindow):
     def _make_card(self) -> QFrame:
         card = QFrame()
         card.setObjectName("OvertimeCard")
+        card.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         lay = QVBoxLayout(card)
         lay.setContentsMargins(20, 16, 20, 16)
         lay.setSpacing(14)
         return card
+
+    @staticmethod
+    def _set_page_margins(lay: QVBoxLayout) -> None:
+        lay.setContentsMargins(_OVERTIME_PAD, 20, _OVERTIME_PAD, 20)
 
     def _build_general_panel(self, lay):
         """第一页：启动悬浮窗等通用设置。"""
@@ -2179,20 +2635,75 @@ class OvertimeTool(ToolSingleton, QMainWindow):
         sim_desc.setStyleSheet(f"font-size: 12px; color: {C['text_muted']};")
         scl.addWidget(sim_desc)
         lay.addWidget(sim_card)
+
+        ut_card = self._make_card()
+        ut_l = ut_card.layout()
+        ut_title = QLabel("用户时长统计")
+        ut_title.setStyleSheet("font-size: 14px; font-weight: 600;")
+        ut_l.addWidget(ut_title)
+        ut_row = QHBoxLayout()
+        self._user_time_btn = QPushButton("查看用户时长统计")
+        self._user_time_btn.setFixedHeight(34)
+        self._user_time_btn.setCursor(Qt.PointingHandCursor)
+        self._user_time_btn.clicked.connect(self._open_user_time_window)
+        ut_row.addWidget(self._user_time_btn)
+        ut_row.addStretch()
+        ut_l.addLayout(ut_row)
+        ut_desc = QLabel("统计本次加班机运行期间，各用户礼物带来的加减时长")
+        ut_desc.setStyleSheet(f"font-size: 12px; color: {C['text_muted']};")
+        ut_l.addWidget(ut_desc)
+        lay.addWidget(ut_card)
         lay.addStretch()
+        self._style_user_time_btn()
         self._refresh_btn()
+
+    def _style_user_time_btn(self):
+        if not getattr(self, "_user_time_btn", None):
+            return
+        C = _theme.get()
+        self._user_time_btn.setStyleSheet(f"""
+            QPushButton {{
+                background: {C['card']}; color: {C['active_line']};
+                border: 1.5px solid {C['active_line']}; border-radius: 8px;
+                font-size: 13px; font-weight: 600; padding: 0 16px;
+            }}
+            QPushButton:hover {{ background: {C['hover']}; }}
+        """)
+
+    def _active_ledger(self) -> OvertimeUserLedger | None:
+        if self._overtime_win is not None and self._overtime_win.isVisible():
+            return self._overtime_win.user_ledger
+        return None
+
+    def _sync_user_time_ledger(self) -> None:
+        if self._user_time_win is not None and self._user_time_win.isVisible():
+            self._user_time_win.bind_ledger(self._active_ledger())
+
+    def _open_user_time_window(self):
+        if self._user_time_win is None:
+            self._user_time_win = OvertimeUserTimeWindow(self)
+        self._user_time_win.bind_ledger(self._active_ledger())
+        self._user_time_win.show()
+        self._user_time_win.raise_()
+        self._user_time_win.activateWindow()
 
     def _build_overtime_panel(self, lay):
         """第二页：剩余时间、礼物规则、自定义文字。"""
         lay.addWidget(self._page_title("加班机"))
+        center = QHBoxLayout()
+        center.addStretch(1)
         self._settings_panel = OvertimeSettingsPanel()
-        self._settings_panel.applyRequested.connect(self._on_settings_apply)
-        lay.addWidget(self._settings_panel)
+        self._settings_panel.timeApplyRequested.connect(self._on_time_apply)
+        self._settings_panel.otherApplyRequested.connect(self._on_other_apply)
+        center.addWidget(self._settings_panel)
+        center.addStretch(1)
+        lay.addLayout(center)
 
     @staticmethod
     def _page_title(text: str) -> QLabel:
         lbl = QLabel(text)
         lbl.setObjectName("OvertimePageTitle")
+        lbl.setAlignment(Qt.AlignHCenter)
         return lbl
 
     def _build(self):
@@ -2224,13 +2735,16 @@ class OvertimeTool(ToolSingleton, QMainWindow):
 
         # 第一页：设置（轻量，立即构建）
         inner0 = QWidget()
+        inner0.setObjectName("OvertimePage")
         lay0 = QVBoxLayout(inner0)
-        lay0.setContentsMargins(12, 12, 12, 12)
+        self._set_page_margins(lay0)
         lay0.setSpacing(16)
         self._build_general_panel(lay0)
         scroll0 = QScrollArea()
         scroll0.setWidgetResizable(True)
+        scroll0.setFrameShape(QFrame.NoFrame)
         scroll0.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll0.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         scroll0.setObjectName("OvertimeContent")
         scroll0.setWidget(inner0)
         self._stack.addWidget(scroll0)
@@ -2238,9 +2752,10 @@ class OvertimeTool(ToolSingleton, QMainWindow):
         # 第二页：占位，首次进入时再构建（避免打开工具窗卡顿）
         self._overtime_placeholder = QWidget()
         ph_lay = QVBoxLayout(self._overtime_placeholder)
-        ph_lay.setContentsMargins(12, 12, 12, 12)
+        self._set_page_margins(ph_lay)
         loading = QLabel("加载中…")
         loading.setObjectName("OvertimePageTitle")
+        loading.setAlignment(Qt.AlignHCenter)
         ph_lay.addWidget(loading)
         ph_lay.addStretch()
         self._stack.addWidget(self._overtime_placeholder)
@@ -2258,14 +2773,16 @@ class OvertimeTool(ToolSingleton, QMainWindow):
         self._overtime_tab_built = True
         idx = self._stack.indexOf(self._overtime_placeholder)
         inner = QWidget()
+        inner.setObjectName("OvertimePage")
         inner_lay = QVBoxLayout(inner)
-        inner_lay.setContentsMargins(12, 12, 12, 12)
+        self._set_page_margins(inner_lay)
         inner_lay.setSpacing(16)
         self._build_overtime_panel(inner_lay)
-        inner_lay.addStretch()
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         scroll.setObjectName("OvertimeContent")
         scroll.setWidget(inner)
         self._stack.removeWidget(self._overtime_placeholder)
@@ -2290,10 +2807,15 @@ class OvertimeTool(ToolSingleton, QMainWindow):
         if self._cur_nav == 1:
             self._stack.setCurrentIndex(1)
 
-    def _on_settings_apply(self, data: dict):
+    def _on_time_apply(self, data: dict):
         save_settings(data)
         if self._overtime_win is not None:
-            self._overtime_win.apply_settings(data)
+            self._overtime_win.apply_time_only(data)
+
+    def _on_other_apply(self, data: dict):
+        save_settings(data)
+        if self._overtime_win is not None:
+            self._overtime_win.apply_other_only(data)
 
     def _on_sim_gift(self, msg):
         from listener.models import GiftMessage
@@ -2320,6 +2842,7 @@ class OvertimeTool(ToolSingleton, QMainWindow):
             self._overtime_win.activateWindow()
 
         self._refresh_btn()
+        self._sync_user_time_ledger()
 
     def _create_overtime_win(self):
         self._overtime_win_pending = False
@@ -2332,6 +2855,7 @@ class OvertimeTool(ToolSingleton, QMainWindow):
             self._overtime_win.activateWindow()
         finally:
             self._refresh_btn()
+            self._sync_user_time_ledger()
 
     def _refresh_btn(self):
         is_open = (
@@ -2346,6 +2870,7 @@ class OvertimeTool(ToolSingleton, QMainWindow):
             self._open_btn.setText("打开中…")
             self._open_btn.setEnabled(False)
             return
+        self._open_btn.setEnabled(True)
         self._open_btn.setText("关闭加班机" if is_open else "打开加班机")
         if is_open:
             self._open_btn.setStyleSheet("""
@@ -2368,14 +2893,6 @@ class OvertimeTool(ToolSingleton, QMainWindow):
                 QPushButton:hover {{ background: {C['hover']}; }}
             """)
 
-    def toggle_overtime_window(self):
-        self._toggle_overtime_win()
-
-    def overtime_window_active(self) -> bool:
-        return (
-            self._overtime_win is not None and self._overtime_win.isVisible()
-        )
-
     def process_message(self, msg):
         from listener.models import GiftMessage
         if not isinstance(msg, GiftMessage):
@@ -2385,43 +2902,26 @@ class OvertimeTool(ToolSingleton, QMainWindow):
             return
         win.handle_gift(msg)
 
+    def showEvent(self, event):
+        super().showEvent(event)
+        self._overtime_win_pending = False
+        self._refresh_btn()
+
+    def _stop_overlay(self):
+        """关闭设置窗时同步收起悬浮窗，避免后台继续运行。"""
+        if self._overtime_win is not None:
+            self._overtime_win.hide()
+        if self._user_time_win is not None:
+            self._user_time_win.hide()
+        self._overtime_win_pending = False
+        self._refresh_btn()
+        self._sync_user_time_ledger()
+
     def closeEvent(self, event):
         from tools.tool_common import is_app_shutting_down
         if is_app_shutting_down():
             event.accept()
             return
+        self._stop_overlay()
         event.ignore()
         self.hide()
-
-
-def _tray_register():
-    from tools.tray_registry import register_tray, TrayAction
-
-    def _is_active() -> bool:
-        return OvertimeTool().overtime_window_active()
-
-    def _toggle():
-        inst = OvertimeTool()
-        if _is_active():
-            if inst._overtime_win:
-                inst._overtime_win.hide()
-            inst.hide()
-        else:
-            inst.toggle_overtime_window()
-
-    def _open_settings():
-        t = OvertimeTool()
-        t.show()
-        t.activateWindow()
-
-    register_tray("加班机", lambda: [
-        TrayAction("已关闭", lambda: None,
-                   text_when_active="运行中", is_active=_is_active,
-                   disabled=True),
-        TrayAction("启动加班机", _toggle,
-                   text_when_active="关闭加班机", is_active=_is_active),
-        TrayAction("打开设置页面", _open_settings),
-    ])
-
-
-_tray_register()

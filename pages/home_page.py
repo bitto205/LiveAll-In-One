@@ -1,4 +1,4 @@
-﻿import sys, os
+import sys, os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from PySide6.QtWidgets import (
@@ -1218,7 +1218,11 @@ class HomePage(BasePage):
             self._reset_other_listener_pages(route)
             return
 
-        route = self._connected_route
+        route = (
+            self._connected_route
+            or self.get_active_listener_route()
+            or _cfg.get("route")
+        )
         if route and route in self._web_pages:
             self._web_pages[route].on_status_change(False)
         elif route == "3" and self._route3_page:
