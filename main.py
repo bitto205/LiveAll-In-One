@@ -10,6 +10,10 @@ import asyncio
 from PySide6.QtWidgets import QApplication
 from PySide6.QtCore    import QThread, Signal, QObject, QtMsgType, qInstallMessageHandler, Qt, QTimer
 
+from tools.overlay_capture import prepare_app_alpha_format
+
+prepare_app_alpha_format()
+
 
 def _qt_msg_handler(msg_type, _, msg):  # _ = QMessageLogContext (required by Qt API)
     """过滤 DirectWrite/Fixedsys 无害警告，其余正常输出。"""

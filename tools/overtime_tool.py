@@ -27,6 +27,7 @@ from PySide6.QtGui import (
 import pages.theme as _theme
 from pages.widgets import ThemedComboBox
 from tools import register_tool
+from tools.overlay_capture import enable_capture_transparency
 from tools.tool_common import ToolSingleton, gift_names_cached, load_gift_pixmap
 
 # ═══════════════════════════════════════════
@@ -2356,6 +2357,7 @@ class OvertimeWindow(QMainWindow):
         )
         self.setAttribute(Qt.WA_TranslucentBackground)
         self.setAttribute(Qt.WA_QuitOnClose, False)
+        enable_capture_transparency(self)
         dw, dh = _default_window_size()
         self.setMinimumSize(int(dw * 0.75), int(dh * 0.75))
         self.resize(dw, dh)
@@ -2618,7 +2620,11 @@ class OvertimeTool(ToolSingleton, QMainWindow):
         self._open_btn.clicked.connect(self._toggle_overtime_win)
         row.addWidget(self._open_btn)
         cl.addLayout(row)
-        desc = QLabel("透明悬浮窗，叠加在直播软件上方显示加班倒计时")
+        desc = QLabel(
+            "透明悬浮窗，叠加在直播软件上方显示加班倒计时。"
+            "窗口采集请在直播伴侣素材设置中勾选「允许窗口透明」（10.5+）。"
+        )
+        desc.setWordWrap(True)
         desc.setStyleSheet(f"font-size: 12px; color: {C['text_muted']};")
         cl.addWidget(desc)
         lay.addWidget(card)

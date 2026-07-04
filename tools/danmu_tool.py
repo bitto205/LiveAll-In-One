@@ -28,6 +28,7 @@ from PySide6.QtGui   import (
 )
 
 import pages.theme as _theme
+from tools.overlay_capture import enable_capture_transparency
 
 # ─────────────────────────────────────────────
 # 常量
@@ -524,6 +525,7 @@ class DanmuWindow(QMainWindow):
         )
         self.setAttribute(Qt.WA_TranslucentBackground)
         self.setAttribute(Qt.WA_QuitOnClose, False)
+        enable_capture_transparency(self)
         self.setMinimumSize(200, 150)
         self._restore_geometry()      # 优先用上次保存的位置/大小
 
@@ -917,7 +919,11 @@ class DanmuTool(ToolSingleton, QMainWindow):
         self._open_btn.clicked.connect(self._toggle_danmu_win)
         row.addWidget(self._open_btn)
         cl.addLayout(row)
-        desc = QLabel("透明悬浮窗，叠加在直播软件上方显示弹幕")
+        desc = QLabel(
+            "透明悬浮窗，叠加在直播软件上方显示弹幕。"
+            "窗口采集请在直播伴侣素材设置中勾选「允许窗口透明」（10.5+）。"
+        )
+        desc.setWordWrap(True)
         desc.setStyleSheet(f"font-size: 12px; color: {C['text_muted']};")
         cl.addWidget(desc)
         lay.addWidget(card)
