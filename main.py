@@ -171,7 +171,8 @@ class App(QObject):
         self._qt.setApplicationName(APP_NAME)
         self._qt.setApplicationDisplayName(APP_NAME)
         self._qt.setOrganizationName(APP_NAME)
-        self._qt.setQuitOnLastWindowClosed(True)
+        import config as _cfg
+        self._qt.setQuitOnLastWindowClosed(not _cfg.get("minimize_to_tray", True))
         _set_process_name(APP_NAME)
         self._thread: ListenerThread | None = None
         self._pending_connect: tuple[str, str] | None = None  # (live_id, route)

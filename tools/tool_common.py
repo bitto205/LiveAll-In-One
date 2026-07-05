@@ -76,6 +76,12 @@ def is_app_shutting_down() -> bool:
 def shutdown_all_tools() -> None:
     """退出主程序时关闭所有工具窗及其悬浮子窗。"""
     mark_app_shutting_down()
+    closed = _force_close_all_tool_windows()
+    if closed:
+        logger.info("已关闭 %d 个工具窗口", closed)
+
+
+def _force_close_all_tool_windows() -> int:
     from tools import get_tools
 
     closed = 0
@@ -83,14 +89,16 @@ def shutdown_all_tools() -> None:
         inst = getattr(meta.cls, "_instance", None)
         if inst is None:
             continue
+        cleanup = getattr(inst, "_cleanup_for_release", None)
         for attr in ("_danmu_win", "_overtime_win", "_user_time_win"):
             sub = getattr(inst, attr, None)
             if sub is not None:
                 sub.close()
         inst.close()
+        release_tool_singleton(meta.cls, cleanup=cleanup)
+        unregister_tool_from_page(meta.name)
         closed += 1
-    if closed:
-        logger.info("已关闭 %d 个工具窗口", closed)
+    return closed
 
 
 def gift_names_cached() -> list[str]:

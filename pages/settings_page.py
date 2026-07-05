@@ -8,10 +8,10 @@ from PySide6.QtWidgets import (
     QWidget, QHBoxLayout, QVBoxLayout, QStackedWidget,
     QLabel, QPushButton, QFrame, QSizePolicy, QScrollArea,
 )
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QThread, Signal
 
 from pages import BasePage, BaseSetting
-from pages.widgets import ThemedComboBox
+from pages.widgets import ThemedComboBox, ThemedToggle
 from listener.log_util import get_tagged_logger
 
 logger = get_tagged_logger("设置", __name__)
@@ -115,13 +115,47 @@ class SystemSettings(BaseSetting):
         inner.addLayout(row)
         lay.addWidget(card)
 
+        card2, inner2 = self.build_section("行为")
+
+        row2 = QHBoxLayout()
+        row2.setSpacing(12)
+        lbl2 = QLabel("关闭时缩小到托盘")
+        lbl2.setStyleSheet("background: transparent; font-size: 14px;")
+        row2.addWidget(lbl2)
+        row2.addStretch()
+
+        self._tray_toggle = ThemedToggle("minimize_to_tray", default=True)
+        self._tray_toggle.toggled.connect(self._on_tray_setting_changed)
+        row2.addWidget(self._tray_toggle)
+
+        inner2.addLayout(row2)
+        lay.addWidget(card2)
+
         lay.addStretch()
+
+    def _on_tray_setting_changed(self, enabled: bool) -> None:
+        root = self.window()
+        if hasattr(root, "apply_minimize_to_tray_setting"):
+            root.apply_minimize_to_tray_setting(enabled)
 
 
 
 # ─────────────────────────────────────────────
 # 内置面板：账号
 # ─────────────────────────────────────────────
+class _AccountLoginThread(QThread):
+    finished = Signal(bool, str)
+
+    def run(self):
+        try:
+            from listener.login import do_login
+            ok = do_login()
+            self.finished.emit(ok, "" if ok else "登录未完成或已取消")
+        except Exception as e:
+            logger.error("登录线程异常: %s", e)
+            self.finished.emit(False, str(e))
+
+
 class AccountSettings(BaseSetting):
     name  = "账号"
     order = 1
@@ -156,6 +190,7 @@ class AccountSettings(BaseSetting):
         inner.addWidget(self._btn)
         lay.addWidget(card)
         lay.addStretch()
+        self._login_thread: _AccountLoginThread | None = None
 
         self._refresh()
 
@@ -186,19 +221,23 @@ class AccountSettings(BaseSetting):
             self._status.setText(f"检测失败: {e}")
 
     def _do_login(self):
-        try:
-            from listener.login import do_login
-            logger.info("开始重新登录")
-            self._btn.setText("登录中...")
-            self._btn.setEnabled(False)
-            do_login()
+        if self._login_thread and self._login_thread.isRunning():
+            return
+        logger.info("开始重新登录")
+        self._btn.setText("登录中...")
+        self._btn.setEnabled(False)
+        self._login_thread = _AccountLoginThread(self)
+        self._login_thread.finished.connect(self._on_login_done)
+        self._login_thread.start()
+
+    def _on_login_done(self, ok: bool, err: str):
+        self._btn.setText("重新登录")
+        self._btn.setEnabled(True)
+        self._login_thread = None
+        if ok:
             self._refresh()
-        except Exception as e:
-            logger.error("登录失败: %s", e)
-            self._status.setText(f"登录失败: {e}")
-        finally:
-            self._btn.setText("重新登录")
-            self._btn.setEnabled(True)
+        else:
+            self._status.setText(f"登录失败: {err}" if err else "登录已取消")
 
 
 # ─────────────────────────────────────────────

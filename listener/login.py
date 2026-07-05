@@ -24,6 +24,7 @@ from listener.log_util import get_tagged_logger
 # 配置
 # ─────────────────────────────────────────────
 STATE_FILE = "state.json"
+LOGIN_URL = "https://www.douyin.com/"
 
 logger = get_tagged_logger("登录", "listener.login")
 
@@ -112,7 +113,6 @@ _CONFIRM_JS = """
         document.body.appendChild(btn);
     };
 
-    // 每次导航后重新注入（add_init_script 在 DOM 就绪前执行，需要等 DOMContentLoaded）
     if (document.readyState === 'loading') {
         document.addEventListener('DOMContentLoaded', inject);
     } else {
@@ -122,17 +122,43 @@ _CONFIRM_JS = """
 """
 
 
+async def _launch_installed_chromium(p):
+    last_error: Exception | None = None
+    for channel in ("msedge", "chrome"):
+        try:
+            browser = await p.chromium.launch(
+                channel=channel,
+                headless=False,
+                args=["--disable-blink-features=AutomationControlled"],
+            )
+            logger.info("已启动系统浏览器: %s", "Edge" if channel == "msedge" else "Chrome")
+            return browser
+        except Exception as e:
+            last_error = e
+            logger.debug("启动系统浏览器 %s 失败: %s", channel, e)
+    raise RuntimeError("未能启动系统 Edge/Chrome，请确认已安装") from last_error
+
+
+async def _close_browser_quietly(browser) -> None:
+    try:
+        await asyncio.wait_for(browser.close(), timeout=3)
+    except Exception as e:
+        logger.debug("关闭登录浏览器超时或失败: %s", e)
+
+
 # ─────────────────────────────────────────────
-# 第二层：弹出浏览器扫码
+# 第二层：Playwright 控制系统 Chromium 浏览器登录
 # ─────────────────────────────────────────────
 async def _run_login(state_file: str) -> bool:
-    logger.info("启动登录流程，请在浏览器扫码，完成后点击右下角按钮…")
+    logger.info("启动登录流程，请在系统 Edge/Chrome 中扫码，完成后点击右下角按钮…")
 
     async with async_playwright() as p:
-        browser = await p.chromium.launch(
-            headless=False,
-            args=["--disable-blink-features=AutomationControlled"],
-        )
+        try:
+            browser = await _launch_installed_chromium(p)
+        except Exception as e:
+            logger.error("启动系统 Chromium 浏览器失败: %s", e)
+            return False
+
         context = await browser.new_context(
             user_agent=(
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -143,12 +169,10 @@ async def _run_login(state_file: str) -> bool:
         )
         page = await context.new_page()
         await page.add_init_script(_CONFIRM_JS)
-        await page.goto("https://www.douyin.com/", wait_until="domcontentloaded")
+        await page.goto(LOGIN_URL, wait_until="domcontentloaded")
 
         while True:
-            logger.info("等待手动确认（点击右下角按钮）…")
-
-            # 等用户点按钮，浏览器关闭时会抛异常
+            logger.info("等待手动确认（点击页面右下角按钮）…")
             try:
                 await page.wait_for_function(
                     "() => window.__LOGIN_DONE__ === true",
@@ -156,23 +180,20 @@ async def _run_login(state_file: str) -> bool:
                 )
             except Exception:
                 logger.warning("浏览器已关闭，登录取消")
+                await _close_browser_quietly(browser)
                 return False
 
             await asyncio.sleep(1)
             await context.storage_state(path=state_file)
-
             valid, reason = _check_cookie_expiry(state_file)
-
             if valid:
                 logger.info("登录成功，已保存 %s（%s）", state_file, reason)
-                await browser.close()
+                await _close_browser_quietly(browser)
                 return True
 
-            # 未检测到登录态 → 页面注入红色提示，恢复按钮，继续等待
             logger.warning("未检测到登录态（%s），等待重试", reason)
             await page.evaluate("""
                 (() => {
-                    // 恢复按钮
                     const btn = document.getElementById('__dy_login_btn__');
                     if (btn) {
                         btn.innerText = '✅  我已完成登录';
@@ -180,7 +201,6 @@ async def _run_login(state_file: str) -> bool:
                     }
                     window.__LOGIN_DONE__ = false;
 
-                    // 注入红色提示（3 秒后自动消失）
                     const old = document.getElementById('__dy_login_warn__');
                     if (old) old.remove();
                     const warn = document.createElement('div');
@@ -202,9 +222,6 @@ async def _run_login(state_file: str) -> bool:
                     setTimeout(() => warn.remove(), 3000);
                 })();
             """)
-            # 继续下一轮循环，等待再次点击按钮
-
-    return False   # 理论上不会执行到这里，兜底
 
 
 # ─────────────────────────────────────────────

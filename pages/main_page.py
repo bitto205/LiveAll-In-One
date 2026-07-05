@@ -12,15 +12,16 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pages
 import pages.theme as _theme
+import config as _cfg
 
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget,
     QHBoxLayout, QVBoxLayout, QStackedWidget,
     QLabel, QPushButton, QFrame, QSizePolicy, QScrollArea,
-    QGraphicsDropShadowEffect,
+    QGraphicsDropShadowEffect, QSystemTrayIcon, QMenu,
 )
 from PySide6.QtCore  import Qt, QPropertyAnimation, QEasingCurve
-from PySide6.QtGui   import QColor, QPixmap, QPainter, QFont
+from PySide6.QtGui   import QColor, QIcon, QPixmap, QPainter, QFont
 
 from pages import get_pages, BasePage
 
@@ -505,6 +506,8 @@ class MainPage(QMainWindow):
 
         self.setStyleSheet(build_qss())
         _theme.on_change(lambda _: self.setStyleSheet(build_qss()))
+        self._setup_tray()
+        self.apply_minimize_to_tray_setting(bool(_cfg.get("minimize_to_tray", True)))
 
     def _build_ui(self, settings_cls):
         # 最外层透明（留出阴影空间）
@@ -593,15 +596,83 @@ class MainPage(QMainWindow):
                 return page
         return None
 
+    def _setup_tray(self):
+        """创建系统托盘图标与右键菜单。"""
+        size = 32
+        pix = QPixmap(size, size)
+        pix.fill(Qt.transparent)
+        p = QPainter(pix)
+        p.setRenderHint(QPainter.Antialiasing)
+        p.setBrush(QColor(_theme.get()["active_line"]))
+        p.setPen(Qt.NoPen)
+        p.drawEllipse(2, 2, size - 4, size - 4)
+        p.setPen(QColor("#ffffff"))
+        f = QFont()
+        f.setBold(True)
+        f.setPixelSize(14)
+        p.setFont(f)
+        p.drawText(pix.rect(), Qt.AlignCenter, "A")
+        p.end()
+
+        self._tray = QSystemTrayIcon(QIcon(pix), self)
+        self._tray.setToolTip("LiveAIO")
+
+        menu = QMenu()
+        show_action = menu.addAction("显示主窗口")
+        menu.addSeparator()
+        quit_action = menu.addAction("退出")
+
+        show_action.triggered.connect(self._restore_from_tray)
+        quit_action.triggered.connect(self._quit_application)
+
+        self._tray.setContextMenu(menu)
+        self._tray.activated.connect(self._on_tray_activated)
+
+    def _on_tray_activated(self, reason):
+        if reason == QSystemTrayIcon.DoubleClick:
+            self._restore_from_tray()
+
+    def _restore_from_tray(self):
+        self.showNormal()
+        self.activateWindow()
+        self.raise_()
+
+    def apply_minimize_to_tray_setting(self, enabled: bool) -> None:
+        app = QApplication.instance()
+        if app is not None:
+            app.setQuitOnLastWindowClosed(not enabled)
+        if not hasattr(self, "_tray"):
+            return
+        if enabled:
+            self._tray.show()
+        else:
+            self._tray.hide()
+
     def _quit_application(self):
         """完全退出：关闭所有工具窗并结束主进程。"""
+        if hasattr(self, "_tray"):
+            self._tray.hide()
         from tools.tool_common import shutdown_all_tools
         shutdown_all_tools()
         QApplication.instance().quit()
 
     def closeEvent(self, event):
-        event.accept()
-        self._quit_application()
+        """关闭按钮：开启托盘模式时仅隐藏主窗口，工具窗继续独立运行。"""
+        if _cfg.get("minimize_to_tray", True):
+            event.ignore()
+            self.hide()
+            if hasattr(self, "_tray"):
+                if not self._tray.isVisible():
+                    self._tray.show()
+                self._tray.showMessage(
+                    "LiveAIO",
+                    "程序已缩小到托盘，右键图标可退出",
+                    QSystemTrayIcon.Information,
+                    2000,
+                )
+        else:
+            event.accept()
+            self._quit_application()
 
 
 # ─────────────────────────────────────────────
