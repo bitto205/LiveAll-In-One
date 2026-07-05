@@ -10,7 +10,10 @@ from PySide6.QtCore import Qt, QTimer, QThread, Signal
 
 import pages.theme as _theme
 import config as _cfg
+from listener.log_util import get_tagged_logger
 from pages import BasePage, register
+
+logger = get_tagged_logger("首页", __name__)
 
 
 class _Toast(QLabel):
@@ -204,7 +207,31 @@ class _LoginThread(QThread):
             ok = do_login()
             self.finished.emit(ok, "" if ok else "登录未完成或已取消")
         except Exception as e:
+            logger.error("登录线程异常: %s", e)
             self.finished.emit(False, str(e))
+
+
+class _RouteEnvCheckThread(QThread):
+    """后台跑线路 3/4 环境检测，避免点击进页卡顿。"""
+    finished = Signal(str)
+
+    def __init__(self, route: str, parent=None):
+        super().__init__(parent)
+        self._route = route
+
+    def run(self):
+        try:
+            from listener.listener4 import sync_companion_dir_from_registry
+            sync_companion_dir_from_registry()
+            if self._route == "3":
+                from listener.listener3 import run_page_check
+                run_page_check()
+            else:
+                from listener.listener4 import run_page_check
+                run_page_check()
+        except Exception as e:
+            logger.debug("线路 %s 环境检测异常: %s", self._route, e)
+        self.finished.emit(self._route)
 
 
 class _RoutePickerPage(QWidget):
@@ -585,7 +612,7 @@ class _Route3Page(QWidget, ConnPageMixin):
         self._path_btn.clicked.connect(lambda: _pick_companion_dir(self._home))
         btn_row.addWidget(self._path_btn)
 
-        self._warn = QLabel("当前系统代理占用，请关闭代理后重启本软件")
+        self._warn = QLabel("当前系统代理占用，请关闭代理后重新进入该页面")
         self._warn.setWordWrap(True)
         self._warn.hide()
         btn_row.addWidget(self._warn, stretch=1)
@@ -853,7 +880,7 @@ class _Route4Page(QWidget, ConnPageMixin):
         self._action_btn.setFixedHeight(36)
         self._action_btn.setMinimumWidth(120)
         self._action_btn.setCursor(Qt.PointingHandCursor)
-        self._action_btn.clicked.connect(self._do_patch)
+        self._action_btn.clicked.connect(self._on_action_click)
         btn_row.addWidget(self._action_btn)
 
         self._path_btn = QPushButton("指定路径")
@@ -902,6 +929,13 @@ class _Route4Page(QWidget, ConnPageMixin):
 
         self.refresh_theme()
 
+    def _on_action_click(self):
+        from listener.listener4 import get_page_status
+        if get_page_status()["is_patched"]:
+            self._do_unpatch()
+        else:
+            self._do_patch()
+
     def _do_patch(self):
         self._action_btn.setText("Patch 中...")
         self._action_btn.setEnabled(False)
@@ -915,7 +949,27 @@ class _Route4Page(QWidget, ConnPageMixin):
         except Exception as e:
             self._home.toast.show_msg(f"Patch 失败: {e}", error=True)
         finally:
-            self._action_btn.setText("Patch")
+            from listener.listener4 import run_page_check
+            run_page_check()
+            self.refresh_status()
+            if self._home._route3_page:
+                from listener.listener3 import run_page_check as run_r3
+                run_r3()
+                self._home._route3_page.refresh_status()
+
+    def _do_unpatch(self):
+        self._action_btn.setText("还原中...")
+        self._action_btn.setEnabled(False)
+        try:
+            from listener.listener4 import unpatch_companion
+            ok, msg = unpatch_companion()
+            if ok:
+                self._home.toast.show_msg(msg)
+            else:
+                self._home.toast.show_msg(msg, error=True)
+        except Exception as e:
+            self._home.toast.show_msg(f"Unpatch 失败: {e}", error=True)
+        finally:
             from listener.listener4 import run_page_check
             run_page_check()
             self.refresh_status()
@@ -929,6 +983,7 @@ class _Route4Page(QWidget, ConnPageMixin):
         from listener.listener4 import get_page_status
         s = get_page_status()
         C = _theme.get()
+        patched = s["is_patched"]
         _refresh_companion_path_btn(self._path_btn, s["companion_in_registry"])
 
         if s.get("manual_path_invalid"):
@@ -937,31 +992,37 @@ class _Route4Page(QWidget, ConnPageMixin):
             self._status_lbl.setText("该指定目录无效")
             return
 
-        if s["patch_needed"]:
+        if not s["companion_installed"] or not s["index_js_found"]:
+            self._action_btn.setEnabled(False)
+            self._action_btn.setStyleSheet(_theme.qss_disabled(C, h=36))
+            self._status_lbl.setText("未检测到直播伴侣，请指定安装路径")
+            return
+
+        if patched:
+            self._action_btn.setText("Unpatch")
+            self._action_btn.setEnabled(True)
+            self._action_btn.setStyleSheet(_theme.qss_outlined(C, h=36))
+            self._status_lbl.setText("Patch 已完成，如果是首次Patch，请重启直播伴侣")
+        elif s["patch_needed"]:
+            self._action_btn.setText("Patch")
             self._action_btn.setEnabled(True)
             self._action_btn.setStyleSheet(_theme.qss_outlined(C, h=36))
             parts = []
             if not s["exe_identical"]:
                 parts.append("exe 与发布包不一致或缺失")
-            if not s["index_exact"]:
-                parts.append("index.js 与期望 patch 不一致")
+            if not s.get("index_patched"):
+                parts.append("index.js patch 注入与 catalog 不一致")
             self._status_lbl.setText("；".join(parts) if parts else "")
         else:
+            self._action_btn.setText("Patch")
             self._action_btn.setEnabled(False)
             self._action_btn.setStyleSheet(_theme.qss_disabled(C, h=36))
-            if s["is_patched"]:
-                self._status_lbl.setText("Patch 已完成，请重启直播伴侣")
-            elif not s["companion_installed"]:
-                self._status_lbl.setText("未检测到直播伴侣，请指定安装路径")
-            elif not s["index_js_found"]:
-                self._status_lbl.setText("未找到直播伴侣 index.js")
-            else:
-                self._status_lbl.setText("")
+            self._status_lbl.setText("")
 
         self._refresh_conn_btn()
 
     def _route4_ready(self) -> bool:
-        from listener.listener4 import get_page_status, is_proxy_shell_running
+        from listener.listener4 import get_page_status
         s = get_page_status()
         if s.get("manual_path_invalid"):
             return False
@@ -969,19 +1030,41 @@ class _Route4Page(QWidget, ConnPageMixin):
             return False
         if s["patch_needed"] or not s["is_patched"]:
             return False
-        return is_proxy_shell_running()
+        return True
+
+    def on_status_change(self, connected: bool):
+        if connected:
+            self._preempted = False
+            self.set_conn_state(_Btn.CONNECTED)
+            self._home.toast.show_msg("直播间连接成功 🎉")
+        else:
+            if self._preempted:
+                self._preempted = False
+                return
+            was_connected = self._btn_state == _Btn.CONNECTED
+            if self._was_connecting and not was_connected:
+                self.set_conn_state(_Btn.ERROR)
+                self._conn_label.setText("⚠️  未连接到直播间")
+                self._conn_label.setStyleSheet(_theme.qss_error_label())
+                self._conn_label.setVisible(True)
+                self._home.toast.show_msg("未连接到直播间", error=True)
+            else:
+                self.set_conn_state(_Btn.IDLE)
+                self._conn_label.setVisible(False)
+                if was_connected:
+                    self._home.toast.show_msg("直播间下播，已断开连接", error=True)
+            self._was_connecting = False
+            # listener4 自行退出，不在此 stop 线程（避免 QThread 竞态拖垮 main）
 
     def _on_conn_click(self):
         if self._btn_state in (_Btn.IDLE, _Btn.ERROR):
             if not self._route4_ready():
-                from listener.listener4 import get_page_status, is_proxy_shell_running
+                from listener.listener4 import get_page_status
                 s = get_page_status()
                 if s.get("manual_path_invalid"):
                     self._home.toast.show_msg("该指定目录无效", error=True)
                 elif s["patch_needed"] or not s["is_patched"]:
                     self._home.toast.show_msg("请先完成 Patch 并重启直播伴侣", error=True)
-                elif not is_proxy_shell_running():
-                    self._home.toast.show_msg("未检测到 proxy_shell 运行，请先启动直播伴侣并开播", error=True)
                 else:
                     self._home.toast.show_msg("环境未就绪", error=True)
                 return
@@ -990,6 +1073,13 @@ class _Route4Page(QWidget, ConnPageMixin):
             _cfg.set("route", "4")
             if self._home._connect_cb:
                 self._home._connect_cb("", "4")
+        elif self._btn_state == _Btn.CONNECTING:
+            self.set_conn_state(_Btn.IDLE)
+            self._was_connecting = False
+            self._home._connected_route = None
+            if self._home._disconnect_cb:
+                self._home._disconnect_cb()
+            self._home.toast.show_msg("已取消连接")
         elif self._btn_state == _Btn.CONNECTED:
             self.set_conn_state(_Btn.IDLE)
             self._was_connecting = False
@@ -1016,9 +1106,13 @@ class _Route4Page(QWidget, ConnPageMixin):
             self._conn_label.setVisible(False)
         elif state == _Btn.CONNECTING:
             waiting = self._home.is_switching_listener()
-            self._conn_btn.setText("等待其他线路退出…" if waiting else "连接中...")
-            self._conn_btn.setEnabled(False)
-            self._conn_btn.setStyleSheet(_theme.qss_disabled(C, h=44))
+            self._conn_btn.setText(
+                "等待其他线路退出…" if waiting else "连接中...点击取消连接"
+            )
+            self._conn_btn.setEnabled(not waiting)
+            self._conn_btn.setStyleSheet(
+                _theme.qss_outlined(C, h=44) if not waiting else _theme.qss_disabled(C, h=44)
+            )
             self._conn_label.setVisible(False)
         elif state == _Btn.CONNECTED:
             self._conn_btn.setText("断开连接")
@@ -1077,6 +1171,8 @@ class HomePage(BasePage):
         self._route3_page: _Route3Page | None = None
         self._route4_page: _Route4Page | None = None
         self._switching_listener = False
+        self._env_check_thread: _RouteEnvCheckThread | None = None
+        self._env_check_pending: str | None = None
         self._build()
         _theme.on_change(lambda _: self._refresh_theme())
 
@@ -1098,6 +1194,24 @@ class HomePage(BasePage):
         if self._route4_page and self._route4_page._btn_state in (_Btn.CONNECTING, _Btn.CONNECTED):
             return "4"
         return None
+
+    def clear_listener_state(self, route: str | None = None) -> None:
+        """Listener 已结束时静默清理页面连接态。"""
+        route = route or self.get_active_listener_route() or self._connected_route
+        if route and route in self._web_pages:
+            page = self._web_pages[route]
+            page.set_conn_state(_Btn.IDLE)
+            page._was_connecting = False
+            page._preempted = False
+        elif route == "3" and self._route3_page:
+            self._route3_page.set_conn_state(_Btn.IDLE)
+            self._route3_page._was_connecting = False
+            self._route3_page._preempted = False
+        elif route == "4" and self._route4_page:
+            self._route4_page.set_conn_state(_Btn.IDLE)
+            self._route4_page._was_connecting = False
+            self._route4_page._preempted = False
+        self._connected_route = None
 
     def is_switching_listener(self) -> bool:
         return self._switching_listener
@@ -1182,25 +1296,37 @@ class HomePage(BasePage):
         self._stack.setCurrentIndex(self._IDX_PICKER)
         self._picker.refresh_theme()
 
+    def _start_env_check(self, route: str) -> None:
+        if self._env_check_thread and self._env_check_thread.isRunning():
+            self._env_check_pending = route
+            return
+        th = _RouteEnvCheckThread(route, self)
+        th.finished.connect(self._on_env_check_done)
+        self._env_check_thread = th
+        th.start()
+
+    def _on_env_check_done(self, route: str) -> None:
+        self._env_check_thread = None
+        if route == "3" and self._route3_page:
+            self._route3_page.refresh_status()
+        elif route == "4" and self._route4_page:
+            self._route4_page.refresh_status()
+        pending = self._env_check_pending
+        self._env_check_pending = None
+        if pending and pending != route:
+            self._start_env_check(pending)
+
     def _enter_route(self, route: str):
         _cfg.set("route", route)
         self._stack.setCurrentIndex(self._IDX_ROUTE[route])
         if route in self._web_pages:
             self._web_pages[route].refresh_login()
         elif route == "3" and self._route3_page:
-            from listener.listener4 import sync_companion_dir_from_registry
-            sync_companion_dir_from_registry()
-            if not self.is_live_connected():
-                from listener.listener3 import run_page_check
-                run_page_check()
             self._route3_page.refresh_status()
+            self._start_env_check("3")
         elif route == "4" and self._route4_page:
-            from listener.listener4 import sync_companion_dir_from_registry
-            sync_companion_dir_from_registry()
-            if not self.is_live_connected():
-                from listener.listener4 import run_page_check
-                run_page_check()
             self._route4_page.refresh_status()
+            self._start_env_check("4")
 
     def _on_route_picked(self, route: str):
         self._enter_route(route)

@@ -7,7 +7,10 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Qt
 
 import pages.theme as _theme
+from listener.log_util import get_tagged_logger
 from pages import BasePage, BaseSetting, register
+
+logger = get_tagged_logger("工具", __name__)
 
 
 @register(icon="⚒", name="工具", order=1)
@@ -15,6 +18,8 @@ class ToolsPage(BasePage):
     def __init__(self):
         super().__init__()
         self._open_wins: dict[str, object] = {}   # name → window
+        from tools.tool_common import bind_tools_page
+        bind_tools_page(self)
         self._build()
         _theme.on_change(lambda _: self._rebuild())
 
@@ -108,9 +113,13 @@ class ToolsPage(BasePage):
             return
         win = meta.cls()
         self._open_wins[name] = win
+        logger.info("打开工具: %s", name)
         win.show()
         win.raise_()
         win.activateWindow()
+
+    def unregister_tool(self, name: str) -> None:
+        self._open_wins.pop(name, None)
 
     def _rebuild(self):
         """主题切换时重建 UI。"""
@@ -123,8 +132,6 @@ class ToolsPage(BasePage):
 
     # ── 消息转发给所有已打开的工具 ──────────────
     def on_message(self, msg):
-        import logging
-        logger = logging.getLogger(__name__)
         seen: set[int] = set()
 
         def _dispatch(win):
@@ -136,9 +143,8 @@ class ToolsPage(BasePage):
             try:
                 win.process_message(msg)
             except Exception as e:
-                logger.error(
-                    f"[ToolsPage] process_message 异常: {e}", exc_info=True,
-                )
+                tool_name = type(win).__name__
+                logger.error("工具 %s 消息处理异常: %s", tool_name, e, exc_info=True)
 
         for win in self._open_wins.values():
             _dispatch(win)

@@ -3,17 +3,20 @@ import asyncio
 import logging
 import os
 import subprocess
+import sys
 import winreg
 from typing import Awaitable, Callable, Optional
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from mitmproxy import http, options
 from mitmproxy.tools.dump import DumpMaster
 
 from listener.LiveProtobuf import parse_frame, try_parse_frame
-from listener.log_util import get_logger, on_connect_success, ensure_console_logging
+from listener.log_util import get_listener_logger, on_connect_success, ensure_console_logging
 from listener.models import ControlMessage
 
-logger = get_logger(__name__)
+logger = get_listener_logger(3)
 
 _page_proxy_snapshot: Optional[bool] = None
 _shutdown_fn: Optional[Callable[[], Awaitable[None]]] = None
@@ -47,11 +50,13 @@ def _is_companion_index_modified() -> bool:
 
 def run_page_check() -> dict:
     global _page_proxy_snapshot
+    from listener.status_cache import invalidate_all
+    invalidate_all()
     proxy = check_system_proxy()
     _page_proxy_snapshot = proxy["enabled"]
-    status = get_page_status()
+    status = get_page_status(force=True)
     logger.info(
-        "[线路3 页面检测] 伴侣目录=%s | index.js=%s | 已改写=%s | 系统代理=%s | server=%s",
+        "页面检测 | 伴侣目录=%s | index.js=%s | 已改写=%s | 系统代理=%s | 代理地址=%s",
         status["companion_installed"],
         status["index_js_found"],
         status["index_modified"],
@@ -61,29 +66,36 @@ def run_page_check() -> dict:
     return status
 
 
-def get_page_status() -> dict:
-    from listener.listener4 import get_companion_path_fields
+def get_page_status(*, force: bool = False) -> dict:
+    from listener.status_cache import get_route3_status, get_proxy_enabled
 
-    proxy = _page_proxy_snapshot if _page_proxy_snapshot is not None else False
-    index_mod = _is_companion_index_modified()
-    return {
-        **get_companion_path_fields(),
-        "index_modified": index_mod,
-        "system_proxy": proxy,
-    }
+    def _build() -> dict:
+        from listener.listener4 import get_companion_path_fields
+        proxy = (
+            _page_proxy_snapshot
+            if _page_proxy_snapshot is not None
+            else get_proxy_enabled(check_system_proxy)
+        )
+        return {
+            **get_companion_path_fields(),
+            "index_modified": _is_companion_index_modified(),
+            "system_proxy": proxy,
+        }
+
+    return get_route3_status(_build, force=force)
 
 
 def _install_mitmproxy_cert() -> None:
     cert_path = os.path.expanduser(r"~\.mitmproxy\mitmproxy-ca-cert.cer")
     if not os.path.exists(cert_path):
-        logger.warning("mitmproxy CA 证书文件未找到，TLS 解密可能失败")
+        logger.warning("代理拦截 CA 证书文件未找到，传输层解密可能失败")
         return
     result = subprocess.run(
         ["certutil", "-addstore", "-f", "ROOT", cert_path],
         capture_output=True, text=True, errors="ignore",
     )
     if result.returncode == 0:
-        logger.info("mitmproxy CA 证书已安装到系统受信任根证书，TLS 解密就绪")
+        logger.info("代理拦截 CA 证书已安装到系统受信任根证书，传输层解密就绪")
     else:
         logger.debug(f"certutil 返回 {result.returncode}（证书可能已存在）")
 
@@ -106,11 +118,11 @@ async def _teardown_local_redirector() -> None:
         try:
             server.close()
             await server.wait_closed()
-            logger.info("[线路3] LocalRedirector 已关闭")
+            logger.info("本地重定向已关闭")
         except Exception as e:
-            logger.debug(f"[线路3] LocalRedirector close: {e}")
+            logger.debug(f"关闭本地重定向: {e}")
     except Exception as e:
-        logger.debug(f"[线路3] teardown redirector: {e}")
+        logger.debug(f"清理本地重定向: {e}")
 
 
 TARGET_PROCESS = "直播伴侣.exe"
@@ -157,7 +169,7 @@ class _DouyinWsAddon:
     def request(self, flow: http.HTTPFlow):
         if flow.request.headers.get("upgrade", "").lower() == "websocket":
             if _is_webcast_flow(flow):
-                logger.info(f"WS 升级请求: {flow.request.host}{flow.request.path[:80]}")
+                logger.debug(f"WS 升级请求: {flow.request.host}{flow.request.path[:80]}")
 
     def websocket_start(self, flow: http.HTTPFlow):
         if not _is_webcast_flow(flow):
@@ -165,7 +177,7 @@ class _DouyinWsAddon:
         if not self._ws_seen:
             self._ws_seen = True
             self._ws_ready.set()
-            logger.info("✅ WebSocket 已建立，等待直播消息确认...")
+            logger.info("WebSocket 已建立，等待直播消息确认…")
 
     def websocket_message(self, flow: http.HTTPFlow):
         if not _is_webcast_flow(flow):
@@ -178,7 +190,7 @@ class _DouyinWsAddon:
 
         channel_ok, msgs = try_parse_frame(message.content)
         if not channel_ok:
-            logger.debug("帧解析失败或非直播 PushFrame")
+            logger.debug("帧解析失败或非直播数据帧")
             return
 
         if not self._live_confirmed:
@@ -197,7 +209,7 @@ class _DouyinWsAddon:
             try:
                 self.callback(msg)
             except Exception as e:
-                logger.error(f"callback 异常: {e}")
+                logger.error(f"回调异常: {e}")
 
     def websocket_end(self, flow: http.HTTPFlow):
         if not _is_webcast_flow(flow):
@@ -272,12 +284,13 @@ async def start_listener(
     session_lost = asyncio.Event()
     loop = asyncio.get_running_loop()
 
-    logger.info("[线路3] 正在启动 mitmproxy local 模式…")
+    logger.info("开始连接")
+    logger.info("正在启动代理拦截本地模式…")
     try:
         opts = options.Options(mode=[f"local:{target_process}"])
         master = DumpMaster(opts, with_termlog=False, with_dumper=False)
     except Exception as e:
-        logger.error(f"[线路3] mitmproxy 启动失败: {e}", exc_info=True)
+        logger.error(f"代理拦截启动失败: {e}", exc_info=True)
         if on_status:
             on_status(False)
         return
@@ -285,7 +298,7 @@ async def start_listener(
     _install_mitmproxy_cert()
     master.addons.add(_DouyinWsAddon(callback, on_status, connected, ws_ready, session_lost, loop))
 
-    logger.info(f"local 模式已启动，拦截进程: {target_process}")
+    logger.info(f"本地拦截模式已启动，拦截进程: {target_process}")
     logger.info("请在直播伴侣中断开并重新连接直播间，触发新的 WSS 握手")
 
     master_task = asyncio.create_task(master.run())
@@ -319,7 +332,7 @@ async def start_listener(
         await _stop_master()
         return
 
-    logger.info("[线路3] WSS 已连接，持续监听…")
+    logger.info("WSS 已连接，持续监听…")
     session_task = asyncio.create_task(session_lost.wait())
     try:
         done, pending = await asyncio.wait(

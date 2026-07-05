@@ -34,6 +34,10 @@ const (
 	ctrlWSOpen         = "WS_OPEN"
 	ctrlWSConnected    = "WS_CONNECTED"
 	ctrlWSDisconnected = "WS_DISCONNECTED"
+	ctrlLiveOnAirTrue  = "LIVE_ON_AIR:true"
+	ctrlLiveOnAirFalse = "LIVE_ON_AIR:false"
+	ipcQueryLiveOnAir  = "__LH_QUERY__:LIVE_ON_AIR"
+	ipcReplyLiveOnAir  = "__LH_REPLY__:LIVE_ON_AIR:"
 )
 
 // ─── Paths ────────────────────────────────────────────────────────────────────
@@ -74,9 +78,9 @@ func setupLogging() {
 // CA cert is created by listener4.py during patch. Go only reads it.
 
 var (
-	caKey   *rsa.PrivateKey
-	caCert  *x509.Certificate
-	leafMu  sync.Map // hostname → *tls.Certificate
+	caKey  *rsa.PrivateKey
+	caCert *x509.Certificate
+	leafMu sync.Map // hostname → *tls.Certificate
 )
 
 func loadCA() error {
@@ -197,6 +201,10 @@ func setLiveActive(active bool, ipc *ipcServer, host string) {
 	if active {
 		logger.Printf("live data channel active (host=%s)", host)
 		pushIPCControl(ipc, ctrlWSConnected)
+		pushIPCControl(ipc, ctrlLiveOnAirTrue)
+	} else {
+		logger.Printf("live ended (host=%s)", host)
+		pushIPCControl(ipc, ctrlLiveOnAirFalse)
 	}
 }
 
@@ -213,8 +221,9 @@ func endWSRelay(ipc *ipcServer, host string) {
 		return
 	}
 	atomic.StoreUint32(&liveActive, 0)
-	logger.Printf("WS relay closed: %s", host)
+	logger.Printf("WS relay closed: %s (ready for next stream)", host)
 	pushIPCControl(ipc, ctrlWSDisconnected)
+	pushIPCControl(ipc, ctrlLiveOnAirFalse)
 }
 
 func (s *ipcServer) serve() {
@@ -252,6 +261,28 @@ func (s *ipcServer) handshake(conn net.Conn) {
 	}
 	logger.Printf("IPC client connected: %s", conn.RemoteAddr())
 
+	// Optional one-shot live query (main asks before streaming connect).
+	conn.SetDeadline(time.Now().Add(500 * time.Millisecond))
+	line2, err := buf.ReadString('\n')
+	conn.SetDeadline(time.Time{})
+	if err == nil {
+		query := strings.TrimSpace(line2)
+		if query == ipcQueryLiveOnAir {
+			onAir := isLiveActive()
+			reply := ipcReplyLiveOnAir + "false\n"
+			if onAir {
+				reply = ipcReplyLiveOnAir + "true\n"
+			}
+			conn.Write([]byte(reply))
+			conn.Close()
+			logger.Printf(
+				"IPC live query -> %v (ws_relay=%v live_data=%v)",
+				onAir, isWSRelayActive(), isLiveActive(),
+			)
+			return
+		}
+	}
+
 	// Replace any existing connection
 	s.mu.Lock()
 	old := s.conn
@@ -267,6 +298,7 @@ func (s *ipcServer) handshake(conn net.Conn) {
 	}
 	if isLiveActive() {
 		pushIPCControl(s, ctrlWSConnected)
+		pushIPCControl(s, ctrlLiveOnAirTrue)
 	}
 
 	// Keep alive until client disconnects

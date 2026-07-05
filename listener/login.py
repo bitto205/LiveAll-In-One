@@ -10,18 +10,22 @@ login.py — 登录管理
 
 import asyncio
 import json
-import logging
 import os
+import sys
 import time
 
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 from playwright.async_api import async_playwright
+
+from listener.log_util import get_tagged_logger
 
 # ─────────────────────────────────────────────
 # 配置
 # ─────────────────────────────────────────────
 STATE_FILE = "state.json"
 
-logger = logging.getLogger(__name__)
+logger = get_tagged_logger("登录", "listener.login")
 
 
 def get_login_ui_state(state_file: str = STATE_FILE) -> tuple[str, bool]:
@@ -122,7 +126,7 @@ _CONFIRM_JS = """
 # 第二层：弹出浏览器扫码
 # ─────────────────────────────────────────────
 async def _run_login(state_file: str) -> bool:
-    logger.info("启动登录流程，请在浏览器中扫码，完成后点击页面右下角按钮...")
+    logger.info("启动登录流程，请在浏览器扫码，完成后点击右下角按钮…")
 
     async with async_playwright() as p:
         browser = await p.chromium.launch(
@@ -142,7 +146,7 @@ async def _run_login(state_file: str) -> bool:
         await page.goto("https://www.douyin.com/", wait_until="domcontentloaded")
 
         while True:
-            logger.info("等待手动确认（点击页面右下角按钮）...")
+            logger.info("等待手动确认（点击右下角按钮）…")
 
             # 等用户点按钮，浏览器关闭时会抛异常
             try:
@@ -160,12 +164,12 @@ async def _run_login(state_file: str) -> bool:
             valid, reason = _check_cookie_expiry(state_file)
 
             if valid:
-                logger.info(f"✅ 登录成功，已保存 {state_file}（{reason}）")
+                logger.info("登录成功，已保存 %s（%s）", state_file, reason)
                 await browser.close()
                 return True
 
             # 未检测到登录态 → 页面注入红色提示，恢复按钮，继续等待
-            logger.warning(f"⚠️  未检测到登录态（{reason}），提示用户重试")
+            logger.warning("未检测到登录态（%s），等待重试", reason)
             await page.evaluate("""
                 (() => {
                     // 恢复按钮
@@ -216,14 +220,14 @@ def do_login(state_file: str = STATE_FILE) -> bool:
     from listener.log_util import on_connect_success
 
     if not os.path.exists(state_file):
-        logger.info(f"{state_file} 不存在，需要登录")
+        logger.info("%s 不存在，需要登录", state_file)
     else:
         valid, reason = _check_cookie_expiry(state_file)
         if valid:
             on_connect_success("login")
-            logger.info(f"✅ 登录有效：{reason}")
+            logger.info("登录有效：%s", reason)
             return True
-        logger.warning(f"⚠️  登录失效：{reason}，重新登录")
+        logger.warning("登录失效：%s，重新登录", reason)
 
     ok = asyncio.run(_run_login(state_file))
     if ok:
@@ -236,4 +240,4 @@ def do_login(state_file: str = STATE_FILE) -> bool:
 # ─────────────────────────────────────────────
 if __name__ == "__main__":
     ok = do_login()
-    logger.info("🎉 就绪" if ok else "❌ 登录失败")
+    logger.info("登录就绪" if ok else "登录失败")

@@ -2,9 +2,14 @@
 from __future__ import annotations
 
 import os
+from typing import Callable
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QPixmap
+
+from listener.log_util import get_tagged_logger
+
+logger = get_tagged_logger("工具", "tools.common")
 
 _GIFT_ICON_DIR = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
@@ -12,6 +17,7 @@ _GIFT_ICON_DIR = os.path.join(
 )
 _GIFT_NAMES_CACHE: list[str] | None = None
 _APP_SHUTTING_DOWN = False
+_TOOLS_PAGE = None
 
 
 class ToolSingleton:
@@ -32,6 +38,32 @@ class ToolSingleton:
         return True
 
 
+def bind_tools_page(page) -> None:
+    global _TOOLS_PAGE
+    _TOOLS_PAGE = page
+
+
+def unregister_tool_from_page(tool_name: str) -> None:
+    page = _TOOLS_PAGE
+    if page is not None and hasattr(page, "unregister_tool"):
+        page.unregister_tool(tool_name)
+
+
+def release_tool_singleton(
+    tool_cls: type,
+    *,
+    cleanup: Callable | None = None,
+) -> None:
+    inst = getattr(tool_cls, "_instance", None)
+    if inst is None:
+        return
+    if cleanup is not None:
+        cleanup(inst)
+    tool_cls._instance = None
+    if hasattr(inst, "_initialized"):
+        inst._initialized = False
+
+
 def mark_app_shutting_down() -> None:
     global _APP_SHUTTING_DOWN
     _APP_SHUTTING_DOWN = True
@@ -46,6 +78,7 @@ def shutdown_all_tools() -> None:
     mark_app_shutting_down()
     from tools import get_tools
 
+    closed = 0
     for meta in get_tools():
         inst = getattr(meta.cls, "_instance", None)
         if inst is None:
@@ -55,6 +88,9 @@ def shutdown_all_tools() -> None:
             if sub is not None:
                 sub.close()
         inst.close()
+        closed += 1
+    if closed:
+        logger.info("已关闭 %d 个工具窗口", closed)
 
 
 def gift_names_cached() -> list[str]:

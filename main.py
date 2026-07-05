@@ -32,7 +32,9 @@ qInstallMessageHandler(_qt_msg_handler)
 from pages.main_page import MainPage
 import pages
 
-logger = __import__("logging").getLogger(__name__)
+from listener.log_util import get_tagged_logger
+
+logger = get_tagged_logger("main", __name__)
 
 APP_NAME = "LiveAIO"
 
@@ -78,13 +80,13 @@ class ListenerThread(QThread):
         try:
             from listener.log_util import ensure_console_logging
             ensure_console_logging()
-            logger.info("ListenerThread 启动，线路=%s", self._route)
+            logger.info("Listener 线程启动，线路=%s", self._route)
             self._loop.run_until_complete(self._listen())
         except RuntimeError as e:
             if "Event loop stopped before Future completed" not in str(e):
-                logger.error(f"ListenerThread error: {e}")
+                logger.error("Listener 线程异常: %s", e)
         except Exception as e:
-            logger.error(f"ListenerThread error: {e}")
+            logger.error("Listener 线程异常: %s", e)
         finally:
             if self._route == "3":
                 try:
@@ -94,16 +96,21 @@ class ListenerThread(QThread):
                 except Exception:
                     pass
             try:
-                pending = asyncio.all_tasks(self._loop)
-                for t in pending:
-                    t.cancel()
-                if pending:
-                    self._loop.run_until_complete(
-                        asyncio.gather(*pending, return_exceptions=True)
-                    )
+                if self._loop and not self._loop.is_closed():
+                    pending = asyncio.all_tasks(self._loop)
+                    for t in pending:
+                        t.cancel()
+                    if pending:
+                        self._loop.run_until_complete(
+                            asyncio.gather(*pending, return_exceptions=True)
+                        )
             except Exception:
                 pass
-            self._loop.close()
+            try:
+                if self._loop and not self._loop.is_closed():
+                    self._loop.close()
+            except Exception:
+                pass
 
     async def _listen(self):
         if self._route == "4":
@@ -134,7 +141,14 @@ class ListenerThread(QThread):
         )
 
     def stop(self):
-        """发出停止信号，不阻塞主线程。"""
+        """请求 listener 退出，不阻塞主线程。"""
+        if self._route == "4":
+            try:
+                from listener.listener4 import request_listener_stop
+                if request_listener_stop():
+                    return
+            except Exception:
+                pass
         if self._loop and not self._loop.is_closed():
             if self._route == "3":
                 import listener.listener3 as l3
@@ -145,7 +159,6 @@ class ListenerThread(QThread):
                     pass
             if self._loop.is_running():
                 self._loop.call_soon_threadsafe(self._loop.stop)
-        self.quit()
 
 
 class App(QObject):
@@ -173,7 +186,7 @@ class App(QObject):
         if home:
             home.set_callbacks(
                 on_connect    = self.connect,
-                on_disconnect = self.disconnect,
+                on_disconnect = self.stop_listener,
             )
 
     def connect(self, live_id: str, route: str = "2"):
@@ -184,6 +197,7 @@ class App(QObject):
             home.preempt_other_listeners(route)
 
         self._pending_connect = (live_id, route)
+        logger.info("请求连接 listener，线路=%s", route)
         if self._thread and not self._thread.isRunning():
             self._thread = None
         if self._thread and self._thread.isRunning():
@@ -191,7 +205,7 @@ class App(QObject):
                 home.begin_listener_switch(route)
             if not self._stopping:
                 self._stopping = True
-                self._stop_listener(wait_callback=True)
+                self._stop_listener()
             return
         if home:
             home.end_listener_switch()
@@ -207,51 +221,63 @@ class App(QObject):
         self._thread = ListenerThread(live_id, route=route)
         self._thread.message_received.connect(self.message_received)
         self._thread.status_changed.connect(self.status_changed)
+        self._thread.finished.connect(self._on_listener_finished)
         self._thread.start()
 
-    def _stop_listener(self, *, wait_callback: bool) -> None:
-        thread = self._thread
-        if not thread:
-            return
-        self._thread = None
-        if wait_callback:
-            thread.finished.connect(self._on_listener_stopped, Qt.ConnectionType.SingleShotConnection)
-        else:
-            thread.finished.connect(thread.deleteLater)
-        thread.stop()
-
-    def _on_listener_stopped(self) -> None:
-        self._stopping = False
+    def _on_listener_finished(self) -> None:
+        """Listener 线程结束后安全清理（不退出 main）。"""
         thread = self.sender()
-        if isinstance(thread, QThread):
-            thread.deleteLater()
+        if not isinstance(thread, QThread):
+            return
+        pending = self._pending_connect
+        if self._thread is thread:
+            self._thread = None
+        self._stopping = False
+        if thread.isRunning():
+            thread.wait(3000)
+        thread.deleteLater()
         from pages.home_page import HomePage
         home = self._win.get_page(HomePage)
         if home:
             home.end_listener_switch()
-        if self._pending_connect:
+            if not pending:
+                home.clear_listener_state()
+        if pending:
             self._start_listener()
 
-    def disconnect(self, *, switching: bool = False):
-        """停止当前 ListenerThread；若正在切换线路则保留待启动目标。"""
+    def _stop_listener(self) -> None:
+        """仅停止 listener 线程，由 finished 回调做后续清理。"""
+        thread = self._thread
+        if not thread or not thread.isRunning():
+            return
+        self._stopping = True
+        # Keep the QThread Python wrapper alive until finished fires.
+        # Dropping the last reference here can destroy a still-running QThread.
+        thread.stop()
+
+    def stop_listener(self, *, switching: bool = False) -> None:
+        """结束 listener 线程，不影响 main（手动断开 / 线路切换）。"""
         if not switching:
             self._pending_connect = None
-        if not self._thread or not self._thread.isRunning():
+        if self._stopping:
             return
-        if not self._stopping:
-            self._stopping = True
-            self._stop_listener(wait_callback=True)
+        logger.info("请求断开 listener%s", "（切换线路）" if switching else "")
+        self._stop_listener()
+
+    def disconnect(self, *, switching: bool = False) -> None:
+        self.stop_listener(switching=switching)
 
     def disconnect_and_wait(self, timeout_ms: int = 5000) -> None:
         """退出前同步等待 listener 结束（仅用于应用关闭）。"""
         self._pending_connect = None
-        if not self._thread:
+        thread = self._thread
+        if not thread:
             return
-        if self._thread.isRunning():
-            if not self._stopping:
-                self._stopping = True
-                self._stop_listener(wait_callback=False)
-            self._thread.wait(timeout_ms)
+        if thread.isRunning():
+            self._stopping = True
+            self._thread = None
+            thread.stop()
+            thread.wait(timeout_ms)
         self._thread = None
         self._stopping = False
 

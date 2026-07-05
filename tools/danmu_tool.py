@@ -29,6 +29,7 @@ from PySide6.QtGui   import (
 
 import pages.theme as _theme
 from tools.overlay_capture import enable_capture_transparency
+from tools.overlay_window import OverlayFrameMixin, show_tutorial_dialog
 
 # ─────────────────────────────────────────────
 # 常量
@@ -334,11 +335,13 @@ class _DanmuRoot(QWidget):
                 background: {C['btn_hover']}; color: {C['text']};
             }}
         """
-        for text, slot in [("─", lambda: self._win.showMinimized()),
+        for text, slot in [("─", self._win.minimize_overlay),
                             ("✕", self._win.close)]:
             btn = QPushButton(text)
             btn.setStyleSheet(btn_style)
             btn.setCursor(Qt.ArrowCursor)
+            if text == "─":
+                btn.setToolTip("收起边框并置底（保持渲染）")
             btn.clicked.connect(slot)
             btn_lay.addWidget(btn)
 
@@ -348,7 +351,7 @@ class _DanmuRoot(QWidget):
         self._circle = _CircleToggle(self)
         self._circle.move(_CIRCLE_OFF, _CIRCLE_OFF)
         self._circle.raise_()
-        self._circle.clicked.connect(self._win.toggle_border)
+        self._circle.clicked.connect(self._win._on_circle_toggle)
 
         # 弹幕内容区（topbar 以下，绝对定位，鼠标事件透传）
         self._content = QWidget(self)
@@ -446,6 +449,7 @@ class _DanmuRoot(QWidget):
     def mousePressEvent(self, event):
         if event.button() != Qt.LeftButton:
             return
+        self._win.restore_from_minimize()
         pos = event.position().toPoint()
 
         edge = self._edge_at(pos)
@@ -514,18 +518,20 @@ class _DanmuRoot(QWidget):
 # ─────────────────────────────────────────────
 # 透明悬浮弹幕窗
 # ─────────────────────────────────────────────
-class DanmuWindow(QMainWindow):
+class DanmuWindow(OverlayFrameMixin, QMainWindow):
 
     closed = Signal()
 
     def __init__(self, parent=None):
         super().__init__(
             parent,
-            Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint,
+            Qt.FramelessWindowHint,
         )
         self.setAttribute(Qt.WA_TranslucentBackground)
         self.setAttribute(Qt.WA_QuitOnClose, False)
         enable_capture_transparency(self)
+        self._install_overlay_frame()
+        self.setWindowTitle("弹幕机")
         self.setMinimumSize(200, 150)
         self._restore_geometry()      # 优先用上次保存的位置/大小
 
@@ -546,15 +552,6 @@ class DanmuWindow(QMainWindow):
         self._anim.setEasingCurve(QEasingCurve.OutCubic)
         self._anim.valueChanged.connect(self._on_r)
         self._anim.finished.connect(self._on_anim_done)
-
-    def toggle_border(self):
-        self._shown = not self._shown
-        self._anim.stop()
-
-        target = self._root.max_radius() if self._shown else 0.0
-        self._anim.setStartValue(self._anim_r)
-        self._anim.setEndValue(target)
-        self._anim.start()
 
     def showEvent(self, event):
         super().showEvent(event)
@@ -698,7 +695,7 @@ class DanmuWindow(QMainWindow):
 # 控制面板（注册为 Tool）
 # ─────────────────────────────────────────────
 from tools import register_tool
-from tools.tool_common import ToolSingleton
+from tools.tool_common import ToolSingleton, release_tool_singleton, unregister_tool_from_page
 
 
 _DANMU_TOOL_W = 448
@@ -757,7 +754,7 @@ class DanmuTool(ToolSingleton, QMainWindow):
             return
         super().__init__(parent, Qt.Window)
         self.setAttribute(Qt.WA_QuitOnClose, False)
-        self.setWindowTitle("弹幕机")
+        self.setWindowTitle("设置")
         self.setFixedSize(_DANMU_TOOL_W, _DANMU_TOOL_H)
         self._danmu_win: DanmuWindow | None = None
         self._switch_btns: dict[str, QPushButton] = {}
@@ -913,6 +910,22 @@ class DanmuTool(ToolSingleton, QMainWindow):
         lbl.setStyleSheet("font-size: 14px; font-weight: 600;")
         row.addWidget(lbl)
         row.addStretch()
+        tut_btn = QPushButton("教程")
+        tut_btn.setFixedHeight(34)
+        tut_btn.setCursor(Qt.PointingHandCursor)
+        tut_btn.setToolTip("查看使用教程")
+        tut_btn.setStyleSheet(f"""
+            QPushButton {{
+                background: {C['card']}; color: {C['text_muted']};
+                border: 1.5px solid {C['border']};
+                border-radius: 8px; font-size: 13px; font-weight: 600;
+                padding: 0 14px;
+            }}
+            QPushButton:hover {{ background: {C['hover']}; color: {C['text']}; }}
+        """)
+        tut_btn.clicked.connect(lambda: show_tutorial_dialog(self))
+        row.addWidget(tut_btn)
+        row.addSpacing(8)
         self._open_btn = QPushButton("打开弹幕窗")
         self._open_btn.setFixedHeight(34)
         self._open_btn.setCursor(Qt.PointingHandCursor)
@@ -921,7 +934,7 @@ class DanmuTool(ToolSingleton, QMainWindow):
         cl.addLayout(row)
         desc = QLabel(
             "透明悬浮窗，叠加在直播软件上方显示弹幕。"
-            "窗口采集请在直播伴侣素材设置中勾选「允许窗口透明」（10.5+）。"
+            "窗口采集请在直播伴侣素材设置-高级设置-选择绿幕抠图（10.5+）。"
         )
         desc.setWordWrap(True)
         desc.setStyleSheet(f"font-size: 12px; color: {C['text_muted']};")
@@ -1200,7 +1213,7 @@ class DanmuTool(ToolSingleton, QMainWindow):
     def _toggle_danmu_win(self):
         if self._danmu_win is None:
             self._danmu_win = DanmuWindow()
-            self._danmu_win.closed.connect(self._refresh_btn)
+            self._danmu_win.closed.connect(self._on_overlay_closed)
 
         if self._danmu_win.isVisible():
             self._danmu_win.hide()
@@ -1209,6 +1222,28 @@ class DanmuTool(ToolSingleton, QMainWindow):
             self._danmu_win.activateWindow()
 
         self._refresh_btn()
+
+    def _on_overlay_closed(self):
+        self._refresh_btn()
+        self._try_release_tool()
+
+    def _is_tool_active(self) -> bool:
+        if self.isVisible():
+            return True
+        return self._danmu_win is not None and self._danmu_win.isVisible()
+
+    def _cleanup_for_release(self) -> None:
+        if self._danmu_win is not None:
+            self._danmu_win.blockSignals(True)
+            self._danmu_win.deleteLater()
+            self._danmu_win = None
+
+    def _try_release_tool(self) -> None:
+        from tools.tool_common import is_app_shutting_down
+        if is_app_shutting_down() or self._is_tool_active():
+            return
+        release_tool_singleton(DanmuTool, cleanup=lambda inst: inst._cleanup_for_release())
+        unregister_tool_from_page("弹幕机")
 
     def _refresh_btn(self):
         C       = _theme.get()
@@ -1337,20 +1372,14 @@ class DanmuTool(ToolSingleton, QMainWindow):
         super().showEvent(event)
         self._refresh_btn()
 
-    def _stop_overlay(self):
-        """关闭设置窗时同步收起悬浮窗，避免后台继续运行。"""
-        if self._danmu_win is not None:
-            self._danmu_win.hide()
-        self._refresh_btn()
-
     def closeEvent(self, event):
         from tools.tool_common import is_app_shutting_down
         if is_app_shutting_down():
             event.accept()
             return
-        self._stop_overlay()
         event.ignore()
         self.hide()
+        self._try_release_tool()
 
 
 # ─────────────────────────────────────────────

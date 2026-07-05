@@ -12,6 +12,9 @@ from PySide6.QtCore import Qt
 
 from pages import BasePage, BaseSetting
 from pages.widgets import ThemedComboBox
+from listener.log_util import get_tagged_logger
+
+logger = get_tagged_logger("设置", __name__)
 
 
 def _C() -> dict:
@@ -179,16 +182,19 @@ class AccountSettings(BaseSetting):
                     return
             self._status.setText("⚠️  未找到登录凭证")
         except Exception as e:
+            logger.debug("登录状态检测失败: %s", e)
             self._status.setText(f"检测失败: {e}")
 
     def _do_login(self):
         try:
             from listener.login import do_login
+            logger.info("开始重新登录")
             self._btn.setText("登录中...")
             self._btn.setEnabled(False)
             do_login()
             self._refresh()
         except Exception as e:
+            logger.error("登录失败: %s", e)
             self._status.setText(f"登录失败: {e}")
         finally:
             self._btn.setText("重新登录")

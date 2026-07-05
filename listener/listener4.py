@@ -16,10 +16,12 @@ import winreg
 from pathlib import Path
 from typing import Callable, Optional
 
-from listener.log_util import get_logger, on_connect_success
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from listener.log_util import get_listener_logger, on_connect_success
 from listener.LiveProtobuf import parse_frame, try_parse_frame
 
-logger = get_logger(__name__)
+logger = get_listener_logger(4)
 
 PROXY_PORT        = 19088
 IPC_PORT          = 19098
@@ -32,6 +34,37 @@ _IPC_CTRL_PREFIX  = b"__LH_CTRL__:"
 _IPC_CTRL_WS_OPEN = b"WS_OPEN"
 _IPC_CTRL_WS_DATA = b"WS_CONNECTED"
 _IPC_CTRL_WS_DOWN = b"WS_DISCONNECTED"
+_IPC_CTRL_LIVE_ON = b"LIVE_ON_AIR:true"
+_IPC_CTRL_LIVE_OFF = b"LIVE_ON_AIR:false"
+_IPC_QUERY_LIVE_ON_AIR = b"__LH_QUERY__:LIVE_ON_AIR\n"
+_IPC_REPLY_LIVE_PREFIX = "__LH_REPLY__:LIVE_ON_AIR:"
+_HEALTH_TIMEOUT = 3.0
+_HEALTH_BUFFER = 5.0
+_HEALTH_POLL_INTERVAL = 0.25
+
+_IPC_SESSION: dict = {"writer": None, "loop": None, "user_stop": False}
+
+
+def request_listener_stop() -> bool:
+    """请求线路 4 listener 优雅退出（关闭 IPC 连接，不波及 main）。"""
+    _IPC_SESSION["user_stop"] = True
+    loop = _IPC_SESSION.get("loop")
+    writer = _IPC_SESSION.get("writer")
+    if writer is None and loop is None:
+        return False
+
+    def _close_writer() -> None:
+        if writer is not None and not writer.is_closing():
+            writer.close()
+
+    if loop is not None and loop.is_running():
+        loop.call_soon_threadsafe(_close_writer)
+    elif writer is not None and not writer.is_closing():
+        try:
+            writer.close()
+        except Exception:
+            pass
+    return True
 
 _AIO_DIR = Path.home() / ".liveaio"
 _LEGACY_DIR = Path.home() / ".livehelper"
@@ -113,11 +146,11 @@ def _install_ca_cert() -> None:
             capture_output=True, timeout=30,
         )
         if r.returncode == 0:
-            logger.info("CA 证书已安装到 Windows ROOT")
+            logger.info("CA 证书已安装到 Windows 受信任根证书")
         else:
             logger.warning(f"certutil 返回非零: {r.returncode}\n{r.stderr.decode(errors='ignore')}")
     except Exception as e:
-        logger.warning(f"certutil 寮傚父: {e}")
+        logger.warning(f"certutil 执行失败: {e}")
 
 
 # ---------------------------------------------------------
@@ -188,9 +221,33 @@ def save_location() -> None:
 # ---------------------------------------------------------
 
 _COMPANION_DIR_CFG = "companion_install_dir"
+_PATCH_VERIFY_CACHE: dict[tuple, bool] = {}
+_EXE_IDENT_CACHE: dict[tuple, bool] = {}
+_INDEX_MOD_CACHE: dict[tuple, bool] = {}
+_PROXY_SWITCH_RE = re.compile(
+    r'(\.commandLine\.appendSwitch\s*\(\s*["\']proxy-server["\'],\s*["\'])([^"\']*?)(["\'])'
+)
+_SPAWN_TRACE_RE = re.compile(
+    r';?\(function\(\)\{var c=require\("child_process"\);'
+    r'try\{c\.spawn\("[^"\\]*(?:\\.[^"\\]*)*",\[\],\{detached:false,stdio:"ignore",windowsHide:true\}\);'
+    r'\}catch\(e\)\{\}\}\(\)\);'
+)
+_PROXY_INJECT_TRACE_RE = re.compile(
+    r'\w+\.commandLine\.appendSwitch\("proxy-server","'
+    + re.escape(_PROXY_VALUE)
+    + r'"\);'
+)
 
 
-def _find_install_dir() -> Optional[str]:
+def _invalidate_status_cache() -> None:
+    from listener.status_cache import invalidate_all
+    invalidate_all()
+    _PATCH_VERIFY_CACHE.clear()
+    _EXE_IDENT_CACHE.clear()
+    _INDEX_MOD_CACHE.clear()
+
+
+def _scan_install_dir_registry() -> Optional[str]:
     """Find companion install directory from registry."""
     subkeys = [
         r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall",
@@ -219,6 +276,11 @@ def _find_install_dir() -> Optional[str]:
     return None
 
 
+def _find_install_dir() -> Optional[str]:
+    from listener.status_cache import get_registry_dir
+    return get_registry_dir(_scan_install_dir_registry)
+
+
 def is_companion_in_registry() -> bool:
     return bool(_find_install_dir())
 
@@ -239,7 +301,7 @@ def validate_manual_companion_dir() -> tuple[Optional[str], bool]:
     p = os.path.normpath(raw)
     if not os.path.isdir(p) or not find_index_js_in_root(p):
         clear_manual_companion_dir()
-        logger.info("[companion-path] invalid manual path cleared: %s", raw)
+        logger.info("[伴侣路径] 无效的手动路径已清除: %s", raw)
         return None, True
     return p, False
 
@@ -261,6 +323,7 @@ def set_manual_companion_dir(path: str) -> tuple[bool, str]:
         _cfg.set(_COMPANION_DIR_CFG, path)
     except Exception as e:
         return False, f"Failed to save path: {e}"
+    _invalidate_status_cache()
     return True, "Companion path saved"
 
 
@@ -270,6 +333,7 @@ def clear_manual_companion_dir() -> None:
         _cfg.set(_COMPANION_DIR_CFG, "")
     except Exception:
         pass
+    _invalidate_status_cache()
 
 
 def sync_companion_dir_from_registry() -> bool:
@@ -279,7 +343,7 @@ def sync_companion_dir_from_registry() -> bool:
         return False
     if _read_manual_companion_dir_cfg():
         clear_manual_companion_dir()
-        logger.info("[companion-path] registry path takes precedence: %s", reg)
+        logger.info("[伴侣路径] 注册表路径优先: %s", reg)
     return True
 
 
@@ -321,21 +385,23 @@ def find_index_js_in_root(root: str) -> Optional[str]:
 
 def find_index_js() -> Optional[str]:
     """Return full path of companion index.js."""
-    root = get_companion_install_dir()
-    if not root:
-        return None
-    return find_index_js_in_root(root)
+    from listener.status_cache import get_index_js_path
+
+    def _resolve() -> Optional[str]:
+        root = get_companion_install_dir()
+        if not root:
+            return None
+        return find_index_js_in_root(root)
+
+    return get_index_js_path(_resolve)
 
 
 # ---------------------------------------------------------
 # index.js / exe 检测
 # ---------------------------------------------------------
 
-def _index_js_paths() -> tuple[Optional[str], Optional[str]]:
-    path = find_index_js()
-    if not path:
-        return None, None
-    return path, path + ".bak"
+def _patch_catalog_path() -> Path:
+    return _aio_data_dir() / "index_patch_catalog.json"
 
 
 def _deployed_shell_path() -> Optional[str]:
@@ -345,22 +411,237 @@ def _deployed_shell_path() -> Optional[str]:
     return os.path.join(os.path.dirname(path), _SHELL_PROCESS)
 
 
-def is_index_js_modified() -> bool:
-    """Whether index.js differs from backup baseline."""
-    path, bak = _index_js_paths()
-    if not path:
-        return False
+def _index_file_sig(path: str) -> Optional[tuple]:
     try:
-        current = open(path, encoding="utf-8", errors="ignore").read()
-        if not bak or not os.path.exists(bak):
-            return (
-                f"127.0.0.1:{PROXY_PORT}" in current
-                or _SHELL_MARKER in current
+        return (path, os.path.getmtime(path), os.path.getsize(path))
+    except OSError:
+        return None
+
+
+def _build_spawn_code(dest: str) -> str:
+    js_path = dest.replace("\\", "\\\\")
+    return (
+        f';(function(){{var c=require("child_process");'
+        f'try{{c.spawn("{js_path}",[],{{detached:false,stdio:"ignore",windowsHide:true}});}}'
+        f"catch(e){{}}}}());"
+    )
+
+
+def _load_patch_catalog() -> Optional[dict]:
+    cat_file = _patch_catalog_path()
+    if not cat_file.is_file():
+        return None
+    try:
+        data = json.loads(cat_file.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else None
+    except Exception:
+        return None
+
+
+def _save_patch_catalog(catalog: dict) -> None:
+    cat_file = _patch_catalog_path()
+    cat_file.parent.mkdir(parents=True, exist_ok=True)
+    cat_file.write_text(
+        json.dumps(catalog, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+
+def _clear_patch_catalog() -> None:
+    try:
+        cat_file = _patch_catalog_path()
+        if cat_file.is_file():
+            cat_file.unlink()
+    except Exception:
+        pass
+
+
+def _apply_patch(content: str, dest: str, index_path: str) -> tuple[Optional[str], dict, str]:
+    """Inject patch snippets and return patched text plus catalog metadata."""
+    new_content = content
+    catalog: dict = {
+        "index_path": os.path.normpath(index_path),
+        "spawn": _build_spawn_code(dest),
+    }
+
+    m = _PROXY_SWITCH_RE.search(new_content)
+    if m:
+        catalog["proxy_mode"] = "replace"
+        catalog["proxy_prev_value"] = m.group(2)
+        new_content = _PROXY_SWITCH_RE.sub(
+            rf"\g<1>{_PROXY_VALUE}\g<3>", new_content, count=1
+        )
+    else:
+        ready_re = re.compile(r"(\b(\w+)\.on\s*\(\s*['\"]ready['\"])")
+        rm = ready_re.search(new_content)
+        if not rm:
+            return None, {}, "No suitable injection point found in index.js"
+        app_var = rm.group(2)
+        proxy_inject = (
+            f'{app_var}.commandLine.appendSwitch("proxy-server","{_PROXY_VALUE}");'
+        )
+        catalog["proxy_mode"] = "inject"
+        catalog["proxy_inject"] = proxy_inject
+        new_content = (
+            new_content[: rm.start()] + proxy_inject + new_content[rm.start() :]
+        )
+
+    spawn = catalog["spawn"]
+    idx = new_content.find("proxy-server")
+    if idx >= 0:
+        line_start = new_content.rfind(";", 0, idx) + 1
+        new_content = new_content[:line_start] + spawn + new_content[line_start:]
+
+    ok_m = re.search(r",!\w+\.ok\)", new_content)
+    if ok_m:
+        catalog["ok_before"] = ok_m.group(0)
+    new_content, ok_n = re.subn(r",!\w+\.ok\)", ",false)", new_content, count=1)
+    if ok_n == 0:
+        catalog.pop("ok_before", None)
+
+    return new_content, catalog, ""
+
+
+def _remove_patch(content: str, catalog: dict) -> str:
+    """Remove only catalog-recorded patch injections from index.js."""
+    out = content
+    spawn = catalog.get("spawn", "")
+    if spawn:
+        out = out.replace(spawn, "", 1)
+
+    mode = catalog.get("proxy_mode")
+    if mode == "inject":
+        inj = catalog.get("proxy_inject", "")
+        if inj:
+            out = out.replace(inj, "", 1)
+    elif mode == "replace":
+        prev = catalog.get("proxy_prev_value")
+        if prev is not None:
+            restore_re = re.compile(
+                r'(\.commandLine\.appendSwitch\s*\(\s*["\']proxy-server["\'],\s*["\'])'
+                + re.escape(_PROXY_VALUE)
+                + r'(["\'])'
             )
-        original = open(bak, encoding="utf-8", errors="ignore").read()
-        return current != original
+            out = restore_re.sub(rf"\g<1>{prev}\g<2>", out, count=1)
+
+    ok_before = catalog.get("ok_before")
+    if ok_before:
+        out = out.replace(",false)", ok_before, 1)
+    return out
+
+
+def _strip_patch_traces(content: str) -> str:
+    """Heuristically remove patch injections (legacy or leftover traces)."""
+    out = content
+    out = _SPAWN_TRACE_RE.sub("", out, count=1)
+    out = _PROXY_INJECT_TRACE_RE.sub("", out, count=1)
+    if _PROXY_VALUE in out:
+        proxy_restore_re = re.compile(
+            r'(\.commandLine\.appendSwitch\s*\(\s*["\']proxy-server["\'],\s*["\'])'
+            + re.escape(_PROXY_VALUE)
+            + r'(["\'])'
+        )
+        out = proxy_restore_re.sub(r"\g<1>direct://\g<2>", out, count=1)
+    return out
+
+
+def _content_has_patch_traces(content: str) -> bool:
+    markers = (f"127.0.0.1:{PROXY_PORT}", _SHELL_MARKER)
+    if any(m in content for m in markers):
+        return True
+    return bool(_SPAWN_TRACE_RE.search(content))
+
+
+def _prepare_index_for_patch(content: str, index_path: str) -> str:
+    """Strip existing patch injections before applying a fresh patch."""
+    catalog = _load_patch_catalog()
+    if catalog and os.path.normcase(catalog.get("index_path", "")) == os.path.normcase(index_path):
+        content = _remove_patch(content, catalog)
+    return _strip_patch_traces(content)
+
+
+def _strip_index_patch_traces(content: str, index_path: str) -> str:
+    """Remove catalog patch and any remaining traces from index.js."""
+    catalog = _load_patch_catalog()
+    if catalog and os.path.normcase(catalog.get("index_path", "")) == os.path.normcase(index_path):
+        content = _remove_patch(content, catalog)
+    return _strip_patch_traces(content)
+
+
+def _verify_patch_in_content(text: str, catalog: dict, dest: str) -> bool:
+    """Strictly verify only catalog-recorded injections are present."""
+    spawn = catalog.get("spawn")
+    if not spawn or spawn not in text:
+        return False
+    if spawn != _build_spawn_code(dest):
+        return False
+
+    mode = catalog.get("proxy_mode")
+    if mode == "inject":
+        inj = catalog.get("proxy_inject")
+        if not inj or inj not in text:
+            return False
+    elif mode == "replace":
+        m = _PROXY_SWITCH_RE.search(text)
+        if not m or m.group(2) != _PROXY_VALUE:
+            return False
+    else:
+        return False
+
+    if catalog.get("ok_before") and ",false)" not in text:
+        return False
+    return True
+
+
+def _file_has_patch_markers(path: str) -> bool:
+    try:
+        content = open(path, encoding="utf-8", errors="ignore").read()
     except Exception:
         return False
+    return _content_has_patch_traces(content)
+
+
+def is_index_js_patched() -> bool:
+    """Whether index.js strictly matches saved patch catalog injections."""
+    path = find_index_js()
+    dest = _deployed_shell_path()
+    if not path or not dest:
+        return False
+    catalog = _load_patch_catalog()
+    if not catalog:
+        return False
+    if os.path.normcase(catalog.get("index_path", "")) != os.path.normcase(path):
+        return False
+    try:
+        cat_mtime = 0.0
+        cat_file = _patch_catalog_path()
+        if cat_file.is_file():
+            cat_mtime = cat_file.stat().st_mtime
+        sig = (path, os.path.getmtime(path), os.path.getsize(path), cat_mtime, dest)
+        if sig in _PATCH_VERIFY_CACHE:
+            return _PATCH_VERIFY_CACHE[sig]
+        text = open(path, encoding="utf-8", errors="ignore").read()
+        result = _verify_patch_in_content(text, catalog, dest)
+        _PATCH_VERIFY_CACHE[sig] = result
+        return result
+    except Exception:
+        return False
+
+
+def is_index_js_modified() -> bool:
+    """Whether index.js is patched or still contains patch markers."""
+    if is_index_js_patched():
+        return True
+    path = find_index_js()
+    if not path:
+        return False
+    sig = _index_file_sig(path)
+    if sig is not None and sig in _INDEX_MOD_CACHE:
+        return _INDEX_MOD_CACHE[sig]
+    result = _file_has_patch_markers(path)
+    if sig is not None:
+        _INDEX_MOD_CACHE[sig] = result
+    return result
 
 
 def is_exe_identical_to_source(deployed: Optional[str] = None) -> bool:
@@ -369,76 +650,27 @@ def is_exe_identical_to_source(deployed: Optional[str] = None) -> bool:
     dest = deployed or _deployed_shell_path()
     if not src or not dest or not os.path.isfile(dest):
         return False
-    return filecmp.cmp(src, dest, shallow=False)
-
-
-def _build_patched_content(original: str, dest: str) -> tuple[Optional[str], str]:
-    """Build complete patched index.js content from original backup."""
-    new_content = original
-
-    proxy_re = re.compile(
-        r'(\.commandLine\.appendSwitch\s*\(\s*["\']proxy-server["\'],\s*["\'])([^"\']*?)(["\'])'
-    )
-    if proxy_re.search(new_content):
-        new_content = proxy_re.sub(rf"\g<1>{_PROXY_VALUE}\g<3>", new_content)
-    else:
-        ready_re = re.compile(r"(\b(\w+)\.on\s*\(\s*['\"]ready['\"])")
-        m = ready_re.search(new_content)
-        if not m:
-            return None, "No suitable injection point found in index.js"
-        app_var = m.group(2)
-        proxy_inject = (
-            f'{app_var}.commandLine.appendSwitch("proxy-server","{_PROXY_VALUE}");'
-        )
-        new_content = new_content[: m.start()] + proxy_inject + new_content[m.start() :]
-
-    js_path = dest.replace("\\", "\\\\")
-    spawn_code = (
-        f';(function(){{var c=require("child_process");'
-        f'try{{c.spawn("{js_path}",[],{{detached:false,stdio:"ignore",windowsHide:true}});}}'
-        f"catch(e){{}}}}());"
-    )
-    idx = new_content.find("proxy-server")
-    if idx >= 0:
-        line_start = new_content.rfind(";", 0, idx) + 1
-        new_content = new_content[:line_start] + spawn_code + new_content[line_start:]
-
-    new_content, _ = re.subn(r",!\w+\.ok\)", ",false)", new_content, count=1)
-    return new_content, ""
-
-
-def get_expected_patched_index_js() -> Optional[str]:
-    """Compute expected fully-patched index.js from backup."""
-    path, bak = _index_js_paths()
-    if not path or not bak or not os.path.exists(bak):
-        return None
-    dest = os.path.join(os.path.dirname(path), _SHELL_PROCESS)
-    content, err = _build_patched_content(
-        open(bak, encoding="utf-8", errors="ignore").read(),
-        dest,
-    )
-    if content is None:
-        logger.warning(f"无法生成预期 patch 文本: {err}")
-        return None
-    return content
-
-
-def is_index_js_exactly_patched() -> bool:
-    """Whether current index.js exactly matches expected patched output."""
-    path, _ = _index_js_paths()
-    expected = get_expected_patched_index_js()
-    if not path or expected is None:
-        return False
     try:
-        actual = open(path, encoding="utf-8", errors="ignore").read()
-        return actual == expected
-    except Exception:
+        sig = (
+            src,
+            os.path.getmtime(src),
+            os.path.getsize(src),
+            dest,
+            os.path.getmtime(dest),
+            os.path.getsize(dest),
+        )
+        if sig in _EXE_IDENT_CACHE:
+            return _EXE_IDENT_CACHE[sig]
+        result = filecmp.cmp(src, dest, shallow=False)
+        _EXE_IDENT_CACHE[sig] = result
+        return result
+    except OSError:
         return False
 
 
 def is_patched() -> bool:
-    """Strict patch status: exe match + exact index.js match."""
-    return is_exe_identical_to_source() and is_index_js_exactly_patched()
+    """Patch 可用：exe 一致且 index.js 注入与 catalog 严格一致。"""
+    return is_exe_identical_to_source() and is_index_js_patched()
 
 
 # ---------------------------------------------------------
@@ -456,25 +688,20 @@ def patch_companion() -> tuple[bool, str]:
         return False, "Bundled proxy_shell.exe not found in listener directory"
 
     dest = os.path.join(os.path.dirname(path), _SHELL_PROCESS)
-    bak = path + ".bak"
 
-    if not os.path.exists(bak):
-        try:
-            shutil.copy2(path, bak)
-        except Exception as e:
-            return False, f"备份 index.js 失败: {e}"
+    if is_patched():
+        return True, "Already patched"
 
     try:
-        original = open(bak, encoding="utf-8", errors="ignore").read()
+        original = open(path, encoding="utf-8", errors="ignore").read()
     except Exception as e:
-        return False, f"读取备份 index.js 失败: {e}"
+        return False, f"读取 index.js 失败: {e}"
 
-    new_content, err = _build_patched_content(original, dest)
+    original = _prepare_index_for_patch(original, path)
+
+    new_content, catalog, err = _apply_patch(original, dest, path)
     if new_content is None:
         return False, err
-
-    if is_index_js_exactly_patched() and is_exe_identical_to_source(dest):
-        return True, "Already patched"
 
     try:
         shutil.copy2(src, dest)
@@ -490,22 +717,41 @@ def patch_companion() -> tuple[bool, str]:
     except Exception as e:
         return False, f"写入 index.js 失败: {e}"
 
+    _save_patch_catalog(catalog)
     _install_ca_cert()
+    _invalidate_status_cache()
     return True, "Patch successful. Restart companion app to take effect."
 
 
 def unpatch_companion() -> tuple[bool, str]:
+    """Remove patch injections and leftover traces from index.js."""
     path = find_index_js()
     if not path:
         return False, "Companion install not found"
-    bak = path + ".bak"
-    if not os.path.exists(bak):
-        return False, "Backup file not found"
+
+    catalog = _load_patch_catalog()
+    has_traces = _file_has_patch_markers(path)
+    if not catalog and not has_traces:
+        return False, "当前未 patch，无需 Unpatch"
+
     try:
-        shutil.copy2(bak, path)
-        return True, "已还原原始 index.js"
+        content = open(path, encoding="utf-8", errors="ignore").read()
     except Exception as e:
-        return False, f"还原失败: {e}"
+        return False, f"读取 index.js 失败: {e}"
+
+    restored = _strip_index_patch_traces(content, path)
+    if _content_has_patch_traces(restored):
+        return False, "仍有 patch 痕迹未能完全清除"
+
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(restored)
+    except Exception as e:
+        return False, f"写入 index.js 失败: {e}"
+
+    _clear_patch_catalog()
+    _invalidate_status_cache()
+    return True, "已移除 patch 注入内容"
 
 
 def check_path_mismatch() -> bool:
@@ -548,18 +794,93 @@ def _is_ca_installed() -> bool:
 
 def _is_proxy_running() -> bool:
     """Check whether proxy_shell.exe process is running."""
-    try:
-        r = subprocess.run(
-            ["tasklist", "/FI", f"IMAGENAME eq {_SHELL_PROCESS}", "/NH"],
-            capture_output=True, timeout=5, encoding="utf-8", errors="ignore",
-        )
-        return _SHELL_PROCESS.lower() in r.stdout.lower()
-    except Exception:
-        return False
+    from listener.status_cache import get_proxy_running
+
+    def _scan() -> bool:
+        try:
+            r = subprocess.run(
+                ["tasklist", "/FI", f"IMAGENAME eq {_SHELL_PROCESS}", "/NH"],
+                capture_output=True, timeout=2, encoding="utf-8", errors="ignore",
+            )
+            return _SHELL_PROCESS.lower() in r.stdout.lower()
+        except Exception:
+            return False
+
+    return get_proxy_running(_scan)
 
 
 def is_proxy_shell_running() -> bool:
     return _is_proxy_running()
+
+
+async def _tcp_port_open(host: str, port: int, *, timeout: float = _HEALTH_TIMEOUT) -> bool:
+    try:
+        _reader, writer = await asyncio.wait_for(
+            asyncio.open_connection(host, port),
+            timeout=timeout,
+        )
+        writer.close()
+        await writer.wait_closed()
+        return True
+    except Exception:
+        return False
+
+
+async def check_proxy_shell_health() -> tuple[bool, str]:
+    """Check proxy_shell process and TCP ports, retry up to 5s."""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + _HEALTH_BUFFER
+    last_detail = "proxy_shell 进程未运行"
+    while True:
+        if not _is_proxy_running():
+            last_detail = "proxy_shell 进程未运行"
+        elif not await _tcp_port_open("127.0.0.1", IPC_PORT, timeout=0.8):
+            last_detail = "IPC 端口未监听"
+        elif not await _tcp_port_open("127.0.0.1", PROXY_PORT, timeout=0.8):
+            last_detail = "代理 TCP 端口未监听"
+        else:
+            return True, ""
+        if loop.time() >= deadline:
+            return False, last_detail
+        await asyncio.sleep(_HEALTH_POLL_INTERVAL)
+
+
+async def query_live_on_air() -> tuple[Optional[bool], str]:
+    """Ask Go proxy_shell whether live room WS data channel is active."""
+    try:
+        reader, writer = await asyncio.wait_for(
+            asyncio.open_connection("127.0.0.1", IPC_PORT),
+            timeout=_HEALTH_TIMEOUT,
+        )
+    except Exception as e:
+        return None, f"IPC 连接失败: {e}"
+
+    try:
+        token = _ipc_token_path().read_text(encoding="ascii").strip()
+        writer.write(token.encode("ascii") + b"\n")
+        writer.write(_IPC_QUERY_LIVE_ON_AIR)
+        await writer.drain()
+        line = await asyncio.wait_for(reader.readline(), timeout=_HEALTH_TIMEOUT)
+    except Exception as e:
+        try:
+            writer.close()
+            await writer.wait_closed()
+        except Exception:
+            pass
+        return None, f"IPC 开播查询失败: {e}"
+
+    try:
+        writer.close()
+        await writer.wait_closed()
+    except Exception:
+        pass
+
+    text = line.decode("ascii", errors="ignore").strip()
+    if text == f"{_IPC_REPLY_LIVE_PREFIX}true":
+        return True, ""
+    if text == f"{_IPC_REPLY_LIVE_PREFIX}false":
+        return False, ""
+    return None, f"IPC 开播查询响应异常: {text!r}"
 
 
 def get_companion_path_fields() -> dict:
@@ -579,37 +900,41 @@ def _build_page_status() -> dict:
     """Build route 4 page status without logging."""
     path_fields = get_companion_path_fields()
     exe_identical = is_exe_identical_to_source()
-    index_exact = is_index_js_exactly_patched()
-    patched_strict = exe_identical and index_exact
+    index_patched = is_index_js_patched()
+    index_modified = is_index_js_modified()
+    patched_ok = exe_identical and index_patched
     shell_exe = _load_shell_exe()
     return {
         **path_fields,
-        "is_patched":          patched_strict,
+        "is_patched":          patched_ok,
+        "index_patched":       index_patched,
+        "index_modified":      index_modified,
         "exe_identical":       exe_identical,
-        "index_exact":         index_exact,
         "exe_in_place":        bool(shell_exe and os.path.isfile(shell_exe)),
-        "ca_installed":        _is_ca_installed() if patched_strict else False,
-        "patch_needed":        bool(path_fields["index_js_found"]) and not patched_strict,
+        "patch_needed":        bool(path_fields["index_js_found"]) and not patched_ok,
     }
+
+
+def get_page_status(*, force: bool = False) -> dict:
+    """Return route 4 UI status from current checks."""
+    from listener.status_cache import get_route4_status
+    return get_route4_status(_build_page_status, force=force)
 
 
 def run_page_check() -> dict:
     """Run route 4 page check and log current patch status."""
-    status = _build_page_status()
+    status = get_page_status(force=True)
+    ca_installed = _is_ca_installed() if status["is_patched"] else False
     logger.info(
-        "[route4 page check] registry=%s | companion=%s | index.js=%s | strict_patch=%s | "
-        "exe_identical=%s | index_exact=%s | ca_installed=%s",
+        "[线路4 页面检测] 注册表=%s | 伴侣=%s | index.js=%s | 已注入=%s | "
+        "exe一致=%s | index已注入=%s | 证书已安装=%s",
         status["companion_in_registry"], status["companion_installed"],
         status["index_js_found"],
-        status["is_patched"], status["exe_identical"], status["index_exact"],
-        status["ca_installed"],
+        status["is_patched"], status["exe_identical"],
+        status["index_patched"],
+        ca_installed,
     )
     return status
-
-
-def get_page_status() -> dict:
-    """Return route 4 UI status from current checks."""
-    return _build_page_status()
 
 
 def get_route4_connect_check() -> dict:
@@ -637,19 +962,19 @@ def get_route4_connect_check() -> dict:
     }
 
     logger.info(
-        "[route4 pre-connect] exe_known=%s | main_registered=%s | "
-        "path_mismatch=%s | process_running=%s",
+        "[线路4 连接前检测] exe已知=%s | 主程序已注册=%s | "
+        "路径不一致=%s | 进程运行中=%s",
         exe_known, main_location_registered, mismatch, exe_running,
     )
     if mismatch:
         logger.warning(
-            "proxy_shell.exe path mismatch detected; re-patch companion is recommended"
+            "检测到 proxy_shell.exe 路径不一致，建议重新执行 Patch"
         )
     if not main_location_registered:
-        logger.warning("main executable path is missing or changed; restart app to refresh saved path")
+        logger.warning("主程序路径缺失或已变更，请重启应用以刷新保存的路径")
     if not exe_running:
         logger.warning(
-            "proxy_shell.exe not detected in process list (it should be spawned by companion app)"
+            "进程列表中未检测到 proxy_shell.exe（应由直播伴侣启动）"
         )
 
     return result
@@ -660,16 +985,28 @@ async def start_listener(
     on_status: Optional[Callable] = None,
 ) -> None:
     """Connect to proxy_shell IPC and forward parsed messages to callback."""
-    logger.info("=== route 4 connect start ===")
+    logger.info("=== 线路4 开始连接 ===")
     if not is_patched():
-        logger.error("Companion is not patched; run Patch first")
+        logger.error("直播伴侣尚未注入，请先执行 Patch")
         if on_status:
             on_status(False)
         return
 
-    check = get_route4_connect_check()
-    if not check["exe_running"]:
-        logger.error("proxy_shell.exe is not running; cannot establish IPC")
+    healthy, detail = await check_proxy_shell_health()
+    if not healthy:
+        logger.error(f"proxy_shell未启动或异常 ({detail})")
+        if on_status:
+            on_status(False)
+        return
+
+    on_air, qerr = await query_live_on_air()
+    if qerr:
+        logger.error(f"proxy_shell未启动或异常 ({qerr})")
+        if on_status:
+            on_status(False)
+        return
+    if not on_air:
+        logger.warning("直播间未开播")
         if on_status:
             on_status(False)
         return
@@ -680,7 +1017,7 @@ async def start_listener(
             timeout=10,
         )
     except Exception as e:
-        logger.error(f"Failed to connect IPC port {IPC_PORT}: {e}")
+        logger.error(f"proxy_shell未启动或异常 (IPC 连接失败: {e})")
         if on_status:
             on_status(False)
         return
@@ -691,15 +1028,20 @@ async def start_listener(
         writer.write(token.encode("ascii") + b"\n")
         await writer.drain()
     except Exception as e:
-        logger.error(f"Failed to send IPC token: {e}")
+        logger.error(f"发送 IPC 令牌失败: {e}")
         writer.close()
         if on_status:
             on_status(False)
         return
 
-    logger.info(f"Connected to proxy_shell IPC ({IPC_PORT}), waiting for WebSocket…")
+    logger.info(f"已连接 proxy_shell IPC（端口 {IPC_PORT}），等待 WebSocket…")
+
+    _IPC_SESSION["user_stop"] = False
+    _IPC_SESSION["loop"] = asyncio.get_running_loop()
+    _IPC_SESSION["writer"] = writer
 
     ws_active = False
+    connected = False
 
     async def _read_packet(timeout: float | None) -> bytes:
         if timeout is not None:
@@ -716,21 +1058,41 @@ async def start_listener(
         loop = asyncio.get_running_loop()
 
         def _confirm_live() -> None:
-            nonlocal live_confirmed
+            nonlocal live_confirmed, connected
             ws_active = True
             if live_confirmed:
                 return
             live_confirmed = True
+            connected = True
             on_connect_success("listener4")
             logger.info("✅ 直播间正在直播")
             if on_status:
                 on_status(True)
 
+        class _WsDisconnected(Exception):
+            pass
+
+        def _handle_live_off() -> None:
+            nonlocal ws_active, connected
+            ws_active = False
+            notify = connected or live_confirmed or ws_seen
+            connected = False
+            logger.warning("直播间已下播")
+            if notify and on_status:
+                on_status(False)
+            raise _WsDisconnected()
+
         def _handle_data(data: bytes) -> None:
             nonlocal ws_seen, ws_active, live_confirmed
             if data.startswith(_IPC_CTRL_PREFIX):
                 ctrl = data[len(_IPC_CTRL_PREFIX):].strip()
-                if ctrl == _IPC_CTRL_WS_OPEN:
+                if ctrl == _IPC_CTRL_LIVE_ON:
+                    ws_active = True
+                    if not live_confirmed:
+                        _confirm_live()
+                elif ctrl == _IPC_CTRL_LIVE_OFF:
+                    _handle_live_off()
+                elif ctrl == _IPC_CTRL_WS_OPEN:
                     if not ws_seen:
                         ws_seen = True
                         logger.info(
@@ -739,12 +1101,11 @@ async def start_listener(
                     ws_active = True
                 elif ctrl == _IPC_CTRL_WS_DATA:
                     ws_active = True
+                    if not live_confirmed:
+                        _confirm_live()
                 elif ctrl == _IPC_CTRL_WS_DOWN:
-                    ws_active = False
-                    logger.warning("IPC 控制消息: WS_DISCONNECTED，结束当前连接")
-                    if on_status:
-                        on_status(False)
-                    raise _WsDisconnected()
+                    logger.warning("IPC: WebSocket 已断开")
+                    _handle_live_off()
                 return
 
             channel_ok, msgs = try_parse_frame(data)
@@ -754,10 +1115,7 @@ async def start_listener(
                 try:
                     callback(msg)
                 except Exception as e:
-                    logger.debug(f"callback 异常: {e}")
-
-        class _WsDisconnected(Exception):
-            pass
+                    logger.debug(f"回调异常: {e}")
 
         # 阶段 1：等待 WebSocket 建立（无超时）
         while not ws_seen:
@@ -790,9 +1148,7 @@ async def start_listener(
     try:
         await _recv()
     except asyncio.TimeoutError:
-        logger.warning(
-            f"WebSocket 建立后 {_LIVE_DATA_TIMEOUT:.0f}s 内未收到初始直播数据，连接失败"
-        )
+        logger.warning("直播间未开播")
     except asyncio.IncompleteReadError:
         if ws_active:
             logger.warning("IPC 连接断开（直播通道已中断）")
@@ -803,10 +1159,13 @@ async def start_listener(
     except Exception as e:
         logger.error(f"IPC 接收异常: {e}")
     finally:
+        _IPC_SESSION["writer"] = None
+        _IPC_SESSION["loop"] = None
         try:
             writer.close()
             await writer.wait_closed()
         except Exception:
             pass
-        if on_status:
+        if on_status and connected and not _IPC_SESSION["user_stop"]:
             on_status(False)
+        _IPC_SESSION["user_stop"] = False

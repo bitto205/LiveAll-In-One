@@ -28,7 +28,14 @@ import pages.theme as _theme
 from pages.widgets import ThemedComboBox
 from tools import register_tool
 from tools.overlay_capture import enable_capture_transparency
-from tools.tool_common import ToolSingleton, gift_names_cached, load_gift_pixmap
+from tools.overlay_window import OverlayFrameMixin, show_tutorial_dialog
+from tools.tool_common import (
+    ToolSingleton,
+    gift_names_cached,
+    load_gift_pixmap,
+    release_tool_singleton,
+    unregister_tool_from_page,
+)
 
 # ═══════════════════════════════════════════
 # 配置 / 规则
@@ -1552,6 +1559,9 @@ class OvertimeUserTimeWindow(QMainWindow):
         self.bind_ledger(None)
         event.ignore()
         self.hide()
+        tool = self.parent()
+        if tool is not None and hasattr(tool, "_try_release_tool"):
+            tool._try_release_tool()
 
 # ═══════════════════════════════════════════
 # 悬浮窗 + 控制面板
@@ -2139,11 +2149,13 @@ class _OvertimeRoot(QWidget):
                 background: {C['btn_hover']}; color: {C['text']};
             }}
         """
-        for text, slot in [("─", lambda: self._win.showMinimized()),
+        for text, slot in [("─", self._win.minimize_overlay),
                            ("✕", self._win.close)]:
             btn = QPushButton(text)
             btn.setStyleSheet(btn_style)
             btn.setCursor(Qt.ArrowCursor)
+            if text == "─":
+                btn.setToolTip("收起边框并置底（保持渲染）")
             btn.clicked.connect(slot)
             btn_lay.addWidget(btn)
 
@@ -2152,7 +2164,7 @@ class _OvertimeRoot(QWidget):
         self._circle = _CircleToggle(self)
         self._circle.move(_CIRCLE_OFF, _CIRCLE_OFF)
         self._circle.raise_()
-        self._circle.clicked.connect(self._win.toggle_border)
+        self._circle.clicked.connect(self._win._on_circle_toggle)
 
         self._content = QWidget(self)
         self._content.setAttribute(Qt.WA_TranslucentBackground)
@@ -2254,6 +2266,7 @@ class _OvertimeRoot(QWidget):
     def mousePressEvent(self, event):
         if event.button() != Qt.LeftButton:
             return
+        self._win.restore_from_minimize()
         pos = event.position().toPoint()
 
         edge = self._edge_at(pos)
@@ -2347,17 +2360,19 @@ class _OvertimeRoot(QWidget):
             self._win.setGeometry(geo)
 
 
-class OvertimeWindow(QMainWindow):
+class OvertimeWindow(OverlayFrameMixin, QMainWindow):
     closed = Signal()
 
     def __init__(self, parent=None):
         super().__init__(
             parent,
-            Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint,
+            Qt.FramelessWindowHint,
         )
         self.setAttribute(Qt.WA_TranslucentBackground)
         self.setAttribute(Qt.WA_QuitOnClose, False)
         enable_capture_transparency(self)
+        self._install_overlay_frame()
+        self.setWindowTitle("加班机")
         dw, dh = _default_window_size()
         self.setMinimumSize(int(dw * 0.75), int(dh * 0.75))
         self.resize(dw, dh)
@@ -2397,14 +2412,6 @@ class OvertimeWindow(QMainWindow):
         self._anim.setEasingCurve(QEasingCurve.OutCubic)
         self._anim.valueChanged.connect(self._on_r)
         self._anim.finished.connect(self._on_anim_done)
-
-    def toggle_border(self):
-        self._shown = not self._shown
-        self._anim.stop()
-        target = self._root.max_radius() if self._shown else 0.0
-        self._anim.setStartValue(self._anim_r)
-        self._anim.setEndValue(target)
-        self._anim.start()
 
     def showEvent(self, event):
         super().showEvent(event)
@@ -2526,7 +2533,7 @@ class OvertimeTool(ToolSingleton, QMainWindow):
             return
         super().__init__(parent, Qt.Window)
         self.setAttribute(Qt.WA_QuitOnClose, False)
-        self.setWindowTitle("加班机")
+        self.setWindowTitle("设置")
         self.setFixedSize(_TOOL_WIN_W, _TOOL_WIN_H)
         self._overtime_win: OvertimeWindow | None = None
         self._user_time_win: OvertimeUserTimeWindow | None = None
@@ -2614,6 +2621,22 @@ class OvertimeTool(ToolSingleton, QMainWindow):
         lbl.setStyleSheet("font-size: 14px; font-weight: 600;")
         row.addWidget(lbl)
         row.addStretch()
+        tut_btn = QPushButton("教程")
+        tut_btn.setFixedHeight(34)
+        tut_btn.setCursor(Qt.PointingHandCursor)
+        tut_btn.setToolTip("查看使用教程")
+        tut_btn.setStyleSheet(f"""
+            QPushButton {{
+                background: {C['card']}; color: {C['text_muted']};
+                border: 1.5px solid {C['border']};
+                border-radius: 8px; font-size: 13px; font-weight: 600;
+                padding: 0 14px;
+            }}
+            QPushButton:hover {{ background: {C['hover']}; color: {C['text']}; }}
+        """)
+        tut_btn.clicked.connect(lambda: show_tutorial_dialog(self))
+        row.addWidget(tut_btn)
+        row.addSpacing(8)
         self._open_btn = QPushButton("打开加班机")
         self._open_btn.setFixedHeight(34)
         self._open_btn.setCursor(Qt.PointingHandCursor)
@@ -2622,7 +2645,7 @@ class OvertimeTool(ToolSingleton, QMainWindow):
         cl.addLayout(row)
         desc = QLabel(
             "透明悬浮窗，叠加在直播软件上方显示加班倒计时。"
-            "窗口采集请在直播伴侣素材设置中勾选「允许窗口透明」（10.5+）。"
+            "窗口采集请在直播伴侣素材设置-高级设置-选择绿幕抠图（10.5+）。"
         )
         desc.setWordWrap(True)
         desc.setStyleSheet(f"font-size: 12px; color: {C['text_muted']};")
@@ -2855,7 +2878,7 @@ class OvertimeTool(ToolSingleton, QMainWindow):
         try:
             if self._overtime_win is None:
                 self._overtime_win = OvertimeWindow()
-                self._overtime_win.closed.connect(self._refresh_btn)
+                self._overtime_win.closed.connect(self._on_overlay_closed)
             self._overtime_win.apply_settings(load_settings())
             self._overtime_win.show()
             self._overtime_win.activateWindow()
@@ -2908,26 +2931,48 @@ class OvertimeTool(ToolSingleton, QMainWindow):
             return
         win.handle_gift(msg)
 
+    def _on_overlay_closed(self):
+        self._refresh_btn()
+        self._sync_user_time_ledger()
+        self._try_release_tool()
+
+    def _is_tool_active(self) -> bool:
+        if self.isVisible():
+            return True
+        if self._overtime_win is not None and self._overtime_win.isVisible():
+            return True
+        if self._user_time_win is not None and self._user_time_win.isVisible():
+            return True
+        return False
+
+    def _cleanup_for_release(self) -> None:
+        if self._overtime_win is not None:
+            self._overtime_win.blockSignals(True)
+            self._overtime_win.deleteLater()
+            self._overtime_win = None
+        if self._user_time_win is not None:
+            self._user_time_win.blockSignals(True)
+            self._user_time_win.deleteLater()
+            self._user_time_win = None
+        self._overtime_win_pending = False
+
+    def _try_release_tool(self) -> None:
+        from tools.tool_common import is_app_shutting_down
+        if is_app_shutting_down() or self._is_tool_active():
+            return
+        release_tool_singleton(OvertimeTool, cleanup=lambda inst: inst._cleanup_for_release())
+        unregister_tool_from_page("加班机")
+
     def showEvent(self, event):
         super().showEvent(event)
         self._overtime_win_pending = False
         self._refresh_btn()
-
-    def _stop_overlay(self):
-        """关闭设置窗时同步收起悬浮窗，避免后台继续运行。"""
-        if self._overtime_win is not None:
-            self._overtime_win.hide()
-        if self._user_time_win is not None:
-            self._user_time_win.hide()
-        self._overtime_win_pending = False
-        self._refresh_btn()
-        self._sync_user_time_ledger()
 
     def closeEvent(self, event):
         from tools.tool_common import is_app_shutting_down
         if is_app_shutting_down():
             event.accept()
             return
-        self._stop_overlay()
         event.ignore()
         self.hide()
+        self._try_release_tool()
