@@ -21,3 +21,4 @@ _bench_pages.py
 _bench_startup.py
 _test_system_browser_r2.py
 requirements.txt
+test/
