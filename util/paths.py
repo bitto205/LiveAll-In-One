@@ -25,3 +25,11 @@ def app_root() -> Path:
 
 def config_file() -> Path:
     return app_root() / "config.json"
+
+
+def log_dir() -> Path:
+    return app_root() / "log"
+
+
+def state_file() -> Path:
+    return app_root() / "state.json"

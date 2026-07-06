@@ -1,16 +1,20 @@
 """线路 3：mitmproxy local 模式拦截直播伴侣 WSS。"""
+from __future__ import annotations
+
 import asyncio
 import logging
 import os
 import subprocess
 import sys
 import winreg
-from typing import Awaitable, Callable, Optional
+from typing import TYPE_CHECKING, Awaitable, Callable, Optional
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from mitmproxy import http, options
-from mitmproxy.tools.dump import DumpMaster
+# mitmproxy 体积庞大，改为按需加载（精简打包可整体排除）。
+# 仅在真正启动线路 3 时导入；类型注解借助 __future__ annotations 延迟求值。
+if TYPE_CHECKING:
+    from mitmproxy import http
 
 from listener.LiveProtobuf import parse_frame, try_parse_frame
 from util.log_util import get_listener_logger, on_connect_success, ensure_console_logging
@@ -286,6 +290,14 @@ async def start_listener(
 
     logger.info("开始连接")
     logger.info("正在启动代理拦截本地模式…")
+    try:
+        from mitmproxy import options
+        from mitmproxy.tools.dump import DumpMaster
+    except ImportError as e:
+        logger.error("该版本未内置线路 3 所需的 mitmproxy 组件：%s", e)
+        if on_status:
+            on_status(False)
+        return
     try:
         opts = options.Options(mode=[f"local:{target_process}"])
         master = DumpMaster(opts, with_termlog=False, with_dumper=False)

@@ -8,12 +8,6 @@ listener1.py — JS Hook 方案
     def on_status(connected: bool):
         print("已连接" if connected else "已断开")
 
-    start_listener("YOUR_LIVE_ID", on_message, on_status=on_status)
-    start_listener("YOUR_LIVE_ID", on_message, debug=True)
-
-    # 强制系统 Chrome/Edge（不用 browsers/ 里的 bundled）
-    start_listener("YOUR_LIVE_ID", on_message, force_system=True)
-
 依赖:
     pip install playwright protobuf
     playwright install chromium          # 下载到 browsers/ 目录

@@ -20,18 +20,23 @@ from playwright.async_api import async_playwright
 
 from util.playwright_bootstrap import ensure_configured, launch_chromium
 from util.log_util import get_tagged_logger
+from util.paths import state_file as _default_state_file
 
 # ─────────────────────────────────────────────
 # 配置
 # ─────────────────────────────────────────────
-STATE_FILE = "state.json"
 LOGIN_URL = "https://www.douyin.com/"
 
 logger = get_tagged_logger("登录", "listener.login")
 
 
-def get_login_ui_state(state_file: str = STATE_FILE) -> tuple[str, bool]:
+def _state_path(state_file: str | None = None) -> str:
+    return state_file or str(_default_state_file())
+
+
+def get_login_ui_state(state_file: str | None = None) -> tuple[str, bool]:
     """线路 1/2 登录态 UI：(状态文案, 登录按钮是否可点)。"""
+    state_file = _state_path(state_file)
     if not os.path.exists(state_file):
         return "❌ 未登录", True
     ok, detail = _check_cookie_expiry(state_file)
@@ -216,7 +221,7 @@ async def _run_login(state_file: str) -> bool:
 # ─────────────────────────────────────────────
 # 公开接口
 # ─────────────────────────────────────────────
-def do_login(state_file: str = STATE_FILE) -> bool:
+def do_login(state_file: str | None = None) -> bool:
     """
     两层检测，按需登录。
     返回 True = 登录态有效，False = 登录失败。
@@ -225,6 +230,7 @@ def do_login(state_file: str = STATE_FILE) -> bool:
     from datetime import datetime
     from util.log_util import on_connect_success
 
+    state_file = _state_path(state_file)
     if not os.path.exists(state_file):
         logger.info("%s 不存在，需要登录", state_file)
     else:

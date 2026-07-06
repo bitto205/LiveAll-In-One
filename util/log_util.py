@@ -1,16 +1,21 @@
 """应用日志：统一格式，连接成功后可写文件。"""
+from __future__ import annotations
+
 import logging
 import os
 import re
 import sys
 from datetime import datetime
+from pathlib import Path
 from typing import Any
+
+from util.paths import app_root, log_dir
 
 _attached: set[str] = set()
 _session_ts = datetime.now().strftime("%Y%m%d_%H%M%S")
 _LOG_FMT = "%(asctime)s | %(levelname)s | %(message)s"
 
-_MSG_LOG_DIR = os.path.join("log", "msg_log")
+_MSG_LOG_DIR = log_dir() / "msg_log"
 
 _ROUTE_BY_LISTENER = {
     "listener1": "1",
@@ -75,6 +80,24 @@ def suppress_proxy_noise() -> None:
         _attach_noise_filter(handler)
 
 
+def ensure_startup_log() -> Path:
+    """打包后无控制台时，把日志写到 exe 旁 log/liveaio.log。"""
+    root = log_dir()
+    root.mkdir(parents=True, exist_ok=True)
+    path = root / "liveaio.log"
+    logger = logging.getLogger()
+    logger.setLevel(logging.INFO)
+    abs_path = str(path.resolve())
+    if any(getattr(h, "baseFilename", "") == abs_path for h in logger.handlers
+           if isinstance(h, logging.FileHandler)):
+        return path
+    fh = logging.FileHandler(path, encoding="utf-8")
+    fh.setFormatter(logging.Formatter(_LOG_FMT))
+    _attach_noise_filter(fh)
+    logger.addHandler(fh)
+    return path
+
+
 def ensure_console_logging(level: int = logging.INFO) -> None:
     root = logging.getLogger()
     root.setLevel(level)
@@ -100,11 +123,13 @@ def on_connect_success(listener_name: str) -> None:
     if listener_name in _attached:
         return
     _attached.add(listener_name)
-    os.makedirs("log", exist_ok=True)
+    root_dir = log_dir()
+    root_dir.mkdir(parents=True, exist_ok=True)
     root = logging.getLogger()
     fmt = logging.Formatter(_LOG_FMT)
-    path = f"log/{listener_name}_{_session_ts}.log"
-    if not any(getattr(h, "baseFilename", "") == os.path.abspath(path) for h in root.handlers):
+    path = root_dir / f"{listener_name}_{_session_ts}.log"
+    abs_path = str(path.resolve())
+    if not any(getattr(h, "baseFilename", "") == abs_path for h in root.handlers):
         fh = logging.FileHandler(path, encoding="utf-8")
         fh.setFormatter(fmt)
         _attach_noise_filter(fh)
@@ -117,12 +142,13 @@ def on_connect_success(listener_name: str) -> None:
 
 
 def make_msg_logger(live_id: str) -> logging.Logger:
-    os.makedirs(_MSG_LOG_DIR, exist_ok=True)
+    root_dir = _MSG_LOG_DIR
+    root_dir.mkdir(parents=True, exist_ok=True)
     safe_id = re.sub(r'[\\/*?:"<>|]', "_", live_id)
     name = f"msg_{safe_id}_{_session_ts}"
     ml = logging.getLogger(name)
     ml.setLevel(logging.INFO)
-    h = logging.FileHandler(os.path.join(_MSG_LOG_DIR, f"{safe_id}_{_session_ts}.log"), encoding="utf-8")
+    h = logging.FileHandler(root_dir / f"{safe_id}_{_session_ts}.log", encoding="utf-8")
     h.setFormatter(logging.Formatter("%(asctime)s | %(message)s"))
     ml.addHandler(h)
     ml.propagate = False

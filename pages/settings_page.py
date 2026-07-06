@@ -196,7 +196,8 @@ class AccountSettings(BaseSetting):
 
     def _refresh(self):
         import json, time
-        f = "state.json"
+        from util.paths import state_file
+        f = str(state_file())
         if not os.path.exists(f):
             self._status.setText("未登录")
             return
