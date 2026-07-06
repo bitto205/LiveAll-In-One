@@ -22,3 +22,4 @@ _bench_startup.py
 _test_system_browser_r2.py
 requirements.txt
 test/
+build_nuitka.py
