@@ -11,11 +11,13 @@ from PySide6.QtWidgets import (
     QDialog, QLabel, QPushButton, QVBoxLayout, QMessageBox,
 )
 
+from util.paths import app_root
+
 _TUTORIAL_BTN_W = 44
 
 
 def tutorial_image_path() -> str | None:
-    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    root = str(app_root())
     folder = os.path.join(root, "image")
     preferred = os.path.join(folder, "cb057d2246fcf7e3d23b54f3476bc83.png")
     if os.path.isfile(preferred):

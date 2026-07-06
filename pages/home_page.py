@@ -8,9 +8,9 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import Qt, QTimer, QThread, Signal
 
-import pages.theme as _theme
+import util.theme as _theme
 import config as _cfg
-from listener.log_util import get_tagged_logger
+from util.log_util import get_tagged_logger
 from pages import BasePage, register
 
 logger = get_tagged_logger("首页", __name__)

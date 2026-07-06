@@ -3,7 +3,9 @@ import json
 import os
 from contextlib import contextmanager
 
-_FILE = "config.json"
+from util.paths import config_file
+
+_FILE = str(config_file())
 
 
 def _read() -> dict:

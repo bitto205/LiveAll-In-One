@@ -2,7 +2,9 @@
 import json
 import os
 
-_DIR  = os.path.dirname(os.path.abspath(__file__))
+from util.paths import app_root
+
+_DIR  = str(app_root() / "gift")
 _JSON = os.path.join(_DIR, "gift_info.json")
 _ICON = os.path.join(_DIR, "icon")
 

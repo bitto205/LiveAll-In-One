@@ -3,7 +3,7 @@ listener1.py — JS Hook 方案
 注入 JS 拦截 Array.prototype.push，从页面内存直接捞消息。
 
 使用:
-    from listener1 import start_listener
+    from listener.listener1 import start_listener
 
     def on_status(connected: bool):
         print("已连接" if connected else "已断开")
@@ -11,10 +11,18 @@ listener1.py — JS Hook 方案
     start_listener("YOUR_LIVE_ID", on_message, on_status=on_status)
     start_listener("YOUR_LIVE_ID", on_message, debug=True)
 
+    # 强制系统 Chrome/Edge（不用 browsers/ 里的 bundled）
+    start_listener("YOUR_LIVE_ID", on_message, force_system=True)
+
 依赖:
-    pip install playwright
-    playwright install chromium
-    先运行 login.py 生成 state.json
+    pip install playwright protobuf
+    playwright install chromium          # 下载到 browsers/ 目录
+    先运行 login.py 生成 state.json（或设 config.json use_system_browser=true 跳过 bundled）
+
+浏览器策略:
+    默认优先使用 browsers/ 下的 bundled Chromium；
+    force_system=True 或 config.json 中 use_system_browser=true 时改用系统 Chrome/Edge。
+    系统浏览器冷启动较慢，WS 建立窗口自动放宽到 _WS_TIMEOUT_SYSTEM。
 """
 
 import asyncio
@@ -27,8 +35,9 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from playwright.async_api import async_playwright
 
-from listener.log_util import get_listener_logger, make_msg_logger, on_connect_success
-from listener.models import (
+from util.playwright_bootstrap import launch_chromium
+from util.log_util import get_listener_logger, make_msg_logger, on_connect_success
+from util.models import (
     ChatMessage,
     ControlMessage,
     EmojiChatMessage,
@@ -45,7 +54,8 @@ from listener.models import (
 
 logger = get_listener_logger(1)
 
-_WS_TIMEOUT = 10.0       # 进入直播间后等待 WebSocket 建立的秒数
+_WS_TIMEOUT = 13.0       # 进入直播间后等待 WebSocket 建立的秒数（实测 8～12s）
+_WS_TIMEOUT_SYSTEM = 18.0  # 系统浏览器冷启动较慢，放宽 WS 建立窗口
 _LIVE_DATA_TIMEOUT = 10.0  # WebSocket 建立后等待直播消息的秒数
 
 
@@ -195,8 +205,12 @@ async def _run(
     headless: bool,
     debug: bool,
     on_status: Callable[[bool], None] | None,
+    *,
+    force_system: bool = False,
+    browser_channel: str | None = None,
 ):
     msg_logger = make_msg_logger(live_id) if debug else None
+    ws_timeout = _WS_TIMEOUT_SYSTEM if force_system else _WS_TIMEOUT
     logger.info(f"开始连接，直播间: {live_id}")
 
     def _emit_status(val: bool):
@@ -207,9 +221,8 @@ async def _run(
                 logger.debug(f"状态回调异常: {e}")
 
     async with async_playwright() as p:
-        browser = await p.chromium.launch(
-            headless=headless,
-            args=["--disable-blink-features=AutomationControlled", "--no-sandbox"],
+        browser = await launch_chromium(
+            p, headless=headless, force_system=force_system, channel=browser_channel,
         )
         context = await browser.new_context(
             storage_state=state_file,
@@ -280,9 +293,10 @@ async def _run(
             if ws_connected:
                 return
             ws_connected = True
-            logger.info(
-                f"WebSocket 已建立，{_LIVE_DATA_TIMEOUT:.0f}s 内等待直播消息…"
-            )
+            if not _state["live_confirmed"]:
+                logger.info(
+                    f"WebSocket 已建立，{_LIVE_DATA_TIMEOUT:.0f}s 内等待直播消息…"
+                )
             asyncio.ensure_future(_start_live_wait())
 
         def handle_console(msg):
@@ -299,6 +313,9 @@ async def _run(
                     if live_timer and not live_timer.done():
                         live_timer.cancel()
                     on_connect_success("listener1")
+                    # WS 可能已建立但事件尚未处理（console 先于 websocket 触发）
+                    if ws_connected:
+                        logger.info("WebSocket 已建立")
                     logger.info("✅ 直播间正在直播")
                     _emit_status(True)
                 if not _state["live_confirmed"]:
@@ -327,10 +344,10 @@ async def _run(
         )
 
         async def _ws_wait_timeout():
-            await asyncio.sleep(_WS_TIMEOUT)
+            await asyncio.sleep(ws_timeout)
             if not ws_connected:
                 await _fail_unlive(
-                    f"{_WS_TIMEOUT:.0f}s 内未建立 WebSocket，判定为未开播"
+                    f"{ws_timeout:.0f}s 内未建立 WebSocket，判定为未开播"
                 )
 
         asyncio.create_task(_ws_wait_timeout())
@@ -348,19 +365,23 @@ def start_listener(
     headless: bool = True,
     debug: bool = False,
     on_status: Callable[[bool], None] | None = None,
+    force_system: bool = False,
+    browser_channel: str | None = None,
 ):
     """
     启动 JS Hook 监听，阻塞运行。
 
     参数:
-        live_id     直播间 ID
-        callback    每条消息的回调，接收 LiveMessage 子类实例
-        state_file  playwright 登录态文件（login.py 生成）
-        headless    是否无头模式
-        debug       True 时将所有 msg 写入 msg_log/<live_id>_<ts>.log
-        on_status   连接状态回调 on_status(True)=已连接  on_status(False)=已断开
+        live_id       直播间 ID
+        callback      每条消息的回调，接收 LiveMessage 子类实例
+        state_file    playwright 登录态文件（login.py 生成）
+        headless      是否无头模式
+        debug         True 时将所有 msg 写入 log/msg_log/<live_id>_<ts>.log
+        on_status     连接状态回调 on_status(True)=已连接  on_status(False)=已断开
+        force_system  True 时强制使用系统 Chrome/Edge（不用项目 browsers/）
     """
-    asyncio.run(_run(live_id, callback, state_file, headless, debug, on_status))
+    asyncio.run(_run(live_id, callback, state_file, headless, debug, on_status,
+                     force_system=force_system, browser_channel=browser_channel))
 
 
 # ─────────────────────────────────────────────

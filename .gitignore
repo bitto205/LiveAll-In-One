@@ -6,7 +6,6 @@ state.json
 Thumbs.db
 .vscode/
 .cursor/
-msg_log/
 log/
 config.json
 browsers/
@@ -20,4 +19,5 @@ listener/proxy_shell.dist
 listener/proxy_shell.onefile-build
 _bench_pages.py
 _bench_startup.py
+_test_system_browser_r2.py
 requirements.txt

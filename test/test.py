@@ -16,7 +16,7 @@ sys.path.insert(0, _ROOT)
 
 from PySide6.QtCore import QTimer, QObject
 
-from listener.models import (
+from util.models import (
     ChatMessage, GiftMessage, LikeMessage, FollowMessage,
     EnterMessage, OnlineMessage, ControlMessage, FansclubMessage,
 )

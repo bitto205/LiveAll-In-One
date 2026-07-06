@@ -1,7 +1,7 @@
 import sys, os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import pages.theme as _theme
+import util.theme as _theme
 import config as _cfg
 
 from PySide6.QtWidgets import (
@@ -11,8 +11,8 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Qt, QThread, Signal
 
 from pages import BasePage, BaseSetting
-from pages.widgets import ThemedComboBox, ThemedToggle
-from listener.log_util import get_tagged_logger
+from util.widgets import ThemedComboBox, ThemedToggle
+from util.log_util import get_tagged_logger
 
 logger = get_tagged_logger("设置", __name__)
 

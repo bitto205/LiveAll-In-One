@@ -24,11 +24,11 @@ from PySide6.QtGui import (
     QPainter, QColor, QPainterPath, QPen, QFont, QFontMetrics, QPixmap,
 )
 
-import pages.theme as _theme
-from pages.widgets import ThemedComboBox
+import util.theme as _theme
+from util.widgets import ThemedComboBox
 from tools import register_tool
-from tools.overlay_capture import enable_capture_transparency
-from tools.overlay_window import OverlayFrameMixin, show_tutorial_dialog
+from util.overlay_capture import enable_capture_transparency
+from util.overlay_window import OverlayFrameMixin, show_tutorial_dialog
 from tools.tool_common import (
     ToolSingleton,
     gift_names_cached,
@@ -67,7 +67,7 @@ RULE_COUNT = 6
 
 def make_sim_gift_message(gift: str, count: int):
     """构造模拟 GiftMessage（字段与 listener.models.GiftMessage 一致）。"""
-    from listener.models import GiftMessage
+    from util.models import GiftMessage
     from gift.gift_info import get_gift_id
 
     name = (gift or SIM_DEFAULT_GIFT).strip() or SIM_DEFAULT_GIFT
@@ -2847,7 +2847,7 @@ class OvertimeTool(ToolSingleton, QMainWindow):
             self._overtime_win.apply_other_only(data)
 
     def _on_sim_gift(self, msg):
-        from listener.models import GiftMessage
+        from util.models import GiftMessage
         if not isinstance(msg, GiftMessage):
             return
         self.process_message(msg)
@@ -2923,7 +2923,7 @@ class OvertimeTool(ToolSingleton, QMainWindow):
             """)
 
     def process_message(self, msg):
-        from listener.models import GiftMessage
+        from util.models import GiftMessage
         if not isinstance(msg, GiftMessage):
             return
         win = self._overtime_win

@@ -10,6 +10,8 @@ _attached: set[str] = set()
 _session_ts = datetime.now().strftime("%Y%m%d_%H%M%S")
 _LOG_FMT = "%(asctime)s | %(levelname)s | %(message)s"
 
+_MSG_LOG_DIR = os.path.join("log", "msg_log")
+
 _ROUTE_BY_LISTENER = {
     "listener1": "1",
     "listener2": "2",
@@ -115,12 +117,12 @@ def on_connect_success(listener_name: str) -> None:
 
 
 def make_msg_logger(live_id: str) -> logging.Logger:
-    os.makedirs("msg_log", exist_ok=True)
+    os.makedirs(_MSG_LOG_DIR, exist_ok=True)
     safe_id = re.sub(r'[\\/*?:"<>|]', "_", live_id)
     name = f"msg_{safe_id}_{_session_ts}"
     ml = logging.getLogger(name)
     ml.setLevel(logging.INFO)
-    h = logging.FileHandler(f"msg_log/{safe_id}_{_session_ts}.log", encoding="utf-8")
+    h = logging.FileHandler(os.path.join(_MSG_LOG_DIR, f"{safe_id}_{_session_ts}.log"), encoding="utf-8")
     h.setFormatter(logging.Formatter("%(asctime)s | %(message)s"))
     ml.addHandler(h)
     ml.propagate = False

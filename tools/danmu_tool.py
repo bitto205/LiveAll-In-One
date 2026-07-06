@@ -27,9 +27,9 @@ from PySide6.QtGui   import (
     QLinearGradient, QFont, QFontMetrics, QPixmap,
 )
 
-import pages.theme as _theme
-from tools.overlay_capture import enable_capture_transparency
-from tools.overlay_window import OverlayFrameMixin, show_tutorial_dialog
+import util.theme as _theme
+from util.overlay_capture import enable_capture_transparency
+from util.overlay_window import OverlayFrameMixin, show_tutorial_dialog
 
 # ─────────────────────────────────────────────
 # 常量
@@ -667,7 +667,7 @@ class DanmuWindow(OverlayFrameMixin, QMainWindow):
         bubble.show()
 
     def add_message(self, msg, suffix: str = ""):
-        from listener.models import ChatMessage, GiftMessage, LikeMessage, FollowMessage
+        from util.models import ChatMessage, GiftMessage, LikeMessage, FollowMessage
 
         cw_widget = self._root._content
         if isinstance(msg, ChatMessage):
@@ -1188,16 +1188,30 @@ class DanmuTool(ToolSingleton, QMainWindow):
     def _spin_qss(self, C: dict) -> str:
         return _danmu_spin_qss(C)
 
+    def _like_user_key(self, msg) -> str:
+        uid = (getattr(msg, "user_id", None) or "").strip()
+        if uid:
+            return uid
+        name = (getattr(msg, "user", None) or "").strip()
+        return name or "(未知)"
+
     def _on_toggle_accum(self):
+        import config as _cfg
         btn = self._like_accum_btn
         on = btn.text() == "累加：已开启"
+        new_on = not on
         btn.setText("累加：已关闭" if on else "累加：已开启")
+        old_acc = self._active.get("danmu_like_accumulate", False)
+        _cfg.set("danmu_like_accumulate", new_on)
+        self._active["danmu_like_accumulate"] = new_on
+        if new_on != old_acc:
+            self._like_accum.clear()
         self._refresh_switches()
 
     def _send_to_danmu(self, msg):
         if not (self._danmu_win and self._danmu_win.isVisible()):
             return
-        from listener.models import ChatMessage, GiftMessage, FollowMessage, LikeMessage
+        from util.models import ChatMessage, GiftMessage, FollowMessage, LikeMessage
         if isinstance(msg, ChatMessage):
             suffix = self._active_suffix("danmu_chat_suffix")
         elif isinstance(msg, GiftMessage):
@@ -1324,7 +1338,7 @@ class DanmuTool(ToolSingleton, QMainWindow):
             self._style_apply_btn(btn)
 
     def process_message(self, msg):
-        from listener.models import ChatMessage, GiftMessage, FollowMessage, LikeMessage
+        from util.models import ChatMessage, GiftMessage, FollowMessage, LikeMessage
 
         if isinstance(msg, ChatMessage):
             if not self._active_on("danmu_chat_on"):
@@ -1351,8 +1365,9 @@ class DanmuTool(ToolSingleton, QMainWindow):
                 return
             threshold = max(1, int(self._active.get("danmu_like_threshold", 1) or 1))
             if self._active.get("danmu_like_accumulate", False):
+                user_key = self._like_user_key(msg)
                 entry = self._like_accum.setdefault(
-                    msg.user_id, {"user": msg.user, "count": 0}
+                    user_key, {"user": msg.user, "count": 0}
                 )
                 entry["user"]   = msg.user
                 entry["count"] += msg.count

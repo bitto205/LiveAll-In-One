@@ -18,7 +18,7 @@ from typing import Callable, Optional
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from listener.log_util import get_listener_logger, on_connect_success
+from util.log_util import get_listener_logger, on_connect_success
 from listener.LiveProtobuf import parse_frame, try_parse_frame
 
 logger = get_listener_logger(4)
@@ -171,9 +171,15 @@ def _refresh_ipc_token() -> str:
 
 
 def _shell_source() -> Optional[str]:
-    """Return bundled proxy_shell.exe path near this file."""
-    p = os.path.join(os.path.dirname(os.path.abspath(__file__)), "proxy_shell.exe")
-    return p if os.path.isfile(p) else None
+    """Return bundled proxy_shell.exe path (打包后在 app_root/listener/ 下)。"""
+    from util.paths import app_root
+    for p in (
+        app_root() / "listener" / "proxy_shell.exe",
+        Path(__file__).resolve().parent / "proxy_shell.exe",
+    ):
+        if p.is_file():
+            return str(p)
+    return None
 
 
 def _load_shell_exe() -> Optional[str]:
@@ -240,7 +246,7 @@ _PROXY_INJECT_TRACE_RE = re.compile(
 
 
 def _invalidate_status_cache() -> None:
-    from listener.status_cache import invalidate_all
+    from util.status_cache import invalidate_all
     invalidate_all()
     _PATCH_VERIFY_CACHE.clear()
     _EXE_IDENT_CACHE.clear()
@@ -277,7 +283,7 @@ def _scan_install_dir_registry() -> Optional[str]:
 
 
 def _find_install_dir() -> Optional[str]:
-    from listener.status_cache import get_registry_dir
+    from util.status_cache import get_registry_dir
     return get_registry_dir(_scan_install_dir_registry)
 
 
@@ -385,7 +391,7 @@ def find_index_js_in_root(root: str) -> Optional[str]:
 
 def find_index_js() -> Optional[str]:
     """Return full path of companion index.js."""
-    from listener.status_cache import get_index_js_path
+    from util.status_cache import get_index_js_path
 
     def _resolve() -> Optional[str]:
         root = get_companion_install_dir()
@@ -794,7 +800,7 @@ def _is_ca_installed() -> bool:
 
 def _is_proxy_running() -> bool:
     """Check whether proxy_shell.exe process is running."""
-    from listener.status_cache import get_proxy_running
+    from util.status_cache import get_proxy_running
 
     def _scan() -> bool:
         try:
@@ -917,7 +923,7 @@ def _build_page_status() -> dict:
 
 def get_page_status(*, force: bool = False) -> dict:
     """Return route 4 UI status from current checks."""
-    from listener.status_cache import get_route4_status
+    from util.status_cache import get_route4_status
     return get_route4_status(_build_page_status, force=force)
 
 

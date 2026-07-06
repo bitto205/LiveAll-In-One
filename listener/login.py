@@ -18,7 +18,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from playwright.async_api import async_playwright
 
-from listener.log_util import get_tagged_logger
+from util.playwright_bootstrap import ensure_configured, launch_chromium
+from util.log_util import get_tagged_logger
 
 # ─────────────────────────────────────────────
 # 配置
@@ -123,20 +124,8 @@ _CONFIRM_JS = """
 
 
 async def _launch_installed_chromium(p):
-    last_error: Exception | None = None
-    for channel in ("msedge", "chrome"):
-        try:
-            browser = await p.chromium.launch(
-                channel=channel,
-                headless=False,
-                args=["--disable-blink-features=AutomationControlled"],
-            )
-            logger.info("已启动系统浏览器: %s", "Edge" if channel == "msedge" else "Chrome")
-            return browser
-        except Exception as e:
-            last_error = e
-            logger.debug("启动系统浏览器 %s 失败: %s", channel, e)
-    raise RuntimeError("未能启动系统 Edge/Chrome，请确认已安装") from last_error
+    ensure_configured()
+    return await launch_chromium(p, headless=False, force_system=True)
 
 
 async def _close_browser_quietly(browser) -> None:
@@ -234,7 +223,7 @@ def do_login(state_file: str = STATE_FILE) -> bool:
     """
     import os
     from datetime import datetime
-    from listener.log_util import on_connect_success
+    from util.log_util import on_connect_success
 
     if not os.path.exists(state_file):
         logger.info("%s 不存在，需要登录", state_file)

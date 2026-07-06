@@ -12,13 +12,13 @@ from PySide6.QtWidgets import (
     QLabel, QPushButton, QScrollArea, QFrame,
     QLineEdit, QSizePolicy,
 )
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui  import QColor
 
-import pages.theme as _theme
+import util.theme as _theme
 import config as _cfg
-from pages.widgets import ThemedToggle
-from listener.models import GiftMessage, FollowMessage, LikeMessage, FansclubMessage
+from util.widgets import ThemedToggle
+from util.models import GiftMessage, FollowMessage, LikeMessage, FansclubMessage
 
 
 # ─────────────────────────────────────────────
@@ -305,6 +305,8 @@ class _SettingsTab(QWidget):
 # 主页面（备忘录列表）
 # ─────────────────────────────────────────────
 class _MainTab(QWidget):
+    cleared = Signal()
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self._build()
@@ -359,6 +361,7 @@ class _MainTab(QWidget):
             item = self._list_lay.takeAt(0)
             if w := item.widget():
                 w.deleteLater()
+        self.cleared.emit()
 
 
 # ─────────────────────────────────────────────
@@ -429,6 +432,7 @@ class MemoTool(ToolSingleton, QMainWindow):
         self._stack = QStackedWidget()
         self._main_tab     = _MainTab()
         self._settings_tab = _SettingsTab()
+        self._main_tab.cleared.connect(self._item_map.clear)
         self._stack.addWidget(self._main_tab)
         self._stack.addWidget(self._settings_tab)
         lay.addWidget(self._stack)

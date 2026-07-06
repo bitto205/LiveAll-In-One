@@ -13,8 +13,8 @@ from mitmproxy import http, options
 from mitmproxy.tools.dump import DumpMaster
 
 from listener.LiveProtobuf import parse_frame, try_parse_frame
-from listener.log_util import get_listener_logger, on_connect_success, ensure_console_logging
-from listener.models import ControlMessage
+from util.log_util import get_listener_logger, on_connect_success, ensure_console_logging
+from util.models import ControlMessage
 
 logger = get_listener_logger(3)
 
@@ -50,7 +50,7 @@ def _is_companion_index_modified() -> bool:
 
 def run_page_check() -> dict:
     global _page_proxy_snapshot
-    from listener.status_cache import invalidate_all
+    from util.status_cache import invalidate_all
     invalidate_all()
     proxy = check_system_proxy()
     _page_proxy_snapshot = proxy["enabled"]
@@ -67,7 +67,7 @@ def run_page_check() -> dict:
 
 
 def get_page_status(*, force: bool = False) -> dict:
-    from listener.status_cache import get_route3_status, get_proxy_enabled
+    from util.status_cache import get_route3_status, get_proxy_enabled
 
     def _build() -> dict:
         from listener.listener4 import get_companion_path_fields

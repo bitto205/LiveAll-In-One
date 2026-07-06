@@ -3,14 +3,19 @@ main.py — 应用入口：QApplication + ListenerThread + 消息 Hub
 """
 
 import sys, os
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-os.environ["PLAYWRIGHT_BROWSERS_PATH"] = os.path.join(os.path.dirname(os.path.abspath(__file__)), "browsers")
+from util.paths import app_root
+_ROOT = str(app_root())
+sys.path.insert(0, _ROOT)
+
+from util.playwright_bootstrap import configure_playwright_browsers
+configure_playwright_browsers(_ROOT)
+
 import asyncio
 
 from PySide6.QtWidgets import QApplication
 from PySide6.QtCore    import QThread, Signal, QObject, QtMsgType, qInstallMessageHandler, Qt, QTimer
 
-from tools.overlay_capture import prepare_app_alpha_format
+from util.overlay_capture import prepare_app_alpha_format
 
 prepare_app_alpha_format()
 
@@ -32,7 +37,7 @@ qInstallMessageHandler(_qt_msg_handler)
 from pages.main_page import MainPage
 import pages
 
-from listener.log_util import get_tagged_logger
+from util.log_util import get_tagged_logger
 
 logger = get_tagged_logger("main", __name__)
 
@@ -62,23 +67,25 @@ class ListenerThread(QThread):
     status_changed   = Signal(bool)
 
     def __init__(self, live_id: str,
-                 route: str      = "2",
-                 state_file: str = "state.json",
-                 headless: bool  = True,
-                 debug: bool     = False):
+                 route: str        = "2",
+                 state_file: str   = "state.json",
+                 headless: bool    = True,
+                 debug: bool       = False,
+                 force_system: bool = False):
         super().__init__()
         self._live_id    = live_id
         self._route      = route        # "1" = listener1，"2" = listener2
         self._state_file = state_file
         self._headless   = headless
         self._debug      = debug
+        self._force_system = force_system   # 强制系统 Chrome/Edge（线路 1/2）
         self._loop: asyncio.AbstractEventLoop | None = None
 
     def run(self):
         self._loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self._loop)
         try:
-            from listener.log_util import ensure_console_logging
+            from util.log_util import ensure_console_logging
             ensure_console_logging()
             logger.info("Listener 线程启动，线路=%s", self._route)
             self._loop.run_until_complete(self._listen())
@@ -132,12 +139,13 @@ class ListenerThread(QThread):
         else:
             from listener.listener2 import _run
         await _run(
-            live_id    = self._live_id,
-            callback   = lambda msg: self.message_received.emit(msg),
-            state_file = self._state_file,
-            headless   = self._headless,
-            debug      = self._debug,
-            on_status  = lambda c: self.status_changed.emit(c),
+            live_id      = self._live_id,
+            callback     = lambda msg: self.message_received.emit(msg),
+            state_file   = self._state_file,
+            headless     = self._headless,
+            debug        = self._debug,
+            on_status    = lambda c: self.status_changed.emit(c),
+            force_system = self._force_system,
         )
 
     def stop(self):
@@ -219,7 +227,9 @@ class App(QObject):
         live_id, route = pending
         self._pending_connect = None
 
-        self._thread = ListenerThread(live_id, route=route)
+        import config as _cfg
+        force_system = bool(_cfg.get("use_system_browser", False))
+        self._thread = ListenerThread(live_id, route=route, force_system=force_system)
         self._thread.message_received.connect(self.message_received)
         self._thread.status_changed.connect(self.status_changed)
         self._thread.finished.connect(self._on_listener_finished)
@@ -302,9 +312,12 @@ def _ensure_admin() -> None:
 if __name__ == "__main__":
     _ensure_admin()
 
-    from listener.log_util import ensure_console_logging
+    from util.log_util import ensure_console_logging
     ensure_console_logging()
     logger.info("%s 启动", APP_NAME)
+
+    from util.playwright_bootstrap import log_browser_mode
+    log_browser_mode()
 
     def _defer_save_location():
         try:

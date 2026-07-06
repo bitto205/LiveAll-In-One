@@ -7,7 +7,7 @@ from typing import Callable
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QPixmap
 
-from listener.log_util import get_tagged_logger
+from util.log_util import get_tagged_logger
 
 logger = get_tagged_logger("工具", "tools.common")
 

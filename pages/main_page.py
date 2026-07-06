@@ -11,7 +11,7 @@ import sys, os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pages
-import pages.theme as _theme
+import util.theme as _theme
 import config as _cfg
 
 from PySide6.QtWidgets import (

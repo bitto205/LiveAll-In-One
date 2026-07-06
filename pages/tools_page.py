@@ -6,8 +6,8 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import Qt
 
-import pages.theme as _theme
-from listener.log_util import get_tagged_logger
+import util.theme as _theme
+from util.log_util import get_tagged_logger
 from pages import BasePage, BaseSetting, register
 
 logger = get_tagged_logger("工具", __name__)
