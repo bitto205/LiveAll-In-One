@@ -18,11 +18,25 @@ def _trace_boot(msg: str) -> None:
         pass
 
 
-def _launcher_exe() -> str:
-    return os.path.abspath(sys.argv[0])
+def _resolve_uac_launch() -> tuple[str, str | None]:
+    """ShellExecuteW 的 lpFile / lpParameters；必须在 os.chdir 之前调用。"""
+    from util.paths import is_compiled
+
+    script = os.path.abspath(sys.argv[0])
+    extra = [f'"{a}"' for a in sys.argv[1:]]
+
+    if is_compiled():
+        # 打包版：直接以 exe 提权，参数仅 argv[1:]
+        params = " ".join(extra) if extra else None
+        return script, params
+
+    # 开发版：用 Python 解释器提权，脚本路径作为参数
+    py = os.path.abspath(sys.executable)
+    params = " ".join([f'"{script}"', *extra])
+    return py, params
 
 
-def _ensure_admin() -> None:
+def _ensure_admin(launcher_exe: str, launcher_params: str | None) -> None:
     from util.paths import app_root
     import ctypes
 
@@ -31,11 +45,11 @@ def _ensure_admin() -> None:
         _trace_boot("admin ok")
         return
     _trace_boot("requesting UAC elevation")
-    exe = _launcher_exe()
-    params = " ".join(f'"{a}"' for a in sys.argv[1:]) if len(sys.argv) > 1 else None
-    rc = ctypes.windll.shell32.ShellExecuteW(None, "runas", exe, params, root, 1)
+    rc = ctypes.windll.shell32.ShellExecuteW(
+        None, "runas", launcher_exe, launcher_params, root, 1,
+    )
     if rc <= 32:
-        _trace_boot(f"UAC launch failed exe={exe} rc={rc}")
+        _trace_boot(f"UAC launch failed exe={launcher_exe} rc={rc}")
         try:
             ctypes.windll.user32.MessageBoxW(
                 0,
@@ -55,10 +69,11 @@ if __name__ == "__main__":
     _trace_boot("launcher entry")
     from util.paths import app_root
 
+    launcher_exe, launcher_params = _resolve_uac_launch()
     root = app_root()
     os.chdir(root)
     sys.path.insert(0, str(root))
-    _ensure_admin()
+    _ensure_admin(launcher_exe, launcher_params)
 
     _trace_boot("loading app_main")
     try:

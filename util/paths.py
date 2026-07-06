@@ -6,7 +6,7 @@ import sys
 from pathlib import Path
 
 
-def _is_compiled() -> bool:
+def is_compiled() -> bool:
     if getattr(sys, "frozen", False):
         return True
     try:
@@ -18,7 +18,7 @@ def _is_compiled() -> bool:
 
 def app_root() -> Path:
     """项目根目录：开发时为仓库根；打包后为 exe 所在目录。"""
-    if _is_compiled():
+    if is_compiled():
         return Path(os.path.abspath(sys.argv[0])).resolve().parent
     return Path(__file__).resolve().parent.parent
 
