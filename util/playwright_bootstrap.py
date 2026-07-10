@@ -10,15 +10,15 @@ from util.log_util import get_tagged_logger
 logger = get_tagged_logger("浏览器", __name__)
 
 ENV_USE_SYSTEM = "LIVEAIO_USE_SYSTEM_BROWSER"
+ENV_BUNDLED_EXE = "LIVEAIO_BUNDLED_CHROME_EXE"
 _BASE_ARGS = ["--disable-blink-features=AutomationControlled", "--no-sandbox"]
 
 # Chrome headless 部分环境需 CLI 显式 new 模式
 _CHROME_HEADLESS_ARGS = ("--headless=new",)
 
 _WIN_CANDIDATES = (
-    ("chromium-*", "chrome-win64", "chrome.exe"),
-    ("chromium-*", "chrome-win", "chrome.exe"),
     ("chromium_headless_shell-*", "chrome-headless-shell-win64", "chrome-headless-shell.exe"),
+    ("chromium_headless_shell-*", "chrome-headless-shell-win32", "chrome-headless-shell.exe"),
 )
 
 
@@ -34,8 +34,6 @@ def _find_bundled_exe(browsers_dir: Path) -> Path | None:
         return None
     for glob_pat, sub, exe in _WIN_CANDIDATES:
         for d in browsers_dir.glob(glob_pat):
-            if glob_pat == "chromium-*" and "headless_shell" in d.name:
-                continue
             path = d / sub / exe
             if path.is_file():
                 return path
@@ -49,6 +47,19 @@ def use_system_browser() -> bool:
 def mark_system_browser() -> None:
     os.environ[ENV_USE_SYSTEM] = "1"
     os.environ.pop("PLAYWRIGHT_BROWSERS_PATH", None)
+    os.environ.pop(ENV_BUNDLED_EXE, None)
+
+
+def bundled_chrome_exe(browsers_dir: Path | None = None) -> Path | None:
+    """定位 bundled headless shell；不依赖 Playwright 驱动内置的 revision 号。"""
+    cached = os.environ.get(ENV_BUNDLED_EXE)
+    if cached and Path(cached).is_file():
+        return Path(cached)
+    root = Path(browsers_dir) if browsers_dir else _app_root() / "browsers"
+    exe = _find_bundled_exe(root)
+    if exe is not None:
+        os.environ[ENV_BUNDLED_EXE] = str(exe)
+    return exe
 
 
 def prefer_system_browser() -> bool:
@@ -77,7 +88,7 @@ def configure_playwright_browsers(
         return False
     root = Path(app_root) if app_root else _app_root()
     browsers = root / "browsers"
-    exe = _find_bundled_exe(browsers)
+    exe = bundled_chrome_exe(browsers)
     if exe is not None:
         os.environ["PLAYWRIGHT_BROWSERS_PATH"] = str(browsers)
         os.environ[ENV_USE_SYSTEM] = "0"
@@ -129,11 +140,20 @@ async def launch_chromium(
         force_system = True
 
     if not force_system and not use_system_browser():
-        try:
-            return await p.chromium.launch(headless=headless, args=_BASE_ARGS)
-        except Exception as e:
-            logger.warning("bundled 浏览器启动失败，回退系统浏览器: %s", e)
+        exe = bundled_chrome_exe()
+        if exe is None:
+            logger.warning("未找到 bundled headless shell，回退系统浏览器")
             mark_system_browser()
+        else:
+            try:
+                return await p.chromium.launch(
+                    headless=headless,
+                    executable_path=str(exe),
+                    args=_BASE_ARGS,
+                )
+            except Exception as e:
+                logger.warning("bundled 浏览器启动失败，回退系统浏览器: %s", e)
+                mark_system_browser()
 
     channels = _system_channels(channel)
     launch_headless, args = _system_launch_opts(headless)
@@ -161,5 +181,9 @@ def log_browser_mode() -> None:
         reason = "用户偏好" if prefer_system_browser() else "未找到项目 browsers/"
         logger.info("Playwright: 使用系统 Chrome/Edge（%s）", reason)
     else:
-        path = os.environ.get("PLAYWRIGHT_BROWSERS_PATH", "")
-        logger.info("Playwright: 使用项目内浏览器 (%s)", path)
+        exe = bundled_chrome_exe()
+        if exe is not None:
+            logger.info("Playwright: 使用项目内浏览器 (%s)", exe)
+        else:
+            path = os.environ.get("PLAYWRIGHT_BROWSERS_PATH", "")
+            logger.info("Playwright: 使用项目内浏览器 (%s)", path)

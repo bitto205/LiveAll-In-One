@@ -10,6 +10,7 @@ from PySide6.QtCore import Qt, QTimer, QThread, Signal
 
 import util.theme as _theme
 import config as _cfg
+from util.features import picker_routes, route3_enabled
 from util.log_util import get_tagged_logger
 from pages import BasePage, register
 
@@ -117,12 +118,12 @@ def _pick_companion_dir(home) -> None:
     ok, msg = set_manual_companion_dir(path)
     home.toast.show_msg(msg, error=not ok)
     if ok:
-        from listener.listener3 import run_page_check
-        from listener.listener4 import run_page_check as run_r4
-        run_page_check()
-        run_r4()
         if home._route3_page:
+            from listener.listener3 import run_page_check
+            run_page_check()
             home._route3_page.refresh_status()
+        from listener.listener4 import run_page_check as run_r4
+        run_r4()
         if home._route4_page:
             home._route4_page.refresh_status()
 
@@ -265,7 +266,7 @@ class _RoutePickerPage(QWidget):
         grid.setSpacing(16)
         grid.setContentsMargins(0, 0, 0, 0)
 
-        for i, route in enumerate(("1", "2", "3", "4")):
+        for i, route in enumerate(picker_routes()):
             card = self._make_card(route)
             self._cards[route] = card
             grid.addWidget(card, i // 2, i % 2)
@@ -1161,7 +1162,6 @@ class _Route4Page(QWidget, ConnPageMixin):
 class HomePage(BasePage):
 
     _IDX_PICKER = 0
-    _IDX_ROUTE  = {"1": 1, "2": 2, "3": 3, "4": 4}
 
     def __init__(self):
         super().__init__()
@@ -1170,6 +1170,7 @@ class HomePage(BasePage):
         self._connected_route: str | None = None
         self._route3_page: _Route3Page | None = None
         self._route4_page: _Route4Page | None = None
+        self._idx_route: dict[str, int] = {}
         self._switching_listener = False
         self._env_check_thread: _RouteEnvCheckThread | None = None
         self._env_check_pending: str | None = None
@@ -1317,8 +1318,14 @@ class HomePage(BasePage):
             self._start_env_check(pending)
 
     def _enter_route(self, route: str):
+        if route == "3" and not route3_enabled():
+            self.show_picker()
+            return
+        if route not in self._idx_route:
+            self.show_picker()
+            return
         _cfg.set("route", route)
-        self._stack.setCurrentIndex(self._IDX_ROUTE[route])
+        self._stack.setCurrentIndex(self._idx_route[route])
         if route in self._web_pages:
             self._web_pages[route].refresh_login()
         elif route == "3" and self._route3_page:
@@ -1359,6 +1366,9 @@ class HomePage(BasePage):
         self._reset_other_listener_pages(self.get_active_listener_route())
 
     def _build(self):
+        if _cfg.get("route") == "3" and not route3_enabled():
+            _cfg.set("route", "2")
+
         self._toast = _Toast(self)
 
         self._stack = QStackedWidget()
@@ -1370,11 +1380,18 @@ class HomePage(BasePage):
             page = _WebRoutePage(route, self)
             self._web_pages[route] = page
             self._stack.addWidget(page)
+            self._idx_route[route] = self._stack.count() - 1
 
-        self._route3_page = _Route3Page(self)
+        if route3_enabled():
+            self._route3_page = _Route3Page(self)
+            self._stack.addWidget(self._route3_page)
+            self._idx_route["3"] = self._stack.count() - 1
+        else:
+            self._route3_page = None
+
         self._route4_page = _Route4Page(self)
-        self._stack.addWidget(self._route3_page)
         self._stack.addWidget(self._route4_page)
+        self._idx_route["4"] = self._stack.count() - 1
 
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)

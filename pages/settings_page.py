@@ -196,8 +196,7 @@ class AccountSettings(BaseSetting):
 
     def _refresh(self):
         import json, time
-        from util.paths import state_file
-        f = str(state_file())
+        f = "state.json"
         if not os.path.exists(f):
             self._status.setText("未登录")
             return
@@ -218,27 +217,20 @@ class AccountSettings(BaseSetting):
                     return
             self._status.setText("⚠️  未找到登录凭证")
         except Exception as e:
-            logger.debug("登录状态检测失败: %s", e)
             self._status.setText(f"检测失败: {e}")
 
     def _do_login(self):
-        if self._login_thread and self._login_thread.isRunning():
-            return
-        logger.info("开始重新登录")
-        self._btn.setText("登录中...")
-        self._btn.setEnabled(False)
-        self._login_thread = _AccountLoginThread(self)
-        self._login_thread.finished.connect(self._on_login_done)
-        self._login_thread.start()
-
-    def _on_login_done(self, ok: bool, err: str):
-        self._btn.setText("重新登录")
-        self._btn.setEnabled(True)
-        self._login_thread = None
-        if ok:
+        try:
+            from listener.login import do_login
+            self._btn.setText("登录中...")
+            self._btn.setEnabled(False)
+            do_login()
             self._refresh()
-        else:
-            self._status.setText(f"登录失败: {err}" if err else "登录已取消")
+        except Exception as e:
+            self._status.setText(f"登录失败: {e}")
+        finally:
+            self._btn.setText("重新登录")
+            self._btn.setEnabled(True)
 
 
 # ─────────────────────────────────────────────
