@@ -1,166 +1,84 @@
 """
-main.py — 应用 Hub + 入口
-
-职责：
-    1. 启动 QApplication 和 MainPage
-    2. 管理 ListenerThread（在独立线程跑 asyncio + Playwright）
-    3. 作为数据中转：listener → App 信号 → 所有订阅者
-       多个工具/页面只需 connect(app.message_received) 就能收到数据
-
-启动：
-    python main.py
+main.py — 轻量启动器：先提权，再加载 app_main（避免提权前加载 Qt/Playwright）。
 """
 
-import sys, os
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-os.environ["PLAYWRIGHT_BROWSERS_PATH"] = os.path.join(os.path.dirname(os.path.abspath(__file__)), "browsers")
-import asyncio
-
-from PySide6.QtWidgets import QApplication
-from PySide6.QtCore    import QThread, Signal, QObject
-
-from main_page import MainPage
-import pages   # 触发所有 @register
+import os
+import sys
 
 
-# ─────────────────────────────────────────────
-# ListenerThread — 在独立线程里跑 asyncio
-# ─────────────────────────────────────────────
-class ListenerThread(QThread):
-    message_received = Signal(object)
-    status_changed   = Signal(bool)
+def _trace_boot(msg: str) -> None:
+    try:
+        root = os.path.dirname(os.path.abspath(sys.argv[0]))
+        log = os.path.join(root, "log", "boot.log")
+        os.makedirs(os.path.dirname(log), exist_ok=True)
+        with open(log, "a", encoding="utf-8") as f:
+            from datetime import datetime
+            f.write(f"{datetime.now().isoformat()} | {msg}\n")
+    except Exception:
+        pass
 
-    def __init__(self, live_id: str,
-                 route: str      = "2",
-                 state_file: str = "state.json",
-                 headless: bool  = True,
-                 debug: bool     = False):
-        super().__init__()
-        self._live_id    = live_id
-        self._route      = route        # "1" = listener1，"2" = listener2
-        self._state_file = state_file
-        self._headless   = headless
-        self._debug      = debug
-        self._loop: asyncio.AbstractEventLoop | None = None
 
-    def run(self):
-        self._loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(self._loop)
+def _resolve_uac_launch() -> tuple[str, str | None]:
+    """ShellExecuteW 的 lpFile / lpParameters；必须在 os.chdir 之前调用。"""
+    from util.paths import is_compiled
+
+    script = os.path.abspath(sys.argv[0])
+    extra = [f'"{a}"' for a in sys.argv[1:]]
+
+    if is_compiled():
+        # 打包版：直接以 exe 提权，参数仅 argv[1:]
+        params = " ".join(extra) if extra else None
+        return script, params
+
+    # 开发版：用 Python 解释器提权，脚本路径作为参数
+    py = os.path.abspath(sys.executable)
+    params = " ".join([f'"{script}"', *extra])
+    return py, params
+
+
+def _ensure_admin(launcher_exe: str, launcher_params: str | None) -> None:
+    from util.paths import app_root
+    import ctypes
+
+    root = str(app_root())
+    if ctypes.windll.shell32.IsUserAnAdmin():
+        _trace_boot("admin ok")
+        return
+    _trace_boot("requesting UAC elevation")
+    rc = ctypes.windll.shell32.ShellExecuteW(
+        None, "runas", launcher_exe, launcher_params, root, 1,
+    )
+    if rc <= 32:
+        _trace_boot(f"UAC launch failed exe={launcher_exe} rc={rc}")
         try:
-            self._loop.run_until_complete(self._listen())
-        except RuntimeError as e:
-            if "Event loop stopped before Future completed" not in str(e):
-                import logging
-                logging.getLogger(__name__).error(f"ListenerThread error: {e}")
-        except Exception as e:
-            import logging
-            logging.getLogger(__name__).error(f"ListenerThread error: {e}")
-        finally:
-            try:
-                pending = asyncio.all_tasks(self._loop)
-                for t in pending:
-                    t.cancel()
-                if pending:
-                    self._loop.run_until_complete(
-                        asyncio.gather(*pending, return_exceptions=True)
-                    )
-            except Exception:
-                pass
-            self._loop.close()
-
-    async def _listen(self):
-        if self._route == "1":
-            from listener.listener1 import _run
-        else:
-            from listener.listener2 import _run
-        await _run(
-            live_id    = self._live_id,
-            callback   = lambda msg: self.message_received.emit(msg),
-            state_file = self._state_file,
-            headless   = self._headless,
-            debug      = self._debug,
-            on_status  = lambda c: self.status_changed.emit(c),
-        )
-
-    def stop(self):
-        """发出停止信号，不阻塞主线程。"""
-        if self._loop and not self._loop.is_closed():
-            self._loop.call_soon_threadsafe(self._loop.stop)
-        self.quit()
-        # 不调 wait()，否则阻塞 Qt 主线程导致 UI 卡住
-
-
-# ─────────────────────────────────────────────
-# App — 应用 Hub
-# ─────────────────────────────────────────────
-class App(QObject):
-    """
-    数据中转中心。
-
-    所有对 listener 数据感兴趣的组件都连接这里的信号：
-        app.message_received.connect(my_handler)
-        app.status_changed.connect(my_status_handler)
-
-    连接 / 断开直播间：
-        app.connect("sanpan0.0")
-        app.disconnect()
-    """
-
-    # ── 对外开放的信号（多个页面/工具可同时订阅）──
-    message_received = Signal(object)
-    status_changed   = Signal(bool)
-
-    def __init__(self, argv: list):
-        super().__init__()
-        self._qt     = QApplication(argv)
-        self._thread: ListenerThread | None = None
-
-        # 创建主窗口
-        self._win = MainPage()
-
-        # 把 App 信号接到 MainPage 的广播方法（统一分发给所有已注册页面）
-        self.message_received.connect(self._win.broadcast_message)
-        self.status_changed.connect(self._win.broadcast_status)
-
-        # 注入 connect/disconnect 到 HomePage
-        from pages.home_page import HomePage
-        home = self._win.get_page(HomePage)
-        if home:
-            home.set_callbacks(
-                on_connect    = self.connect,
-                on_disconnect = self.disconnect,
+            ctypes.windll.user32.MessageBoxW(
+                0,
+                f"无法以管理员身份启动 LiveAIO（错误码 {rc}）。\n"
+                f"请右键 exe →「以管理员身份运行」。",
+                "LiveAIO",
+                0x10,
             )
-
-    # ── 连接直播间 ────────────────────────────────
-    def connect(self, live_id: str, route: str = "2"):
-        """启动 ListenerThread，连接指定直播间。route='1' 用 listener1，'2' 用 listener2。"""
-        self.disconnect()
-        self._thread = ListenerThread(live_id, route=route)
-        self._thread.message_received.connect(self.message_received)
-        self._thread.status_changed.connect(self.status_changed)
-        self._thread.start()
-
-    # ── 断开直播间 ────────────────────────────────
-    def disconnect(self):
-        """停止当前 ListenerThread，不阻塞主线程。"""
-        if self._thread:
-            thread = self._thread
-            self._thread = None
-            # 线程结束后让 Qt 自动回收，主线程不等待
-            thread.finished.connect(thread.deleteLater)
-            thread.stop()
-
-    # ── 运行 ──────────────────────────────────────
-    def run(self) -> int:
-        self._win.show()
-        result = self._qt.exec()
-        self.disconnect()   # 退出前清理
-        return result
+        except Exception:
+            pass
+    else:
+        _trace_boot("UAC child launched, parent exit")
+    sys.exit(0)
 
 
-# ─────────────────────────────────────────────
-# 入口
-# ─────────────────────────────────────────────
 if __name__ == "__main__":
+    _trace_boot("launcher entry")
+    from util.paths import app_root
 
-    sys.exit(App(sys.argv).run())
+    launcher_exe, launcher_params = _resolve_uac_launch()
+    root = app_root()
+    os.chdir(root)
+    sys.path.insert(0, str(root))
+    _ensure_admin(launcher_exe, launcher_params)
+
+    _trace_boot("loading app_main")
+    try:
+        from app_main import run_app
+        sys.exit(run_app())
+    except Exception:
+        _trace_boot("app_main failed")
+        raise

@@ -51,6 +51,13 @@ def get_tools() -> list[_ToolMeta]:
 # ─────────────────────────────────────────────
 # 注册所有工具（在这里 import 触发 @register_tool）
 # ─────────────────────────────────────────────
-from tools.memo_tool import MemoTool   # noqa  触发装饰器
+from tools.memo_tool     import MemoTool     # noqa
+from tools.danmu_tool    import DanmuTool    # noqa
+from tools.overtime_tool import OvertimeTool # noqa
 
-__all__ = ["MemoTool", "get_tools", "register_tool"]
+from tools.tool_common import shutdown_all_tools  # noqa: E402
+
+__all__ = [
+    "MemoTool", "DanmuTool", "OvertimeTool",
+    "get_tools", "register_tool", "shutdown_all_tools",
+]

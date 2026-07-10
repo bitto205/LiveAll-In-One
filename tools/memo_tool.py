@@ -12,24 +12,25 @@ from PySide6.QtWidgets import (
     QLabel, QPushButton, QScrollArea, QFrame,
     QLineEdit, QSizePolicy,
 )
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui  import QColor
 
-import theme as _theme
+import util.theme as _theme
 import config as _cfg
-from widgets import ThemedToggle
-from models import GiftMessage, FollowMessage, LikeMessage, FansclubMessage
+from util.widgets import ThemedToggle
+from util.models import GiftMessage, FollowMessage, LikeMessage, FansclubMessage
 
 
 # ─────────────────────────────────────────────
 # 配置键前缀
 # ─────────────────────────────────────────────
 _K = {
-    "gift_on":    "memo.gift.enabled",
-    "gift_stack": "memo.gift.stack",
-    "follow_on":  "memo.follow.enabled",
-    "like_on":    "memo.like.enabled",
-    "like_stack": "memo.like.stack",
+    "gift_on":       "memo.gift.enabled",
+    "gift_stack":    "memo.gift.stack",
+    "gift_min_dia":  "memo.gift.min_diamonds",
+    "follow_on":     "memo.follow.enabled",
+    "like_on":       "memo.like.enabled",
+    "like_stack":    "memo.like.stack",
 }
 
 
@@ -67,6 +68,18 @@ def _qss():
 
 
 # _Toggle 已移至 widgets.ThemedToggle，下面直接使用
+
+
+def _gift_diamonds(msg: GiftMessage) -> int | None:
+    from gift.gift_info import get_diamonds, all_gifts
+    d = get_diamonds(msg.gift)
+    if d is not None:
+        return d
+    if msg.gift_id:
+        for info in all_gifts().values():
+            if info.get("gift_id") == msg.gift_id:
+                return info.get("price")
+    return None
 
 
 def _row(label_text: str, widget: QWidget) -> QHBoxLayout:
@@ -171,6 +184,7 @@ class _SettingsTab(QWidget):
             [
                 ("启用", ThemedToggle(_K["gift_on"])),
                 ("叠加", ThemedToggle(_K["gift_stack"])),
+                ("最低钻石数", self._make_diamond_input()),
             ]
         ))
 
@@ -236,6 +250,37 @@ class _SettingsTab(QWidget):
             lay.addLayout(_row(label, widget))
         return card
 
+    def _make_diamond_input(self) -> QWidget:
+        from PySide6.QtWidgets import QHBoxLayout
+        wrap = QWidget()
+        wrap.setStyleSheet("background:transparent;")
+        row = QHBoxLayout(wrap)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(6)
+
+        inp = QLineEdit(str(_cfg.get(_K["gift_min_dia"], 0)))
+        inp.setFixedSize(80, 30)
+        inp.setAlignment(Qt.AlignCenter)
+        inp.setPlaceholderText("0")
+
+        hint = QLabel("0 = 不过滤")
+        hint.setStyleSheet(f"background:transparent; color:{_C()['text_muted']}; font-size:11px;")
+
+        def _save():
+            try:
+                val = int(inp.text().strip())
+                val = max(0, val)
+            except ValueError:
+                val = 0
+            inp.setText(str(val))
+            _cfg.set(_K["gift_min_dia"], val)
+
+        inp.editingFinished.connect(_save)
+        row.addWidget(inp)
+        row.addWidget(hint)
+        row.addStretch()
+        return wrap
+
     def _spin(self, attr: str, default: int) -> QLineEdit:
         w = QLineEdit(str(default))
         w.setFixedSize(72, 34)
@@ -260,6 +305,8 @@ class _SettingsTab(QWidget):
 # 主页面（备忘录列表）
 # ─────────────────────────────────────────────
 class _MainTab(QWidget):
+    cleared = Signal()
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self._build()
@@ -314,29 +361,29 @@ class _MainTab(QWidget):
             item = self._list_lay.takeAt(0)
             if w := item.widget():
                 w.deleteLater()
+        self.cleared.emit()
 
 
 # ─────────────────────────────────────────────
 # 主窗口
 # ─────────────────────────────────────────────
-def register_tool(name, desc="", icon="🔧", order=99):
-    """延迟 import 避免循环引用，直接返回装饰器。"""
-    def decorator(cls):
-        from tools import _REGISTRY, _ToolMeta
-        _REGISTRY.append(_ToolMeta(cls, name, desc, icon, order))
-        return cls
-    return decorator
+from tools import register_tool
+
+
+from tools.tool_common import ToolSingleton
 
 
 @register_tool(name="备忘录", desc="将礼物、关注、点赞记录为可消除的列表条目",
                icon="📋", order=0)
-class MemoTool(QMainWindow):
+class MemoTool(ToolSingleton, QMainWindow):
     """
     备忘录工具窗口。
     外部调用 process_message(msg) 传入直播消息。
     """
 
     def __init__(self, parent=None):
+        if not ToolSingleton.guard_init(self):
+            return
         super().__init__(parent, Qt.Window)
         self.setWindowTitle("备忘录")
         self.setMinimumSize(380, 560)
@@ -344,8 +391,6 @@ class MemoTool(QMainWindow):
 
         # key → _MemoItem，用于叠加查找
         self._item_map: dict[str, _MemoItem] = {}
-        # key → 上次收到的 comboCount，用于增量计算（兼容无 repeatEnd 的 listener2）
-        self._combo_counts: dict[str, int] = {}
 
         self._build()
         self.setStyleSheet(_qss())
@@ -387,6 +432,7 @@ class MemoTool(QMainWindow):
         self._stack = QStackedWidget()
         self._main_tab     = _MainTab()
         self._settings_tab = _SettingsTab()
+        self._main_tab.cleared.connect(self._item_map.clear)
         self._stack.addWidget(self._main_tab)
         self._stack.addWidget(self._settings_tab)
         lay.addWidget(self._stack)
@@ -414,6 +460,13 @@ class MemoTool(QMainWindow):
     def _handle_gift(self, msg):
         if not _cfg.get(_K["gift_on"], True):
             return
+
+        # 钻石过滤
+        min_dia = _cfg.get(_K["gift_min_dia"], 0)
+        if min_dia > 0:
+            diamonds = _gift_diamonds(msg)
+            if diamonds is not None and diamonds < min_dia:
+                return
 
         stack = _cfg.get(_K["gift_stack"], True)
         key   = f"gift:{msg.user}:{msg.gift}"

@@ -10,35 +10,50 @@ login.py — 登录管理
 
 import asyncio
 import json
-import logging
 import os
+import sys
 import time
-from datetime import datetime
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from playwright.async_api import async_playwright
+
+from util.playwright_bootstrap import ensure_configured, launch_chromium
+from util.log_util import get_tagged_logger
+from util.paths import state_file as _default_state_file
 
 # ─────────────────────────────────────────────
 # 配置
 # ─────────────────────────────────────────────
-STATE_FILE = "state.json"
+LOGIN_URL = "https://www.douyin.com/"
 
-os.makedirs("log", exist_ok=True)
-_ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)s | %(message)s",
-    handlers=[
-        logging.FileHandler(f"log/login_{_ts}.log", encoding="utf-8"),
-        logging.StreamHandler(),
-    ],
-)
-logger = logging.getLogger(__name__)
+logger = get_tagged_logger("登录", "listener.login")
 
 
-# ─────────────────────────────────────────────
-# 第一层：检查 sessionid 是否过期
-# ─────────────────────────────────────────────
+def _state_path(state_file: str | None = None) -> str:
+    return state_file or str(_default_state_file())
+
+
+def get_login_ui_state(state_file: str | None = None) -> tuple[str, bool]:
+    """线路 1/2 登录态 UI：(状态文案, 登录按钮是否可点)。"""
+    state_file = _state_path(state_file)
+    if not os.path.exists(state_file):
+        return "❌ 未登录", True
+    ok, detail = _check_cookie_expiry(state_file)
+    if not ok:
+        if "过期" in detail:
+            return "⚠️ 登录已过期", True
+        if "未找到" in detail:
+            return "⚠️ 未找到登录凭证", True
+        return f"❌ {detail}", True
+    if "无过期" in detail:
+        return "✅ 已登录", False
+    if "还剩" in detail:
+        days = detail.split("还剩约")[-1].split("天")[0].strip()
+        return f"✅ 已登录，还剩约 {days} 天", False
+    return "✅ 已登录", False
+
+
 def _check_cookie_expiry(state_file: str) -> tuple[bool, str]:
     try:
         with open(state_file, "r", encoding="utf-8") as f:
@@ -104,7 +119,6 @@ _CONFIRM_JS = """
         document.body.appendChild(btn);
     };
 
-    // 每次导航后重新注入（add_init_script 在 DOM 就绪前执行，需要等 DOMContentLoaded）
     if (document.readyState === 'loading') {
         document.addEventListener('DOMContentLoaded', inject);
     } else {
@@ -114,17 +128,31 @@ _CONFIRM_JS = """
 """
 
 
+async def _launch_installed_chromium(p):
+    ensure_configured()
+    return await launch_chromium(p, headless=False, force_system=True)
+
+
+async def _close_browser_quietly(browser) -> None:
+    try:
+        await asyncio.wait_for(browser.close(), timeout=3)
+    except Exception as e:
+        logger.debug("关闭登录浏览器超时或失败: %s", e)
+
+
 # ─────────────────────────────────────────────
-# 第二层：弹出浏览器扫码
+# 第二层：Playwright 控制系统 Chromium 浏览器登录
 # ─────────────────────────────────────────────
 async def _run_login(state_file: str) -> bool:
-    logger.info("启动登录流程，请在浏览器中扫码，完成后点击页面右下角按钮...")
+    logger.info("启动登录流程，请在系统 Edge/Chrome 中扫码，完成后点击右下角按钮…")
 
     async with async_playwright() as p:
-        browser = await p.chromium.launch(
-            headless=False,
-            args=["--disable-blink-features=AutomationControlled"],
-        )
+        try:
+            browser = await _launch_installed_chromium(p)
+        except Exception as e:
+            logger.error("启动系统 Chromium 浏览器失败: %s", e)
+            return False
+
         context = await browser.new_context(
             user_agent=(
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -135,12 +163,10 @@ async def _run_login(state_file: str) -> bool:
         )
         page = await context.new_page()
         await page.add_init_script(_CONFIRM_JS)
-        await page.goto("https://www.douyin.com/", wait_until="domcontentloaded")
+        await page.goto(LOGIN_URL, wait_until="domcontentloaded")
 
         while True:
-            logger.info("等待手动确认（点击页面右下角按钮）...")
-
-            # 等用户点按钮，浏览器关闭时会抛异常
+            logger.info("等待手动确认（点击页面右下角按钮）…")
             try:
                 await page.wait_for_function(
                     "() => window.__LOGIN_DONE__ === true",
@@ -148,23 +174,20 @@ async def _run_login(state_file: str) -> bool:
                 )
             except Exception:
                 logger.warning("浏览器已关闭，登录取消")
+                await _close_browser_quietly(browser)
                 return False
 
             await asyncio.sleep(1)
             await context.storage_state(path=state_file)
-
             valid, reason = _check_cookie_expiry(state_file)
-
             if valid:
-                logger.info(f"✅ 登录成功，已保存 {state_file}（{reason}）")
-                await browser.close()
+                logger.info("登录成功，已保存 %s（%s）", state_file, reason)
+                await _close_browser_quietly(browser)
                 return True
 
-            # 未检测到登录态 → 页面注入红色提示，恢复按钮，继续等待
-            logger.warning(f"⚠️  未检测到登录态（{reason}），提示用户重试")
+            logger.warning("未检测到登录态（%s），等待重试", reason)
             await page.evaluate("""
                 (() => {
-                    // 恢复按钮
                     const btn = document.getElementById('__dy_login_btn__');
                     if (btn) {
                         btn.innerText = '✅  我已完成登录';
@@ -172,7 +195,6 @@ async def _run_login(state_file: str) -> bool:
                     }
                     window.__LOGIN_DONE__ = false;
 
-                    // 注入红色提示（3 秒后自动消失）
                     const old = document.getElementById('__dy_login_warn__');
                     if (old) old.remove();
                     const warn = document.createElement('div');
@@ -194,33 +216,35 @@ async def _run_login(state_file: str) -> bool:
                     setTimeout(() => warn.remove(), 3000);
                 })();
             """)
-            # 继续下一轮循环，等待再次点击按钮
-
-    return False   # 理论上不会执行到这里，兜底
 
 
 # ─────────────────────────────────────────────
 # 公开接口
 # ─────────────────────────────────────────────
-def do_login(state_file: str = STATE_FILE) -> bool:
+def do_login(state_file: str | None = None) -> bool:
     """
-    两层检测，按需登录：
-        1. state.json 不存在  →  扫码
-        2. state.json 存在    →  检查 sessionid 过期时间
-               未过期  →  直接返回 True，跳过登录
-               已过期  →  扫码
+    两层检测，按需登录。
     返回 True = 登录态有效，False = 登录失败。
     """
+    import os
+    from datetime import datetime
+    from util.log_util import on_connect_success
+
+    state_file = _state_path(state_file)
     if not os.path.exists(state_file):
-        logger.info(f"{state_file} 不存在，需要登录")
+        logger.info("%s 不存在，需要登录", state_file)
     else:
         valid, reason = _check_cookie_expiry(state_file)
         if valid:
-            logger.info(f"✅ 登录有效：{reason}")
+            on_connect_success("login")
+            logger.info("登录有效：%s", reason)
             return True
-        logger.warning(f"⚠️  登录失效：{reason}，重新登录")
+        logger.warning("登录失效：%s，重新登录", reason)
 
-    return asyncio.run(_run_login(state_file))
+    ok = asyncio.run(_run_login(state_file))
+    if ok:
+        on_connect_success("login")
+    return ok
 
 
 # ─────────────────────────────────────────────
@@ -228,4 +252,4 @@ def do_login(state_file: str = STATE_FILE) -> bool:
 # ─────────────────────────────────────────────
 if __name__ == "__main__":
     ok = do_login()
-    logger.info("🎉 就绪" if ok else "❌ 登录失败")
+    logger.info("登录就绪" if ok else "登录失败")

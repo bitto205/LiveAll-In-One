@@ -1,27 +1,81 @@
 """
-pages/__init__.py — 唯一的注册表
-
-新增 page：在这里 import 并加入 PAGES（如需）和 SETTINGS（如需设置面板）。
-main_page.py 和 settings_page.py 都只从这里取数据，不直接 import 具体文件。
+pages/__init__.py — 页面与设置面板注册入口
 """
+from __future__ import annotations
+
 import sys, os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-# ── 页面注册（触发 @register）──
+from PySide6.QtWidgets import QWidget
+
+
+class _PageMeta:
+    def __init__(self, cls: type, icon: str, name: str,
+                 order: int, section: str):
+        self.cls     = cls
+        self.icon    = icon
+        self.name    = name
+        self.order   = order
+        self.section = section
+
+
+_REGISTRY: list[_PageMeta] = []
+
+
+def register(icon: str, name: str, order: int = 99,
+             section: str = "main"):
+    def decorator(cls):
+        _REGISTRY.append(_PageMeta(cls, icon, name, order, section))
+        return cls
+    return decorator
+
+
+def get_pages() -> list[_PageMeta]:
+    main   = sorted([p for p in _REGISTRY if p.section == "main"],
+                    key=lambda p: p.order)
+    bottom = sorted([p for p in _REGISTRY if p.section == "bottom"],
+                    key=lambda p: p.order)
+    return main + bottom
+
+
+class BasePage(QWidget):
+    def on_message(self, msg):
+        pass
+
+    def on_status_change(self, connected: bool):
+        pass
+
+
+class BaseSetting(QWidget):
+    name:  str = ""
+    order: int = 99
+
+    def build_section(self, title: str):
+        from PySide6.QtWidgets import QVBoxLayout, QLabel
+        card = QWidget()
+        card.setObjectName("SettingCard")
+        lay = QVBoxLayout(card)
+        lay.setContentsMargins(20, 16, 20, 16)
+        lay.setSpacing(12)
+        lbl = QLabel(title)
+        lbl.setObjectName("SettingCardTitle")
+        lay.addWidget(lbl)
+        return card, lay
+
 from pages.home_page     import HomePage
 from pages.tools_page    import ToolsPage, ToolsSettings
 from pages.settings_page import SettingsPage, SystemSettings
 
-# ── main_page.py 读这个 ──
 SETTINGS_PAGE = SettingsPage
 
-# ── settings_page.py 读这个：按 order 排列所有设置面板 ──
 SETTINGS: list[type] = sorted(
     [SystemSettings, ToolsSettings],
     key=lambda cls: cls.order,
 )
 
 __all__ = [
+    "register", "get_pages",
+    "BasePage", "BaseSetting",
     "HomePage", "ToolsPage",
     "SettingsPage", "SETTINGS_PAGE", "SETTINGS",
 ]

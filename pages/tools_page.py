@@ -6,8 +6,11 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import Qt
 
-import theme as _theme
-from base_page import BasePage, BaseSetting, register
+import util.theme as _theme
+from util.log_util import get_tagged_logger
+from pages import BasePage, BaseSetting, register
+
+logger = get_tagged_logger("工具", __name__)
 
 
 @register(icon="⚒", name="工具", order=1)
@@ -15,6 +18,8 @@ class ToolsPage(BasePage):
     def __init__(self):
         super().__init__()
         self._open_wins: dict[str, object] = {}   # name → window
+        from tools.tool_common import bind_tools_page
+        bind_tools_page(self)
         self._build()
         _theme.on_change(lambda _: self._rebuild())
 
@@ -93,13 +98,28 @@ class ToolsPage(BasePage):
 
     def _open_tool(self, meta):
         name = meta.name
-        win  = self._open_wins.get(name)
-        if win is None or not win.isVisible():
-            win = meta.cls()
-            self._open_wins[name] = win
+        win = self._open_wins.get(name)
+        if win is not None:
+            win.show()
+            win.raise_()
+            win.activateWindow()
+            return
+        from PySide6.QtCore import QTimer
+        QTimer.singleShot(0, lambda m=meta: self._open_tool_deferred(m))
+
+    def _open_tool_deferred(self, meta):
+        name = meta.name
+        if self._open_wins.get(name) is not None:
+            return
+        win = meta.cls()
+        self._open_wins[name] = win
+        logger.info("打开工具: %s", name)
         win.show()
         win.raise_()
         win.activateWindow()
+
+    def unregister_tool(self, name: str) -> None:
+        self._open_wins.pop(name, None)
 
     def _rebuild(self):
         """主题切换时重建 UI。"""
@@ -112,15 +132,31 @@ class ToolsPage(BasePage):
 
     # ── 消息转发给所有已打开的工具 ──────────────
     def on_message(self, msg):
-        for name, win in self._open_wins.items():
-            if win and win.isVisible() and hasattr(win, "process_message"):
-                try:
-                    win.process_message(msg)
-                except Exception as e:
-                    import logging
-                    logging.getLogger(__name__).error(
-                        f"[ToolsPage] {name}.process_message 异常: {e}", exc_info=True
-                    )
+        seen: set[int] = set()
+
+        def _dispatch(win):
+            if not win or id(win) in seen:
+                return
+            seen.add(id(win))
+            if not hasattr(win, "process_message"):
+                return
+            try:
+                win.process_message(msg)
+            except Exception as e:
+                tool_name = type(win).__name__
+                logger.error("工具 %s 消息处理异常: %s", tool_name, e, exc_info=True)
+
+        for win in self._open_wins.values():
+            _dispatch(win)
+
+        from tools.memo_tool import MemoTool
+        from tools.danmu_tool import DanmuTool
+        from tools.overtime_tool import OvertimeTool
+
+        for tool_cls in (MemoTool, DanmuTool, OvertimeTool):
+            inst = getattr(tool_cls, "_instance", None)
+            if inst is not None:
+                _dispatch(inst)
 
 
 class ToolsSettings(BaseSetting):
