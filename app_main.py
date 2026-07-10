@@ -49,7 +49,8 @@ def _load_app_icon() -> QIcon | None:
     if not icon_path.is_file():
         return None
     icon = QIcon(str(icon_path))
-    if icon.isNull():
+    # QIcon.isNull() 只表示对象是否初始化；用 pixmap 可验证资源是否可实际解码渲染。
+    if icon.pixmap(64, 64).isNull():
         return None
     return icon
 
