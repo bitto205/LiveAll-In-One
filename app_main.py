@@ -5,6 +5,7 @@ import asyncio
 import sys
 
 from PySide6.QtCore import QObject, QThread, QTimer, QtMsgType, Signal, qInstallMessageHandler
+from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QApplication
 
 from util.overlay_capture import prepare_app_alpha_format
@@ -41,6 +42,16 @@ def _set_process_name(name: str) -> None:
         )
     except Exception:
         pass
+
+
+def _load_app_icon() -> QIcon | None:
+    icon_path = app_root() / "image" / "icon.png"
+    if not icon_path.is_file():
+        return None
+    icon = QIcon(str(icon_path))
+    if icon.isNull():
+        return None
+    return icon
 
 
 class ListenerThread(QThread):
@@ -161,6 +172,9 @@ class App(QObject):
         self._qt.setApplicationName(APP_NAME)
         self._qt.setApplicationDisplayName(APP_NAME)
         self._qt.setOrganizationName(APP_NAME)
+        icon = _load_app_icon()
+        if icon is not None:
+            self._qt.setWindowIcon(icon)
         import config as _cfg
         self._qt.setQuitOnLastWindowClosed(not _cfg.get("minimize_to_tray", True))
         _set_process_name(APP_NAME)
@@ -170,6 +184,8 @@ class App(QObject):
 
         from pages.main_page import MainPage
         self._win = MainPage()
+        if icon is not None:
+            self._win.setWindowIcon(icon)
 
         self.message_received.connect(self._win.broadcast_message)
         self.status_changed.connect(self._win.broadcast_status)
