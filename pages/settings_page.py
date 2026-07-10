@@ -195,42 +195,26 @@ class AccountSettings(BaseSetting):
         self._refresh()
 
     def _refresh(self):
-        import json, time
-        f = "state.json"
-        if not os.path.exists(f):
-            self._status.setText("未登录")
-            return
-        try:
-            cookies = json.load(open(f)).get("cookies", [])
-            now = time.time()
-            for c in cookies:
-                if c.get("name") == "sessionid":
-                    exp = c.get("expires", -1)
-                    if exp == -1:
-                        self._status.setText("✅  已登录")
-                    elif exp > now:
-                        self._status.setText(
-                            f"✅  已登录，还剩约 {int((exp-now)/86400)} 天"
-                        )
-                    else:
-                        self._status.setText("⚠️  登录已过期")
-                    return
-            self._status.setText("⚠️  未找到登录凭证")
-        except Exception as e:
-            self._status.setText(f"检测失败: {e}")
+        from listener.login import get_login_ui_state
+        text, _ = get_login_ui_state()
+        self._status.setText(text)
 
     def _do_login(self):
-        try:
-            from listener.login import do_login
-            self._btn.setText("登录中...")
-            self._btn.setEnabled(False)
-            do_login()
+        if self._login_thread and self._login_thread.isRunning():
+            return
+        self._btn.setText("登录中...")
+        self._btn.setEnabled(False)
+        self._login_thread = _AccountLoginThread(self)
+        self._login_thread.finished.connect(self._on_login_done)
+        self._login_thread.start()
+
+    def _on_login_done(self, ok: bool, err: str):
+        self._btn.setText("重新登录")
+        self._btn.setEnabled(True)
+        if ok:
             self._refresh()
-        except Exception as e:
-            self._status.setText(f"登录失败: {e}")
-        finally:
-            self._btn.setText("重新登录")
-            self._btn.setEnabled(True)
+        else:
+            self._status.setText(f"登录失败: {err}" if err else "登录未完成或已取消")
 
 
 # ─────────────────────────────────────────────
