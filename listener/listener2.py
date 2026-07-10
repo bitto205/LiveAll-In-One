@@ -16,7 +16,7 @@ playwright 捕获真实 WebSocket 帧，protobuf 解析，协议级稳定。
 
 依赖:
     pip install playwright protobuf
-    playwright install chromium          # 下载到 browsers/ 目录
+    playwright install chromium-headless-shell   # 下载到 browsers/ 目录
     先运行 login.py 生成 state.json（或设 config.json use_system_browser=true 跳过 bundled）
 
 浏览器策略:
