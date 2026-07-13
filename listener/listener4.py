@@ -28,6 +28,15 @@ PROXY_PORT        = 19088
 IPC_PORT          = 19098
 _PROXY_VALUE      = f"127.0.0.1:{PROXY_PORT},direct://"
 _TIMEOUT          = 60.0
+
+# 隐藏子进程控制台（避免 PowerShell / certutil / tasklist 闪窗）
+_CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
+
+def _run_hidden(args, **kwargs):
+    """subprocess.run，强制 CREATE_NO_WINDOW。"""
+    flags = kwargs.pop("creationflags", 0) | _CREATE_NO_WINDOW
+    return subprocess.run(args, creationflags=flags, **kwargs)
 _LIVE_DATA_TIMEOUT = 10.0  # WS 建立后等待初始 PushFrame
 _SHELL_PROCESS    = "proxy_shell.exe"   # process name for tasklist
 _SHELL_MARKER     = "proxy_shell.exe"   # marker in patched index.js
@@ -107,8 +116,10 @@ def _ca_files_ready() -> bool:
 def _is_ca_in_trust_store() -> bool:
     """Whether LiveAIO/LiveHelper CA is present in LocalMachine\\Root."""
     try:
-        r = subprocess.run(
-            ["powershell", "-NoProfile", "-Command",
+        # -WindowStyle Hidden + CREATE_NO_WINDOW，避免控制台闪烁
+        r = _run_hidden(
+            ["powershell", "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden",
+             "-Command",
              "$s = Get-ChildItem Cert:\\LocalMachine\\Root | "
              "Where-Object { $_.Subject -like '*LiveAIO*' -or $_.Subject -like '*LiveHelper*' }; "
              "if ($s.Count -gt 0) { 'YES' }"],
@@ -131,16 +142,15 @@ def _install_ca_cert() -> None:
         logger.info("CA 已在 Windows 受信任根证书中")
         return
     try:
-        r = subprocess.run(
+        r = _run_hidden(
             ["certutil", "-addstore", "-f", "ROOT", str(cert_path)],
             capture_output=True, timeout=30,
         )
         if r.returncode == 0:
             logger.info("CA 证书已安装到 Windows 受信任根证书")
         else:
-            logger.warning(
-                f"certutil 返回非零: {r.returncode}\n{r.stderr.decode(errors='ignore')}"
-            )
+            err = (r.stderr or b"").decode(errors="ignore")
+            logger.warning(f"certutil 返回非零: {r.returncode}\n{err}")
     except Exception as e:
         logger.warning(f"certutil 执行失败: {e}")
 
@@ -163,12 +173,11 @@ def _bootstrap_proxy_shell_ca(shell_exe: str, *, timeout: float = 15.0) -> bool:
         _install_ca_cert()
         return _is_ca_installed()
 
-    creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
     try:
         proc = subprocess.Popen(
             [shell_exe],
             cwd=os.path.dirname(shell_exe) or None,
-            creationflags=creationflags,
+            creationflags=_CREATE_NO_WINDOW,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
@@ -843,7 +852,7 @@ def _is_proxy_running() -> bool:
 
     def _scan() -> bool:
         try:
-            r = subprocess.run(
+            r = _run_hidden(
                 ["tasklist", "/FI", f"IMAGENAME eq {_SHELL_PROCESS}", "/NH"],
                 capture_output=True, timeout=2, encoding="utf-8", errors="ignore",
             )

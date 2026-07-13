@@ -172,8 +172,10 @@ func parseCAFiles(certPath, keyPath string) (*x509.Certificate, *rsa.PrivateKey,
 }
 
 func caInTrustStore() bool {
-	cmd := exec.Command("powershell", "-NoProfile", "-Command",
+	cmd := exec.Command("powershell", "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden",
+		"-Command",
 		`$s = Get-ChildItem Cert:\LocalMachine\Root | Where-Object { $_.Subject -like '*LiveAIO*' -or $_.Subject -like '*LiveHelper*' }; if ($s.Count -gt 0) { 'YES' }`)
+	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return false
@@ -187,6 +189,7 @@ func installCAToTrustStore(certPath string) {
 		return
 	}
 	cmd := exec.Command("certutil", "-addstore", "-f", "ROOT", certPath)
+	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
 	out, err := cmd.CombinedOutput()
 	msg := strings.TrimSpace(string(out))
 	if err != nil {
