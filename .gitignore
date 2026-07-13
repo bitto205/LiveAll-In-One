@@ -18,6 +18,9 @@ ws_samples/
 listener/proxy_shell.build
 listener/proxy_shell.dist
 listener/proxy_shell.onefile-build
+# 构建工具（非业务 tools/ 包）
+upx.exe
+_upx.zip
 _bench_pages.py
 _bench_startup.py
 _test_system_browser_r2.py

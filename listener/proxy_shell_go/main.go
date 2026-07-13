@@ -16,6 +16,7 @@ import (
 	"math/big"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -56,7 +57,12 @@ func aioDir() string {
 	if _, err := os.Stat(aio); err == nil {
 		return aio
 	}
-	return filepath.Join(home, ".livehelper")
+	legacy := filepath.Join(home, ".livehelper")
+	if _, err := os.Stat(legacy); err == nil {
+		return legacy
+	}
+	_ = os.MkdirAll(aio, 0755)
+	return aio
 }
 
 // ─── Logging ──────────────────────────────────────────────────────────────────
@@ -74,8 +80,10 @@ func setupLogging() {
 	logger = log.New(f, "", log.LstdFlags)
 }
 
-// ─── CA Cert (read-only) ──────────────────────────────────────────────────────
-// CA cert is created by listener4.py during patch. Go only reads it.
+// ─── CA Cert ──────────────────────────────────────────────────────────────────
+// Per-machine CA under ~/.liveaio (or legacy ~/.livehelper).
+// First run: generate if missing, then detect/install into Windows ROOT store.
+// Leaf certs for MITM are minted per hostname.
 
 var (
 	caKey  *rsa.PrivateKey
@@ -83,46 +91,133 @@ var (
 	leafMu sync.Map // hostname → *tls.Certificate
 )
 
-func loadCA() error {
+func caPaths() (certPath, keyPath string) {
 	dir := aioDir()
-	certPath := filepath.Join(dir, "proxy_shell_ca.crt")
-	keyPath := filepath.Join(dir, "proxy_shell_ca.key")
+	return filepath.Join(dir, "proxy_shell_ca.crt"), filepath.Join(dir, "proxy_shell_ca.key")
+}
 
-	certPEM, err := os.ReadFile(certPath)
-	if err != nil {
-		return fmt.Errorf("CA cert not found at %s (run patch first): %w", certPath, err)
-	}
-	keyPEM, err := os.ReadFile(keyPath)
-	if err != nil {
-		return fmt.Errorf("CA key not found at %s: %w", keyPath, err)
-	}
-
-	block, _ := pem.Decode(certPEM)
-	if block == nil {
-		return fmt.Errorf("invalid CA cert PEM")
-	}
-	cert, err := x509.ParseCertificate(block.Bytes)
+func generateCA(certPath, keyPath string) error {
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
 		return err
 	}
+	sn, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
+	if err != nil {
+		return err
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber:          sn,
+		Subject:               pkix.Name{Organization: []string{"LiveAIO"}, CommonName: "LiveAIO Proxy CA"},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().AddDate(10, 0, 0),
+		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign | x509.KeyUsageDigitalSignature,
+		BasicConstraintsValid: true,
+		IsCA:                  true,
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(certPath), 0755); err != nil {
+		return err
+	}
+	certOut, err := os.OpenFile(certPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0644)
+	if err != nil {
+		return err
+	}
+	if err := pem.Encode(certOut, &pem.Block{Type: "CERTIFICATE", Bytes: der}); err != nil {
+		certOut.Close()
+		return err
+	}
+	certOut.Close()
 
+	keyOut, err := os.OpenFile(keyPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
+	if err != nil {
+		return err
+	}
+	defer keyOut.Close()
+	return pem.Encode(keyOut, &pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(key)})
+}
+
+func parseCAFiles(certPath, keyPath string) (*x509.Certificate, *rsa.PrivateKey, error) {
+	certPEM, err := os.ReadFile(certPath)
+	if err != nil {
+		return nil, nil, err
+	}
+	keyPEM, err := os.ReadFile(keyPath)
+	if err != nil {
+		return nil, nil, err
+	}
+	block, _ := pem.Decode(certPEM)
+	if block == nil {
+		return nil, nil, fmt.Errorf("invalid CA cert PEM")
+	}
+	cert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		return nil, nil, err
+	}
 	keyBlock, _ := pem.Decode(keyPEM)
 	if keyBlock == nil {
-		return fmt.Errorf("invalid CA key PEM")
+		return nil, nil, fmt.Errorf("invalid CA key PEM")
 	}
-	// Support both PKCS8 and PKCS1 (TraditionalOpenSSL) formats
 	var rsaKey *rsa.PrivateKey
 	if k, err8 := x509.ParsePKCS8PrivateKey(keyBlock.Bytes); err8 == nil {
 		rsaKey = k.(*rsa.PrivateKey)
 	} else if k1, err1 := x509.ParsePKCS1PrivateKey(keyBlock.Bytes); err1 == nil {
 		rsaKey = k1
 	} else {
-		return fmt.Errorf("cannot parse CA key: %v", err8)
+		return nil, nil, fmt.Errorf("cannot parse CA key: %v", err8)
 	}
+	return cert, rsaKey, nil
+}
 
+func caInTrustStore() bool {
+	cmd := exec.Command("powershell", "-NoProfile", "-Command",
+		`$s = Get-ChildItem Cert:\LocalMachine\Root | Where-Object { $_.Subject -like '*LiveAIO*' -or $_.Subject -like '*LiveHelper*' }; if ($s.Count -gt 0) { 'YES' }`)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return false
+	}
+	return strings.Contains(string(out), "YES")
+}
+
+func installCAToTrustStore(certPath string) {
+	if caInTrustStore() {
+		logger.Println("CA already trusted in Windows ROOT store")
+		return
+	}
+	cmd := exec.Command("certutil", "-addstore", "-f", "ROOT", certPath)
+	out, err := cmd.CombinedOutput()
+	msg := strings.TrimSpace(string(out))
+	if err != nil {
+		logger.Printf("WARN: failed to install CA to ROOT store: %v (%s)", err, msg)
+		logger.Println("TLS MITM may fail until the CA is trusted (re-run as admin or install via LiveAIO patch check)")
+		return
+	}
+	logger.Printf("CA installed to Windows ROOT store: %s", msg)
+}
+
+// ensureCA generates a per-machine CA on first run if missing, loads it, and
+// installs into the Windows ROOT store when not already present.
+func ensureCA() error {
+	certPath, keyPath := caPaths()
+	_, errC := os.Stat(certPath)
+	_, errK := os.Stat(keyPath)
+	if errC != nil || errK != nil {
+		logger.Printf("CA missing, generating at %s", filepath.Dir(certPath))
+		if err := generateCA(certPath, keyPath); err != nil {
+			return fmt.Errorf("generate CA: %w", err)
+		}
+		logger.Println("CA generated")
+	}
+	cert, key, err := parseCAFiles(certPath, keyPath)
+	if err != nil {
+		return err
+	}
 	caCert = cert
-	caKey = rsaKey
+	caKey = key
 	logger.Println("CA cert loaded")
+	installCAToTrustStore(certPath)
 	return nil
 }
 
@@ -670,7 +765,7 @@ func main() {
 	selfCheck()
 	go watchParent()
 
-	if err := loadCA(); err != nil {
+	if err := ensureCA(); err != nil {
 		logger.Printf("WARN: %v", err)
 		logger.Println("Proxy will run without TLS MITM until CA cert is available")
 		// Don't exit — proxy can still tunnel non-webcast traffic.
