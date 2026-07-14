@@ -142,12 +142,12 @@ _ROUTE_META = {
     "1": {
         "title": "线路一",
         "badge": "JS Hook",
-        "desc": "该线路需要登录抖音，在直播间连接期间请勿用登录账号进入任何直播间",
+        "desc": "该线路建议登录抖音（可选）。在直播间连接期间请勿用登录账号进入任何直播间",
     },
     "2": {
         "title": "线路二",
         "badge": "WSS",
-        "desc": "该线路需要登录抖音，在直播间连接期间请勿用登录账号进入任何直播间",
+        "desc": "该线路建议登录抖音（可选）。在直播间连接期间请勿用登录账号进入任何直播间",
     },
     "3": {
         "title": "线路三",
@@ -184,13 +184,14 @@ class ConnPageMixin:
                 self._conn_label.setStyleSheet(_theme.qss_error_label())
                 self._conn_label.setVisible(True)
                 self._home.toast.show_msg("直播间已断开", error=True)
+                # 连接失败时 listener 已自行收尾，勿再 disconnect→loop.stop
             else:
                 self.set_conn_state(_Btn.IDLE)
                 self._conn_label.setVisible(False)
                 if was_connected:
                     self._home.toast.show_msg("直播已断开", error=True)
+                self.disconnect_listener()
             self._was_connecting = False
-            self.disconnect_listener()
 
     def disconnect_listener(self):
         self._home._connected_route = None
@@ -380,7 +381,10 @@ class _WebRoutePage(QWidget, ConnPageMixin):
 
         # Step 1：登录
         card1, c1 = _step_card(1, "登录")
-        desc = QLabel("请用小号/非直播号登录，连接过程中请勿用该账号进入任何直播间")
+        desc = QLabel(
+            "请用小号/非直播号登录，连接过程中请勿用该账号进入任何直播间。\n"
+            "无登录无法拿到礼物数据，同时有可能会被限流"
+        )
         desc.setWordWrap(True)
         desc.setStyleSheet(
             f"background: transparent; font-size: 12px;"

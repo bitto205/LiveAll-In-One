@@ -20,7 +20,8 @@ from typing import Callable, Optional
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from util.log_util import get_listener_logger, on_connect_success
-from listener.LiveProtobuf import parse_frame, try_parse_frame
+from util.models import CONTROL_STATUS_FINISH, ControlMessage
+from listener.LiveProtobuf import try_parse_frame
 
 logger = get_listener_logger(4)
 
@@ -37,7 +38,7 @@ def _run_hidden(args, **kwargs):
     """subprocess.run，强制 CREATE_NO_WINDOW。"""
     flags = kwargs.pop("creationflags", 0) | _CREATE_NO_WINDOW
     return subprocess.run(args, creationflags=flags, **kwargs)
-_LIVE_DATA_TIMEOUT = 10.0  # WS 建立后等待初始 PushFrame
+_ENTER_TIMEOUT    = 15.0  # 等待 room/enter 开播状态（status=2）的秒数
 _SHELL_PROCESS    = "proxy_shell.exe"   # process name for tasklist
 _SHELL_MARKER     = "proxy_shell.exe"   # marker in patched index.js
 _IPC_CTRL_PREFIX  = b"__LH_CTRL__:"
@@ -1110,7 +1111,6 @@ async def start_listener(
 
     async def _recv() -> None:
         nonlocal ws_active
-        ws_seen = False
         live_confirmed = False
         loop = asyncio.get_running_loop()
 
@@ -1122,7 +1122,7 @@ async def start_listener(
             live_confirmed = True
             connected = True
             on_connect_success("listener4")
-            logger.info("✅ 直播间正在直播")
+            logger.info("✅ 直播间正在直播（enter.status=2）")
             if on_status:
                 on_status(True)
 
@@ -1130,60 +1130,51 @@ async def start_listener(
             pass
 
         def _handle_live_off() -> None:
-            nonlocal ws_active, connected
+            nonlocal ws_active, connected, live_confirmed
             ws_active = False
-            notify = connected or live_confirmed or ws_seen
+            notify = connected or live_confirmed
             connected = False
+            live_confirmed = False
             logger.warning("直播间已下播")
             if notify and on_status:
                 on_status(False)
             raise _WsDisconnected()
 
         def _handle_data(data: bytes) -> None:
-            nonlocal ws_seen, ws_active, live_confirmed
+            nonlocal ws_active
             if data.startswith(_IPC_CTRL_PREFIX):
                 ctrl = data[len(_IPC_CTRL_PREFIX):].strip()
                 if ctrl == _IPC_CTRL_LIVE_ON:
-                    ws_active = True
-                    if not live_confirmed:
-                        _confirm_live()
+                    # proxy_shell 在 room/enter status==2 时推送
+                    _confirm_live()
                 elif ctrl == _IPC_CTRL_LIVE_OFF:
                     _handle_live_off()
                 elif ctrl == _IPC_CTRL_WS_OPEN:
-                    if not ws_seen:
-                        ws_seen = True
-                        logger.info(
-                            f"IPC: WebSocket 已建立，{_LIVE_DATA_TIMEOUT:.0f}s 内等待初始直播数据…"
-                        )
+                    logger.info("IPC: WebSocket 已建立，等待进房开播状态…")
                     ws_active = True
                 elif ctrl == _IPC_CTRL_WS_DATA:
+                    # 兼容旧控制字：不再用 WS 首包确认开播
                     ws_active = True
-                    if not live_confirmed:
-                        _confirm_live()
                 elif ctrl == _IPC_CTRL_WS_DOWN:
                     logger.warning("IPC: WebSocket 已断开")
                     _handle_live_off()
                 return
 
-            channel_ok, msgs = try_parse_frame(data)
-            if channel_ok and not live_confirmed:
-                _confirm_live()
+            _, msgs = try_parse_frame(data)
+            if not live_confirmed:
+                return
             for msg in msgs:
+                if isinstance(msg, ControlMessage) and msg.status == CONTROL_STATUS_FINISH:
+                    logger.info("收到下播控制消息，结束监听")
+                    _handle_live_off()
+                    return
                 try:
                     callback(msg)
                 except Exception as e:
                     logger.debug(f"回调异常: {e}")
 
-        # 阶段 1：等待 WebSocket 建立（无超时）
-        while not ws_seen:
-            data = await _read_packet(None)
-            try:
-                _handle_data(data)
-            except _WsDisconnected:
-                return
-
-        # 阶段 2：WS 已建立，10s 内等待可解析的初始 PushFrame
-        deadline = loop.time() + _LIVE_DATA_TIMEOUT
+        # 等待 room/enter status=2（经 LIVE_ON_AIR 推送）
+        deadline = loop.time() + _ENTER_TIMEOUT
         while not live_confirmed:
             remaining = deadline - loop.time()
             if remaining <= 0:
@@ -1194,7 +1185,7 @@ async def start_listener(
             except _WsDisconnected:
                 return
 
-        # 阶段 3：持续收消息
+        # 持续收消息
         while True:
             data = await _read_packet(None)
             try:
@@ -1205,7 +1196,7 @@ async def start_listener(
     try:
         await _recv()
     except asyncio.TimeoutError:
-        logger.warning("直播间未开播")
+        logger.warning("直播间未开播（未收到 enter.status=2）")
     except asyncio.IncompleteReadError:
         if ws_active:
             logger.warning("IPC 连接断开（直播通道已中断）")

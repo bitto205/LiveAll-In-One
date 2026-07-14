@@ -18,6 +18,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -272,8 +273,10 @@ type ipcServer struct {
 
 var (
 	wsRelayActive uint32 // 1=webcast WSS relay running (101 upgrade done)
-	liveActive    uint32 // 1=received at least one server binary frame
+	liveActive    uint32 // 1=room/enter status==2（开播中）
 )
+
+var roomEnterStatusRe = regexp.MustCompile(`"status"\s*:\s*([24])\s*,\s*"status_str"`)
 
 func isWSRelayActive() bool {
 	return atomic.LoadUint32(&wsRelayActive) == 1
@@ -281,6 +284,37 @@ func isWSRelayActive() bool {
 
 func isLiveActive() bool {
 	return atomic.LoadUint32(&liveActive) == 1
+}
+
+func parseRoomEnterStatus(body []byte) (int, bool) {
+	m := roomEnterStatusRe.FindSubmatch(body)
+	if m == nil {
+		return 0, false
+	}
+	var st int
+	if _, err := fmt.Sscanf(string(m[1]), "%d", &st); err != nil {
+		return 0, false
+	}
+	return st, true
+}
+
+func isRoomEnterRequest(req []byte) bool {
+	lower := bytes.ToLower(req)
+	return bytes.Contains(lower, []byte("/room/")) && bytes.Contains(lower, []byte("enter"))
+}
+
+func headerContentLength(hdr []byte) int {
+	for _, line := range bytes.Split(hdr, []byte("\n")) {
+		lower := bytes.ToLower(bytes.TrimSpace(line))
+		if bytes.HasPrefix(lower, []byte("content-length:")) {
+			val := bytes.TrimSpace(lower[len("content-length:"):])
+			var n int
+			if _, err := fmt.Sscanf(string(val), "%d", &n); err == nil {
+				return n
+			}
+		}
+	}
+	return -1
 }
 
 func pushIPCControl(ipc *ipcServer, state string) {
@@ -451,11 +485,12 @@ func readWSFrame(r io.Reader) (opcode byte, payload []byte, fin bool, err error)
 	opcode = hdr[0] & 0x0F
 	masked := hdr[1]&0x80 != 0
 	plen := uint64(hdr[1] & 0x7F)
-	if plen == 126 {
+	switch plen {
+	case 126:
 		ext := make([]byte, 2)
 		io.ReadFull(r, ext)
 		plen = uint64(binary.BigEndian.Uint16(ext))
-	} else if plen == 127 {
+	case 127:
 		ext := make([]byte, 8)
 		io.ReadFull(r, ext)
 		plen = binary.BigEndian.Uint64(ext)
@@ -509,16 +544,8 @@ func relayWS(clientR io.Reader, clientW io.Writer,
 	beginWSRelay(ipc, host)
 	defer endWSRelay(ipc, host)
 
-	var liveSignaled bool
-	signalLive := func() {
-		if liveSignaled {
-			return
-		}
-		liveSignaled = true
-		setLiveActive(true, ipc, host)
-	}
-
 	// server → client: reassemble fragmented frames, push complete payloads to IPC
+	// 开播判定改由 room/enter HTTP status=2 触发，不再用首包二进制帧确认
 	go func() {
 		var acc []byte
 		var curOpcode byte
@@ -537,7 +564,6 @@ func relayWS(clientR io.Reader, clientW io.Writer,
 				acc = append(acc, payload...)
 			}
 			if fin && curOpcode == 2 { // complete binary message from server
-				signalLive()
 				ipc.push(acc)
 				acc = nil
 			}
@@ -584,6 +610,13 @@ func relayHTTP(clientConn, serverConn net.Conn, host string, ipc *ipcServer) {
 		return
 	}
 	isWS := bytes.Contains(bytes.ToLower(req), []byte("upgrade: websocket"))
+	// Forward any request body already available (fixed Content-Length POST etc.)
+	if cl := headerContentLength(req); cl > 0 && cl <= 4<<20 {
+		body := make([]byte, cl)
+		if _, err := io.ReadFull(clientBuf, body); err == nil {
+			req = append(req, body...)
+		}
+	}
 	serverConn.Write(req)
 
 	resp, err := readHeaders(serverBuf)
@@ -601,6 +634,20 @@ func relayHTTP(clientConn, serverConn net.Conn, host string, ipc *ipcServer) {
 		logger.Printf("WS: %s", host)
 		relayWS(clientBuf, clientConn, serverBuf, serverConn, host, ipc)
 		return
+	}
+
+	// Sniff room/enter JSON for开播状态（status 2=开播, 4=结束）
+	if isRoomEnterRequest(req) {
+		if cl := headerContentLength(resp); cl > 0 && cl <= 4<<20 {
+			body := make([]byte, cl)
+			if _, err := io.ReadFull(serverBuf, body); err == nil {
+				clientConn.Write(body)
+				if st, ok := parseRoomEnterStatus(body); ok {
+					logger.Printf("room enter status=%d host=%s", st, host)
+					setLiveActive(st == 2, ipc, host)
+				}
+			}
+		}
 	}
 
 	done := make(chan struct{}, 2)

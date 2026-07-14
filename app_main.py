@@ -99,7 +99,7 @@ class ListenerThread(QThread):
                     pass
             try:
                 if self._loop and not self._loop.is_closed():
-                    pending = asyncio.all_tasks(self._loop)
+                    pending = [t for t in asyncio.all_tasks(self._loop) if not t.done()]
                     for t in pending:
                         t.cancel()
                     if pending:
@@ -108,11 +108,30 @@ class ListenerThread(QThread):
                         )
             except Exception:
                 pass
+            # Windows Proactor：关 loop 前收尾 asyncgen / executor，给管道 transport 收尾机会
+            try:
+                if self._loop and not self._loop.is_closed():
+                    self._loop.run_until_complete(self._loop.shutdown_asyncgens())
+            except Exception:
+                pass
+            try:
+                if self._loop and not self._loop.is_closed() and hasattr(
+                    self._loop, "shutdown_default_executor"
+                ):
+                    self._loop.run_until_complete(self._loop.shutdown_default_executor())
+            except Exception:
+                pass
+            try:
+                if self._loop and not self._loop.is_closed():
+                    self._loop.run_until_complete(asyncio.sleep(0.05))
+            except Exception:
+                pass
             try:
                 if self._loop and not self._loop.is_closed():
                     self._loop.close()
             except Exception:
                 pass
+            self._loop = None
 
     async def _listen(self):
         if self._route == "4":
@@ -147,6 +166,20 @@ class ListenerThread(QThread):
         if self._route == "4":
             try:
                 from listener.listener4 import request_listener_stop
+                if request_listener_stop():
+                    return
+            except Exception:
+                pass
+        if self._route == "1":
+            try:
+                from listener.listener1 import request_listener_stop
+                if request_listener_stop():
+                    return
+            except Exception:
+                pass
+        if self._route == "2":
+            try:
+                from listener.listener2 import request_listener_stop
                 if request_listener_stop():
                     return
             except Exception:
