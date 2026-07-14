@@ -40,12 +40,17 @@ from util.playwright_bootstrap import launch_chromium
 from listener.LiveProtobuf import try_parse_frame
 from util.log_util import get_listener_logger, make_msg_logger, on_connect_success
 from util.models import CONTROL_STATUS_FINISH, ControlMessage, LiveMessage, is_living_enter_status
-from util.room_enter import describe_enter_status, is_room_enter_url, parse_room_enter_payload
+from util.room_enter import (
+    describe_enter_status,
+    extract_room_status_from_page,
+    is_room_enter_url,
+    parse_room_enter_payload,
+)
 
 logger = get_listener_logger(2)
 
 _ENTER_TIMEOUT = 15.0       # 进入直播间后等待 web/enter 状态的秒数
-_ENTER_TIMEOUT_SYSTEM = 20.0  # 系统浏览器冷启动较慢，放宽进房状态窗口
+_ENTER_TIMEOUT_SYSTEM = 28.0  # 系统浏览器（打包常走这条）更慢，放宽进房状态窗口
 
 _STOP_SESSION: dict = {"loop": None, "shutdown": None}
 
@@ -83,7 +88,6 @@ async def _run(
     from util.playwright_bootstrap import close_playwright
 
     msg_logger = make_msg_logger(live_id) if debug else None
-    enter_timeout = _ENTER_TIMEOUT_SYSTEM if force_system else _ENTER_TIMEOUT
     logger.info(f"开始连接，直播间: {live_id}")
 
     def _emit_status(val: bool):
@@ -93,13 +97,18 @@ async def _run(
             except Exception as e:
                 logger.debug(f"状态回调异常: {e}")
 
-    notify_offline = False
     playwright = await async_playwright().start()
     browser = None
     context = None
     try:
         browser = await launch_chromium(
             playwright, headless=headless, force_system=force_system, channel=browser_channel,
+        )
+        from util.playwright_bootstrap import use_system_browser
+        enter_timeout = (
+            _ENTER_TIMEOUT_SYSTEM
+            if (force_system or use_system_browser())
+            else _ENTER_TIMEOUT
         )
         ctx_kwargs: dict = {
             "user_agent": (
@@ -152,48 +161,8 @@ async def _run(
         _STOP_SESSION["loop"] = asyncio.get_running_loop()
         _STOP_SESSION["shutdown"] = _shutdown
 
-        async def _fail_unlive(reason: str):
-            nonlocal notify_offline
-            if _state["live_confirmed"] or _state["stopped"]:
-                return
-            logger.warning(reason)
-            await _shutdown()
-            notify_offline = True
-
-        async def _disconnect_clean(reason: str | None = None):
-            nonlocal notify_offline
-            if _state["stopped"]:
-                return
-            if reason:
-                logger.info(reason)
-            notify = _state["live_confirmed"]
-            await _shutdown()
-            if notify:
-                notify_offline = True
-
-        def _confirm_live() -> None:
-            if _state["live_confirmed"] or _state["stopped"]:
-                return
-            _state["live_confirmed"] = True
-            nonlocal enter_timer
-            if enter_timer and not enter_timer.done():
-                enter_timer.cancel()
-            on_connect_success("listener2")
-            logger.info("✅ 直播间正在直播")
-            _emit_status(True)
-
-        async def _on_response(resp):
-            if _state["stopped"] or _state["enter_seen"]:
-                return
-            if not is_room_enter_url(resp.url):
-                return
-            try:
-                body = await resp.text()
-            except Exception as e:
-                logger.debug(f"读取 enter 响应失败: {e}")
-                return
-            enter = parse_room_enter_payload(body)
-            if enter is None:
+        async def _apply_enter(enter) -> None:
+            if enter is None or _state["enter_seen"] or _state["stopped"]:
                 return
             _state["enter_seen"] = True
             logger.info(
@@ -212,6 +181,51 @@ async def _run(
                 await _fail_unlive(
                     f"直播间未开播（enter.status={enter.status}，{describe_enter_status(enter.status)}）"
                 )
+
+        async def _fail_unlive(reason: str):
+            if _state["live_confirmed"] or _state["stopped"]:
+                return
+            logger.warning(reason)
+            _emit_status(False)
+            await _shutdown()
+
+        async def _disconnect_clean(reason: str | None = None):
+            if _state["stopped"]:
+                return
+            if reason:
+                logger.info(reason)
+            notify = _state["live_confirmed"]
+            if notify:
+                _emit_status(False)
+            await _shutdown()
+
+        def _confirm_live() -> None:
+            if _state["live_confirmed"] or _state["stopped"]:
+                return
+            _state["live_confirmed"] = True
+            nonlocal enter_timer
+            if enter_timer and not enter_timer.done():
+                enter_timer.cancel()
+            on_connect_success("listener2")
+            logger.info("✅ 直播间正在直播")
+            _emit_status(True)
+
+        async def _on_response(resp):
+            if _state["stopped"] or _state["enter_seen"]:
+                return
+            if not is_room_enter_url(resp.url):
+                return
+            body = None
+            try:
+                body = await resp.text()
+            except Exception:
+                try:
+                    raw = await resp.body()
+                    body = raw.decode("utf-8", errors="ignore") if raw else None
+                except Exception as e:
+                    logger.debug(f"读取 enter 响应失败: {e}")
+                    return
+            await _apply_enter(parse_room_enter_payload(body))
 
         def on_websocket(ws):
             if "/push/v2/" not in ws.url:
@@ -262,10 +276,20 @@ async def _run(
 
         async def _enter_wait_timeout():
             await asyncio.sleep(enter_timeout)
-            if not _state["enter_seen"] and not _state["live_confirmed"]:
-                await _fail_unlive(
-                    f"{enter_timeout:.0f}s 内未收到进房状态（web/enter），判定为未开播"
-                )
+            if _state["enter_seen"] or _state["live_confirmed"] or _state["stopped"]:
+                return
+            try:
+                fallback = await extract_room_status_from_page(page)
+            except Exception as e:
+                logger.debug(f"页面兜底解析失败: {e}")
+                fallback = None
+            if fallback is not None:
+                logger.info("未捕获 web/enter，使用页面 RENDER_DATA 兜底")
+                await _apply_enter(fallback)
+                return
+            await _fail_unlive(
+                f"{enter_timeout:.0f}s 内未收到进房状态（web/enter），判定为未开播"
+            )
 
         enter_timer = asyncio.create_task(_enter_wait_timeout())
         await stop_event.wait()
@@ -276,9 +300,6 @@ async def _run(
             if _STOP_SESSION.get("loop") is asyncio.get_running_loop():
                 _STOP_SESSION["loop"] = None
                 _STOP_SESSION["shutdown"] = None
-
-    if notify_offline:
-        _emit_status(False)
 
 
 # ─────────────────────────────────────────────
