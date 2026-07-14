@@ -3,6 +3,22 @@
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
+# ─── /webcast/room/web/enter（及伴侣 room/enter）房间 status ───
+# 实测：开播 = 2，未开播/已结束 = 4
+ROOM_ENTER_STATUS_LIVING = 2
+ROOM_ENTER_STATUS_ENDED = 4
+
+# ─── WebcastControlMessage.status（WS 控制帧，与 enter 不是同一套枚举）───
+CONTROL_STATUS_FINISH = 3  # 直播结束
+
+
+def is_living_enter_status(status: int) -> bool:
+    return status == ROOM_ENTER_STATUS_LIVING
+
+
+def is_ended_enter_status(status: int) -> bool:
+    return status == ROOM_ENTER_STATUS_ENDED
+
 
 @dataclass
 class ChatMessage:
@@ -92,8 +108,24 @@ class RoomRankMessage:
 
 @dataclass
 class ControlMessage:
+    """WS WebcastControlMessage；status 见 CONTROL_STATUS_FINISH 等。"""
+
     type:   Literal["control"] = field(default="control", init=False)
-    status: int = 0            # 3 = 直播已结束
+    status: int = 0  # CONTROL_STATUS_FINISH(3)=直播已结束
+
+
+@dataclass
+class RoomEnterStatusMessage:
+    """
+    进房接口返回的开播状态（webcast/room/web/enter 等）。
+    status: ROOM_ENTER_STATUS_LIVING(2) / ROOM_ENTER_STATUS_ENDED(4)
+    """
+
+    type:        Literal["room_enter"] = field(default="room_enter", init=False)
+    status:      int = 0
+    room_status: int = 0
+    title:       str = ""
+    id_str:      str = ""
 
 
 @dataclass
@@ -164,6 +196,7 @@ LiveMessage = (
     | RoomStatsMessage
     | RoomRankMessage
     | ControlMessage
+    | RoomEnterStatusMessage
     | ChatLikeMessage
     | GiftSortMessage
     | InRoomBannerMessage

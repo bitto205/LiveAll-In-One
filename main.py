@@ -8,14 +8,22 @@ import sys
 
 def _trace_boot(msg: str) -> None:
     try:
-        root = os.path.dirname(os.path.abspath(sys.argv[0]))
-        log = os.path.join(root, "log", "boot.log")
-        os.makedirs(os.path.dirname(log), exist_ok=True)
-        with open(log, "a", encoding="utf-8") as f:
-            from datetime import datetime
-            f.write(f"{datetime.now().isoformat()} | {msg}\n")
+        # 与 listener / app 共用 log/YYYYMMDD_HHMMSS.log
+        from util.log_util import write_boot_line
+        write_boot_line(msg)
     except Exception:
-        pass
+        # 极早期 import 失败时的兜底（仍按时间轴命名，避免再写 boot.log）
+        try:
+            from datetime import datetime
+            root = os.path.dirname(os.path.abspath(sys.argv[0]))
+            log_folder = os.path.join(root, "log")
+            os.makedirs(log_folder, exist_ok=True)
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            path = os.path.join(log_folder, f"{ts}_boot_fallback.log")
+            with open(path, "a", encoding="utf-8") as f:
+                f.write(f"{datetime.now().isoformat()} | [boot] {msg}\n")
+        except Exception:
+            pass
 
 
 def _resolve_uac_launch() -> tuple[str, str | None]:
@@ -66,13 +74,19 @@ def _ensure_admin(launcher_exe: str, launcher_params: str | None) -> None:
 
 
 if __name__ == "__main__":
+    # 尽早把仓库根放进 path，便于 boot 写入统一 session 日志
+    _script_dir = os.path.dirname(os.path.abspath(sys.argv[0]))
+    if _script_dir not in sys.path:
+        sys.path.insert(0, _script_dir)
+
     _trace_boot("launcher entry")
     from util.paths import app_root
 
     launcher_exe, launcher_params = _resolve_uac_launch()
     root = app_root()
     os.chdir(root)
-    sys.path.insert(0, str(root))
+    if str(root) not in sys.path:
+        sys.path.insert(0, str(root))
     _ensure_admin(launcher_exe, launcher_params)
 
     _trace_boot("loading app_main")

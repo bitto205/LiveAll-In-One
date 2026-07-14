@@ -12,6 +12,7 @@ import shutil
 import struct
 import subprocess
 import sys
+import time
 import winreg
 from pathlib import Path
 from typing import Callable, Optional
@@ -19,7 +20,8 @@ from typing import Callable, Optional
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from util.log_util import get_listener_logger, on_connect_success
-from listener.LiveProtobuf import parse_frame, try_parse_frame
+from util.models import CONTROL_STATUS_FINISH, ControlMessage
+from listener.LiveProtobuf import try_parse_frame
 
 logger = get_listener_logger(4)
 
@@ -27,7 +29,16 @@ PROXY_PORT        = 19088
 IPC_PORT          = 19098
 _PROXY_VALUE      = f"127.0.0.1:{PROXY_PORT},direct://"
 _TIMEOUT          = 60.0
-_LIVE_DATA_TIMEOUT = 10.0  # WS 建立后等待初始 PushFrame
+
+# 隐藏子进程控制台（避免 PowerShell / certutil / tasklist 闪窗）
+_CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
+
+def _run_hidden(args, **kwargs):
+    """subprocess.run，强制 CREATE_NO_WINDOW。"""
+    flags = kwargs.pop("creationflags", 0) | _CREATE_NO_WINDOW
+    return subprocess.run(args, creationflags=flags, **kwargs)
+_ENTER_TIMEOUT    = 15.0  # 等待 room/enter 开播状态（status=2）的秒数
 _SHELL_PROCESS    = "proxy_shell.exe"   # process name for tasklist
 _SHELL_MARKER     = "proxy_shell.exe"   # marker in patched index.js
 _IPC_CTRL_PREFIX  = b"__LH_CTRL__:"
@@ -90,7 +101,7 @@ def _aio_cfg_file() -> Path:
 
 
 # ---------------------------------------------------------
-# CA 证书管理（patch 时由 Python 生成并安装）
+# CA 证书管理（由 proxy_shell Go 首次运行生成；Python 只做检测与信任库同步）
 # ---------------------------------------------------------
 
 def _ca_paths() -> tuple[Path, Path]:
@@ -98,59 +109,114 @@ def _ca_paths() -> tuple[Path, Path]:
     return d / "proxy_shell_ca.crt", d / "proxy_shell_ca.key"
 
 
-def _ensure_ca_cert() -> Path:
-    """Create CA certificate when missing and return crt path."""
-    cert_path, key_path = _ca_paths()
-    if cert_path.exists() and key_path.exists():
-        return cert_path
+def _ca_files_ready() -> bool:
+    crt, key = _ca_paths()
+    return crt.is_file() and key.is_file()
 
-    from cryptography import x509
-    from cryptography.hazmat.primitives import hashes, serialization
-    from cryptography.hazmat.primitives.asymmetric import rsa
-    from cryptography.x509.oid import NameOID
-    import datetime
 
-    cert_path.parent.mkdir(parents=True, exist_ok=True)
-    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
-    name = x509.Name([
-        x509.NameAttribute(NameOID.ORGANIZATION_NAME, "LiveAIO"),
-        x509.NameAttribute(NameOID.COMMON_NAME, "LiveAIO Proxy CA"),
-    ])
-    now = datetime.datetime.utcnow()
-    cert = (
-        x509.CertificateBuilder()
-        .subject_name(name).issuer_name(name)
-        .public_key(key.public_key())
-        .serial_number(x509.random_serial_number())
-        .not_valid_before(now - datetime.timedelta(hours=1))
-        .not_valid_after(now + datetime.timedelta(days=3650))
-        .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
-        .sign(key, hashes.SHA256())
-    )
-    cert_path.write_bytes(cert.public_bytes(serialization.Encoding.PEM))
-    key_path.write_bytes(key.private_bytes(
-        serialization.Encoding.PEM,
-        serialization.PrivateFormat.TraditionalOpenSSL,
-        serialization.NoEncryption(),
-    ))
-    logger.info(f"CA 证书已生成: {cert_path}")
-    return cert_path
+def _is_ca_in_trust_store() -> bool:
+    """Whether LiveAIO/LiveHelper CA is present in LocalMachine\\Root."""
+    try:
+        # -WindowStyle Hidden + CREATE_NO_WINDOW，避免控制台闪烁
+        r = _run_hidden(
+            ["powershell", "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden",
+             "-Command",
+             "$s = Get-ChildItem Cert:\\LocalMachine\\Root | "
+             "Where-Object { $_.Subject -like '*LiveAIO*' -or $_.Subject -like '*LiveHelper*' }; "
+             "if ($s.Count -gt 0) { 'YES' }"],
+            capture_output=True, timeout=10, encoding="utf-8", errors="ignore",
+        )
+        return "YES" in (r.stdout or "")
+    except Exception:
+        return False
 
 
 def _install_ca_cert() -> None:
-    """Install the CA cert into Windows ROOT store."""
-    cert_path = _ensure_ca_cert()
+    """若 Go 已写出 CA 文件且尚未进信任库，则用 certutil 安装。"""
+    cert_path, key_path = _ca_paths()
+    if not cert_path.is_file() or not key_path.is_file():
+        logger.info(
+            "CA 尚未生成：将由 proxy_shell 首次启动时自动创建并尝试安装到系统信任库"
+        )
+        return
+    if _is_ca_in_trust_store():
+        logger.info("CA 已在 Windows 受信任根证书中")
+        return
     try:
-        r = subprocess.run(
+        r = _run_hidden(
             ["certutil", "-addstore", "-f", "ROOT", str(cert_path)],
             capture_output=True, timeout=30,
         )
         if r.returncode == 0:
             logger.info("CA 证书已安装到 Windows 受信任根证书")
         else:
-            logger.warning(f"certutil 返回非零: {r.returncode}\n{r.stderr.decode(errors='ignore')}")
+            err = (r.stderr or b"").decode(errors="ignore")
+            logger.warning(f"certutil 返回非零: {r.returncode}\n{err}")
     except Exception as e:
         logger.warning(f"certutil 执行失败: {e}")
+
+
+def _is_ca_installed() -> bool:
+    """CA 文件存在且已进入系统信任库。"""
+    return _ca_files_ready() and _is_ca_in_trust_store()
+
+
+def _bootstrap_proxy_shell_ca(shell_exe: str, *, timeout: float = 15.0) -> bool:
+    """Patch 后拉起一次 proxy_shell，触发 Go 端首次生成 CA，完成后结束该进程。
+
+    检测/安装只用系统自带的 PowerShell + certutil，不依赖额外 Python 包。
+    """
+    if not shell_exe or not os.path.isfile(shell_exe):
+        logger.warning("无法引导 CA：proxy_shell.exe 不存在")
+        return False
+
+    if _ca_files_ready():
+        _install_ca_cert()
+        return _is_ca_installed()
+
+    try:
+        proc = subprocess.Popen(
+            [shell_exe],
+            cwd=os.path.dirname(shell_exe) or None,
+            creationflags=_CREATE_NO_WINDOW,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except Exception as e:
+        logger.warning("拉起 proxy_shell 生成 CA 失败: %s", e)
+        return False
+
+    logger.info("已拉起 proxy_shell 以生成 CA（pid=%s）…", proc.pid)
+    try:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if _ca_files_ready():
+                break
+            if proc.poll() is not None:
+                break
+            time.sleep(0.2)
+        else:
+            logger.warning("等待 CA 生成超时（%.0fs）", timeout)
+    finally:
+        if proc.poll() is None:
+            try:
+                proc.terminate()
+                proc.wait(timeout=5)
+            except Exception:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+
+    _install_ca_cert()
+    if _is_ca_installed():
+        logger.info("CA 已就绪（文件 + 系统信任库）")
+        return True
+    if _ca_files_ready():
+        logger.warning("CA 文件已生成，但未进入系统信任库（可能需要管理员权限）")
+    else:
+        logger.warning("CA 未能生成")
+    return False
 
 
 # ---------------------------------------------------------
@@ -696,6 +762,7 @@ def patch_companion() -> tuple[bool, str]:
     dest = os.path.join(os.path.dirname(path), _SHELL_PROCESS)
 
     if is_patched():
+        _bootstrap_proxy_shell_ca(dest)
         return True, "Already patched"
 
     try:
@@ -724,7 +791,7 @@ def patch_companion() -> tuple[bool, str]:
         return False, f"写入 index.js 失败: {e}"
 
     _save_patch_catalog(catalog)
-    _install_ca_cert()
+    _bootstrap_proxy_shell_ca(dest)
     _invalidate_status_cache()
     return True, "Patch successful. Restart companion app to take effect."
 
@@ -780,31 +847,13 @@ def check_path_mismatch() -> bool:
 # 运行时诊断
 # ---------------------------------------------------------
 
-def _is_ca_installed() -> bool:
-    """Check whether LiveAIO CA is installed in Windows ROOT store."""
-    cert_path, _ = _ca_paths()
-    if not cert_path.exists():
-        return False
-    try:
-        r = subprocess.run(
-            ["powershell", "-NoProfile", "-Command",
-             "$s = Get-ChildItem Cert:\\LocalMachine\\Root | "
-             "Where-Object { $_.Subject -like '*LiveAIO*' -or $_.Subject -like '*LiveHelper*' }; "
-             "($s.Count -gt 0)"],
-            capture_output=True, timeout=10, encoding="utf-8", errors="ignore",
-        )
-        return "True" in r.stdout
-    except Exception:
-        return False
-
-
 def _is_proxy_running() -> bool:
     """Check whether proxy_shell.exe process is running."""
     from util.status_cache import get_proxy_running
 
     def _scan() -> bool:
         try:
-            r = subprocess.run(
+            r = _run_hidden(
                 ["tasklist", "/FI", f"IMAGENAME eq {_SHELL_PROCESS}", "/NH"],
                 capture_output=True, timeout=2, encoding="utf-8", errors="ignore",
             )
@@ -930,14 +979,17 @@ def get_page_status(*, force: bool = False) -> dict:
 def run_page_check() -> dict:
     """Run route 4 page check and log current patch status."""
     status = get_page_status(force=True)
+    # Go 可能已写出 CA：检测时顺便同步进信任库
+    _install_ca_cert()
     ca_installed = _is_ca_installed() if status["is_patched"] else False
     logger.info(
         "[线路4 页面检测] 注册表=%s | 伴侣=%s | index.js=%s | 已注入=%s | "
-        "exe一致=%s | index已注入=%s | 证书已安装=%s",
+        "exe一致=%s | index已注入=%s | 证书文件=%s | 证书已信任=%s",
         status["companion_in_registry"], status["companion_installed"],
         status["index_js_found"],
         status["is_patched"], status["exe_identical"],
         status["index_patched"],
+        _ca_files_ready(),
         ca_installed,
     )
     return status
@@ -1059,7 +1111,6 @@ async def start_listener(
 
     async def _recv() -> None:
         nonlocal ws_active
-        ws_seen = False
         live_confirmed = False
         loop = asyncio.get_running_loop()
 
@@ -1071,7 +1122,7 @@ async def start_listener(
             live_confirmed = True
             connected = True
             on_connect_success("listener4")
-            logger.info("✅ 直播间正在直播")
+            logger.info("✅ 直播间正在直播（enter.status=2）")
             if on_status:
                 on_status(True)
 
@@ -1079,60 +1130,51 @@ async def start_listener(
             pass
 
         def _handle_live_off() -> None:
-            nonlocal ws_active, connected
+            nonlocal ws_active, connected, live_confirmed
             ws_active = False
-            notify = connected or live_confirmed or ws_seen
+            notify = connected or live_confirmed
             connected = False
+            live_confirmed = False
             logger.warning("直播间已下播")
             if notify and on_status:
                 on_status(False)
             raise _WsDisconnected()
 
         def _handle_data(data: bytes) -> None:
-            nonlocal ws_seen, ws_active, live_confirmed
+            nonlocal ws_active
             if data.startswith(_IPC_CTRL_PREFIX):
                 ctrl = data[len(_IPC_CTRL_PREFIX):].strip()
                 if ctrl == _IPC_CTRL_LIVE_ON:
-                    ws_active = True
-                    if not live_confirmed:
-                        _confirm_live()
+                    # proxy_shell 在 room/enter status==2 时推送
+                    _confirm_live()
                 elif ctrl == _IPC_CTRL_LIVE_OFF:
                     _handle_live_off()
                 elif ctrl == _IPC_CTRL_WS_OPEN:
-                    if not ws_seen:
-                        ws_seen = True
-                        logger.info(
-                            f"IPC: WebSocket 已建立，{_LIVE_DATA_TIMEOUT:.0f}s 内等待初始直播数据…"
-                        )
+                    logger.info("IPC: WebSocket 已建立，等待进房开播状态…")
                     ws_active = True
                 elif ctrl == _IPC_CTRL_WS_DATA:
+                    # 兼容旧控制字：不再用 WS 首包确认开播
                     ws_active = True
-                    if not live_confirmed:
-                        _confirm_live()
                 elif ctrl == _IPC_CTRL_WS_DOWN:
                     logger.warning("IPC: WebSocket 已断开")
                     _handle_live_off()
                 return
 
-            channel_ok, msgs = try_parse_frame(data)
-            if channel_ok and not live_confirmed:
-                _confirm_live()
+            _, msgs = try_parse_frame(data)
+            if not live_confirmed:
+                return
             for msg in msgs:
+                if isinstance(msg, ControlMessage) and msg.status == CONTROL_STATUS_FINISH:
+                    logger.info("收到下播控制消息，结束监听")
+                    _handle_live_off()
+                    return
                 try:
                     callback(msg)
                 except Exception as e:
                     logger.debug(f"回调异常: {e}")
 
-        # 阶段 1：等待 WebSocket 建立（无超时）
-        while not ws_seen:
-            data = await _read_packet(None)
-            try:
-                _handle_data(data)
-            except _WsDisconnected:
-                return
-
-        # 阶段 2：WS 已建立，10s 内等待可解析的初始 PushFrame
-        deadline = loop.time() + _LIVE_DATA_TIMEOUT
+        # 等待 room/enter status=2（经 LIVE_ON_AIR 推送）
+        deadline = loop.time() + _ENTER_TIMEOUT
         while not live_confirmed:
             remaining = deadline - loop.time()
             if remaining <= 0:
@@ -1143,7 +1185,7 @@ async def start_listener(
             except _WsDisconnected:
                 return
 
-        # 阶段 3：持续收消息
+        # 持续收消息
         while True:
             data = await _read_packet(None)
             try:
@@ -1154,7 +1196,7 @@ async def start_listener(
     try:
         await _recv()
     except asyncio.TimeoutError:
-        logger.warning("直播间未开播")
+        logger.warning("直播间未开播（未收到 enter.status=2）")
     except asyncio.IncompleteReadError:
         if ws_active:
             logger.warning("IPC 连接断开（直播通道已中断）")

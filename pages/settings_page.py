@@ -199,18 +199,26 @@ class AccountSettings(BaseSetting):
         text, _ = get_login_ui_state()
         self._status.setText(text)
 
+    def _reset_login_btn(self) -> None:
+        self._btn.setText("重新登录")
+        self._btn.setEnabled(True)
+
     def _do_login(self):
         if self._login_thread and self._login_thread.isRunning():
             return
         self._btn.setText("登录中...")
         self._btn.setEnabled(False)
-        self._login_thread = _AccountLoginThread(self)
-        self._login_thread.finished.connect(self._on_login_done)
-        self._login_thread.start()
+        try:
+            self._login_thread = _AccountLoginThread(self)
+            self._login_thread.finished.connect(self._on_login_done)
+            self._login_thread.start()
+        except Exception as e:
+            logger.error("登录线程启动失败: %s", e)
+            self._reset_login_btn()
+            self._status.setText(f"登录失败: {e}")
 
     def _on_login_done(self, ok: bool, err: str):
-        self._btn.setText("重新登录")
-        self._btn.setEnabled(True)
+        self._reset_login_btn()
         if ok:
             self._refresh()
         else:

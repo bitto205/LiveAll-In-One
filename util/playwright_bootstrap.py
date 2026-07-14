@@ -175,6 +175,39 @@ async def launch_chromium(
     raise RuntimeError("未能启动系统 Chrome/Edge，请确认已安装") from last_error
 
 
+async def close_playwright(
+    playwright,
+    *,
+    browser=None,
+    context=None,
+    drain_seconds: float = 0.15,
+    stop_timeout: float = 5.0,
+) -> None:
+    """按顺序关闭 context/browser/driver，并短暂 drain（Windows Proactor 管道清理）。"""
+    import asyncio
+
+    if context is not None:
+        try:
+            await asyncio.wait_for(context.close(), timeout=3.0)
+        except Exception:
+            pass
+    if browser is not None:
+        try:
+            await asyncio.wait_for(browser.close(), timeout=3.0)
+        except Exception:
+            pass
+    if playwright is not None:
+        try:
+            await asyncio.wait_for(playwright.stop(), timeout=stop_timeout)
+        except Exception:
+            pass
+    if drain_seconds > 0:
+        try:
+            await asyncio.sleep(drain_seconds)
+        except Exception:
+            pass
+
+
 def log_browser_mode() -> None:
     ensure_configured()
     if use_system_browser():

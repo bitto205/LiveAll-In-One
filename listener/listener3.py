@@ -16,16 +16,17 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 if TYPE_CHECKING:
     from mitmproxy import http
 
-from listener.LiveProtobuf import parse_frame, try_parse_frame
+from listener.LiveProtobuf import try_parse_frame
 from util.log_util import get_listener_logger, on_connect_success, ensure_console_logging
-from util.models import ControlMessage
+from util.models import CONTROL_STATUS_FINISH, ControlMessage, is_living_enter_status
+from util.room_enter import describe_enter_status, is_room_enter_url, parse_room_enter_payload
 
 logger = get_listener_logger(3)
 
 _page_proxy_snapshot: Optional[bool] = None
 _shutdown_fn: Optional[Callable[[], Awaitable[None]]] = None
 _stop_event: Optional[asyncio.Event] = None
-_LIVE_DATA_TIMEOUT = 10.0  # WS 建立后等待初始 PushFrame 数据的秒数
+_ENTER_TIMEOUT = 15.0  # WebSocket 建立后等待进房状态（room/enter）的秒数
 
 
 def check_system_proxy() -> dict:
@@ -157,6 +158,7 @@ class _DouyinWsAddon:
         self._loop = loop
         self._ws_seen = False
         self._live_confirmed = False
+        self._enter_seen = False
         self._session_active = False
 
     def _end_session(self, reason: str) -> None:
@@ -165,15 +167,67 @@ class _DouyinWsAddon:
         self._session_active = False
         self._ws_seen = False
         self._live_confirmed = False
+        self._enter_seen = False
         logger.info(reason)
         if self.on_status:
             self.on_status(False)
         self._loop.call_soon_threadsafe(self._session_lost.set)
 
+    def _confirm_live(self) -> None:
+        if self._live_confirmed:
+            return
+        self._live_confirmed = True
+        self._session_active = True
+        self._connected.set()
+        on_connect_success("listener3")
+        logger.info("✅ 直播间正在直播")
+        if self.on_status:
+            self.on_status(True)
+
+    def _handle_enter_payload(self, body: bytes | str) -> None:
+        if self._enter_seen:
+            return
+        enter = parse_room_enter_payload(body)
+        if enter is None:
+            return
+        self._enter_seen = True
+        logger.info(
+            "进房状态 enter.status=%s (%s) room_status=%s",
+            enter.status,
+            describe_enter_status(enter.status),
+            enter.room_status,
+        )
+        try:
+            self.callback(enter)
+        except Exception as e:
+            logger.debug(f"enter 回调异常: {e}")
+        if is_living_enter_status(enter.status):
+            self._confirm_live()
+        else:
+            logger.warning(
+                "直播间未开播（enter.status=%s，%s）",
+                enter.status,
+                describe_enter_status(enter.status),
+            )
+            if self.on_status:
+                self.on_status(False)
+            self._loop.call_soon_threadsafe(self._session_lost.set)
+
     def request(self, flow: http.HTTPFlow):
         if flow.request.headers.get("upgrade", "").lower() == "websocket":
             if _is_webcast_flow(flow):
                 logger.debug(f"WS 升级请求: {flow.request.host}{flow.request.path[:80]}")
+
+    def response(self, flow: http.HTTPFlow):
+        url = flow.request.pretty_url
+        if not is_room_enter_url(url):
+            return
+        try:
+            body = flow.response.content if flow.response else b""
+        except Exception as e:
+            logger.debug(f"读取 enter 响应失败: {e}")
+            return
+        self._handle_enter_payload(body)
 
     def websocket_start(self, flow: http.HTTPFlow):
         if not _is_webcast_flow(flow):
@@ -181,7 +235,7 @@ class _DouyinWsAddon:
         if not self._ws_seen:
             self._ws_seen = True
             self._ws_ready.set()
-            logger.info("WebSocket 已建立，等待直播消息确认…")
+            logger.info("WebSocket 已建立，等待进房状态确认…")
 
     def websocket_message(self, flow: http.HTTPFlow):
         if not _is_webcast_flow(flow):
@@ -192,22 +246,12 @@ class _DouyinWsAddon:
         if message.from_client:
             return
 
-        channel_ok, msgs = try_parse_frame(message.content)
-        if not channel_ok:
-            logger.debug("帧解析失败或非直播数据帧")
+        _, msgs = try_parse_frame(message.content)
+        if not self._live_confirmed:
             return
 
-        if not self._live_confirmed:
-            self._live_confirmed = True
-            self._session_active = True
-            self._connected.set()
-            on_connect_success("listener3")
-            logger.info("✅ 直播间正在直播")
-            if self.on_status:
-                self.on_status(True)
-
         for msg in msgs:
-            if isinstance(msg, ControlMessage) and msg.status == 3:
+            if isinstance(msg, ControlMessage) and msg.status == CONTROL_STATUS_FINISH:
                 self._end_session("收到下播控制消息，结束监听")
                 return
             try:
@@ -235,32 +279,17 @@ async def shutdown() -> None:
         await _teardown_local_redirector()
 
 
-async def _wait_ws_or_stop(ws_ready: asyncio.Event) -> None:
-    assert _stop_event is not None
-    ws_task = asyncio.create_task(ws_ready.wait())
-    stop_task = asyncio.create_task(_stop_event.wait())
-    done, pending = await asyncio.wait(
-        {ws_task, stop_task},
-        return_when=asyncio.FIRST_COMPLETED,
-    )
-    for t in pending:
-        t.cancel()
-        try:
-            await t
-        except asyncio.CancelledError:
-            pass
-    if stop_task in done:
-        raise asyncio.CancelledError("listener3 stopped")
-    if not ws_ready.is_set():
-        raise RuntimeError("ws wait ended without connection")
-
-
-async def _wait_connect_or_stop(connected: asyncio.Event) -> None:
+async def _wait_enter_outcome(
+    connected: asyncio.Event,
+    session_lost: asyncio.Event,
+) -> None:
+    """等待进房确认成功 / 明确失败 / 用户停止。"""
     assert _stop_event is not None
     conn_task = asyncio.create_task(connected.wait())
+    lost_task = asyncio.create_task(session_lost.wait())
     stop_task = asyncio.create_task(_stop_event.wait())
     done, pending = await asyncio.wait(
-        {conn_task, stop_task},
+        {conn_task, lost_task, stop_task},
         return_when=asyncio.FIRST_COMPLETED,
     )
     for t in pending:
@@ -271,8 +300,6 @@ async def _wait_connect_or_stop(connected: asyncio.Event) -> None:
             pass
     if stop_task in done:
         raise asyncio.CancelledError("listener3 stopped")
-    if not connected.is_set():
-        raise RuntimeError("connect wait ended without connection")
 
 
 async def start_listener(
@@ -330,21 +357,27 @@ async def start_listener(
     _shutdown_fn = _stop_master
 
     try:
-        await _wait_ws_or_stop(ws_ready)
-        logger.info(f"WebSocket 已建立，{_LIVE_DATA_TIMEOUT:.0f}s 内等待初始直播数据…")
+        logger.info(f"{_ENTER_TIMEOUT:.0f}s 内等待进房开播状态（room/enter）…")
         try:
-            await asyncio.wait_for(_wait_connect_or_stop(connected), timeout=_LIVE_DATA_TIMEOUT)
+            await asyncio.wait_for(
+                _wait_enter_outcome(connected, session_lost),
+                timeout=_ENTER_TIMEOUT,
+            )
         except asyncio.TimeoutError:
-            logger.warning(f"WebSocket 建立后 {_LIVE_DATA_TIMEOUT:.0f}s 内未收到初始直播数据，连接失败")
+            logger.warning(f"{_ENTER_TIMEOUT:.0f}s 内未收到进房开播状态，连接失败")
             await _stop_master()
             if on_status:
                 on_status(False)
+            return
+        if not connected.is_set():
+            logger.warning("进房状态显示未开播，连接失败")
+            await _stop_master()
             return
     except asyncio.CancelledError:
         await _stop_master()
         return
 
-    logger.info("WSS 已连接，持续监听…")
+    logger.info("已确认开播，持续监听…")
     session_task = asyncio.create_task(session_lost.wait())
     try:
         done, pending = await asyncio.wait(
