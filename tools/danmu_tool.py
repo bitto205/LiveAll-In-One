@@ -134,11 +134,21 @@ class _DanmuBubble(_DanmuBubbleBase):
         f11 = QFont("Microsoft YaHei"); f11.setPixelSize(11)
         fm13, fm11 = QFontMetrics(f13), QFontMetrics(f11)
 
-        cw       = fm13.horizontalAdvance("国")
+        cw     = fm13.horizontalAdvance("国")
+        min_w  = cw * 4
+        max_w  = cw * 16
+        user_w = fm11.horizontalAdvance(user)
+        text_w = fm13.horizontalAdvance(content)
+        # 略加余量：advance 刚好贴边时 QLabel 常会把末尾几字挤到下一行
+        slack  = max(2, cw // 4)
+
+        need_wrap = text_w > max_w
+        if need_wrap:
+            content_w = max_w
+        else:
+            content_w = max(min_w, user_w, text_w) + slack
+
         h_margin = _BUBBLE_PAD_H + _BUBBLE_FADE_W
-        content_w = max(cw * 4, min(max(fm11.horizontalAdvance(user),
-                                        fm13.horizontalAdvance(content)), cw * 16))
-        # 固定宽度，让 adjustSize() 可按此宽度计算真实换行高度
         self.setFixedWidth(content_w + h_margin * 2)
 
         lay = QVBoxLayout(self)
@@ -147,18 +157,19 @@ class _DanmuBubble(_DanmuBubbleBase):
         lay.setAlignment(Qt.AlignHCenter)
 
         id_lbl = QLabel(user)
+        id_lbl.setFont(f11)
         id_lbl.setAlignment(Qt.AlignHCenter)
         id_lbl.setStyleSheet(
-            "color: rgba(255,255,255,200); font-size: 11px;"
-            " font-weight:600; background:transparent;"
+            "color: rgba(255,255,255,200); font-weight:600; background:transparent;"
         )
+        id_lbl.setFixedWidth(content_w)
 
         msg_lbl = QLabel(content)
+        msg_lbl.setFont(f13)
         msg_lbl.setAlignment(Qt.AlignHCenter)
-        msg_lbl.setWordWrap(True)
-        msg_lbl.setStyleSheet(
-            "color: white; font-size: 13px; background: transparent;"
-        )
+        msg_lbl.setWordWrap(need_wrap)
+        msg_lbl.setStyleSheet("color: white; background: transparent;")
+        msg_lbl.setFixedWidth(content_w)
 
         lay.addWidget(id_lbl)
         lay.addWidget(msg_lbl)
@@ -212,9 +223,11 @@ class _DanmuGiftBubble(_DanmuBubbleBase):
         f11 = QFont("Microsoft YaHei"); f11.setPixelSize(11)
         fm13, fm11 = QFontMetrics(f13), QFontMetrics(f11)
         gift_line  = f"送出了 {msg.gift} ×{msg.count}"
+        # 余量：避免文字宽度与布局可用宽差 1～2px 时异常折行
+        slack = 4
         text_cw    = max(fm11.horizontalAdvance(msg.user),
                          fm13.horizontalAdvance(gift_line),
-                         fm11.horizontalAdvance(suffix) if suffix else 0)
+                         fm11.horizontalAdvance(suffix) if suffix else 0) + slack
 
         pixmap   = self._load_icon(msg.gift_id, msg.gift)
         h_margin = _BUBBLE_PAD_H + _BUBBLE_FADE_W
@@ -240,27 +253,31 @@ class _DanmuGiftBubble(_DanmuBubbleBase):
         text_col.setSpacing(2)
 
         id_lbl = QLabel(msg.user)
+        id_lbl.setFont(f11)
         id_lbl.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         id_lbl.setStyleSheet(
-            "color: rgba(255,255,255,200); font-size: 11px;"
-            " font-weight:600; background:transparent;"
+            "color: rgba(255,255,255,200); font-weight:600; background:transparent;"
         )
+        id_lbl.setFixedWidth(text_cw)
 
         gift_lbl = QLabel(f"送出了 {msg.gift} ×{msg.count}")
+        gift_lbl.setFont(f13)
         gift_lbl.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
-        gift_lbl.setStyleSheet(
-            "color: white; font-size: 13px; background: transparent;"
-        )
+        gift_lbl.setWordWrap(False)
+        gift_lbl.setStyleSheet("color: white; background: transparent;")
+        gift_lbl.setFixedWidth(text_cw)
 
         text_col.addWidget(id_lbl)
         text_col.addWidget(gift_lbl)
 
         if suffix:
             suf_lbl = QLabel(suffix)
+            suf_lbl.setFont(f11)
             suf_lbl.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
             suf_lbl.setStyleSheet(
-                "color: rgba(255,255,255,200); font-size: 11px; background:transparent;"
+                "color: rgba(255,255,255,200); background:transparent;"
             )
+            suf_lbl.setFixedWidth(text_cw)
             text_col.addWidget(suf_lbl)
 
         outer.addLayout(text_col)
