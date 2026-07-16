@@ -16,7 +16,9 @@ import (
 	"math/big"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -56,7 +58,12 @@ func aioDir() string {
 	if _, err := os.Stat(aio); err == nil {
 		return aio
 	}
-	return filepath.Join(home, ".livehelper")
+	legacy := filepath.Join(home, ".livehelper")
+	if _, err := os.Stat(legacy); err == nil {
+		return legacy
+	}
+	_ = os.MkdirAll(aio, 0755)
+	return aio
 }
 
 // ─── Logging ──────────────────────────────────────────────────────────────────
@@ -74,8 +81,10 @@ func setupLogging() {
 	logger = log.New(f, "", log.LstdFlags)
 }
 
-// ─── CA Cert (read-only) ──────────────────────────────────────────────────────
-// CA cert is created by listener4.py during patch. Go only reads it.
+// ─── CA Cert ──────────────────────────────────────────────────────────────────
+// Per-machine CA under ~/.liveaio (or legacy ~/.livehelper).
+// First run: generate if missing, then detect/install into Windows ROOT store.
+// Leaf certs for MITM are minted per hostname.
 
 var (
 	caKey  *rsa.PrivateKey
@@ -83,46 +92,136 @@ var (
 	leafMu sync.Map // hostname → *tls.Certificate
 )
 
-func loadCA() error {
+func caPaths() (certPath, keyPath string) {
 	dir := aioDir()
-	certPath := filepath.Join(dir, "proxy_shell_ca.crt")
-	keyPath := filepath.Join(dir, "proxy_shell_ca.key")
+	return filepath.Join(dir, "proxy_shell_ca.crt"), filepath.Join(dir, "proxy_shell_ca.key")
+}
 
-	certPEM, err := os.ReadFile(certPath)
-	if err != nil {
-		return fmt.Errorf("CA cert not found at %s (run patch first): %w", certPath, err)
-	}
-	keyPEM, err := os.ReadFile(keyPath)
-	if err != nil {
-		return fmt.Errorf("CA key not found at %s: %w", keyPath, err)
-	}
-
-	block, _ := pem.Decode(certPEM)
-	if block == nil {
-		return fmt.Errorf("invalid CA cert PEM")
-	}
-	cert, err := x509.ParseCertificate(block.Bytes)
+func generateCA(certPath, keyPath string) error {
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
 		return err
 	}
+	sn, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
+	if err != nil {
+		return err
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber:          sn,
+		Subject:               pkix.Name{Organization: []string{"LiveAIO"}, CommonName: "LiveAIO Proxy CA"},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().AddDate(10, 0, 0),
+		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign | x509.KeyUsageDigitalSignature,
+		BasicConstraintsValid: true,
+		IsCA:                  true,
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(certPath), 0755); err != nil {
+		return err
+	}
+	certOut, err := os.OpenFile(certPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0644)
+	if err != nil {
+		return err
+	}
+	if err := pem.Encode(certOut, &pem.Block{Type: "CERTIFICATE", Bytes: der}); err != nil {
+		certOut.Close()
+		return err
+	}
+	certOut.Close()
 
+	keyOut, err := os.OpenFile(keyPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
+	if err != nil {
+		return err
+	}
+	defer keyOut.Close()
+	return pem.Encode(keyOut, &pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(key)})
+}
+
+func parseCAFiles(certPath, keyPath string) (*x509.Certificate, *rsa.PrivateKey, error) {
+	certPEM, err := os.ReadFile(certPath)
+	if err != nil {
+		return nil, nil, err
+	}
+	keyPEM, err := os.ReadFile(keyPath)
+	if err != nil {
+		return nil, nil, err
+	}
+	block, _ := pem.Decode(certPEM)
+	if block == nil {
+		return nil, nil, fmt.Errorf("invalid CA cert PEM")
+	}
+	cert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		return nil, nil, err
+	}
 	keyBlock, _ := pem.Decode(keyPEM)
 	if keyBlock == nil {
-		return fmt.Errorf("invalid CA key PEM")
+		return nil, nil, fmt.Errorf("invalid CA key PEM")
 	}
-	// Support both PKCS8 and PKCS1 (TraditionalOpenSSL) formats
 	var rsaKey *rsa.PrivateKey
 	if k, err8 := x509.ParsePKCS8PrivateKey(keyBlock.Bytes); err8 == nil {
 		rsaKey = k.(*rsa.PrivateKey)
 	} else if k1, err1 := x509.ParsePKCS1PrivateKey(keyBlock.Bytes); err1 == nil {
 		rsaKey = k1
 	} else {
-		return fmt.Errorf("cannot parse CA key: %v", err8)
+		return nil, nil, fmt.Errorf("cannot parse CA key: %v", err8)
 	}
+	return cert, rsaKey, nil
+}
 
+func caInTrustStore() bool {
+	cmd := exec.Command("powershell", "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden",
+		"-Command",
+		`$s = Get-ChildItem Cert:\LocalMachine\Root | Where-Object { $_.Subject -like '*LiveAIO*' -or $_.Subject -like '*LiveHelper*' }; if ($s.Count -gt 0) { 'YES' }`)
+	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return false
+	}
+	return strings.Contains(string(out), "YES")
+}
+
+func installCAToTrustStore(certPath string) {
+	if caInTrustStore() {
+		logger.Println("CA already trusted in Windows ROOT store")
+		return
+	}
+	cmd := exec.Command("certutil", "-addstore", "-f", "ROOT", certPath)
+	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
+	out, err := cmd.CombinedOutput()
+	msg := strings.TrimSpace(string(out))
+	if err != nil {
+		logger.Printf("WARN: failed to install CA to ROOT store: %v (%s)", err, msg)
+		logger.Println("TLS MITM may fail until the CA is trusted (re-run as admin or install via LiveAIO patch check)")
+		return
+	}
+	logger.Printf("CA installed to Windows ROOT store: %s", msg)
+}
+
+// ensureCA generates a per-machine CA on first run if missing, loads it, and
+// installs into the Windows ROOT store when not already present.
+func ensureCA() error {
+	certPath, keyPath := caPaths()
+	_, errC := os.Stat(certPath)
+	_, errK := os.Stat(keyPath)
+	if errC != nil || errK != nil {
+		logger.Printf("CA missing, generating at %s", filepath.Dir(certPath))
+		if err := generateCA(certPath, keyPath); err != nil {
+			return fmt.Errorf("generate CA: %w", err)
+		}
+		logger.Println("CA generated")
+	}
+	cert, key, err := parseCAFiles(certPath, keyPath)
+	if err != nil {
+		return err
+	}
 	caCert = cert
-	caKey = rsaKey
+	caKey = key
 	logger.Println("CA cert loaded")
+	installCAToTrustStore(certPath)
 	return nil
 }
 
@@ -174,8 +273,10 @@ type ipcServer struct {
 
 var (
 	wsRelayActive uint32 // 1=webcast WSS relay running (101 upgrade done)
-	liveActive    uint32 // 1=received at least one server binary frame
+	liveActive    uint32 // 1=room/enter status==2（开播中）
 )
+
+var roomEnterStatusRe = regexp.MustCompile(`"status"\s*:\s*([24])\s*,\s*"status_str"`)
 
 func isWSRelayActive() bool {
 	return atomic.LoadUint32(&wsRelayActive) == 1
@@ -183,6 +284,37 @@ func isWSRelayActive() bool {
 
 func isLiveActive() bool {
 	return atomic.LoadUint32(&liveActive) == 1
+}
+
+func parseRoomEnterStatus(body []byte) (int, bool) {
+	m := roomEnterStatusRe.FindSubmatch(body)
+	if m == nil {
+		return 0, false
+	}
+	var st int
+	if _, err := fmt.Sscanf(string(m[1]), "%d", &st); err != nil {
+		return 0, false
+	}
+	return st, true
+}
+
+func isRoomEnterRequest(req []byte) bool {
+	lower := bytes.ToLower(req)
+	return bytes.Contains(lower, []byte("/room/")) && bytes.Contains(lower, []byte("enter"))
+}
+
+func headerContentLength(hdr []byte) int {
+	for _, line := range bytes.Split(hdr, []byte("\n")) {
+		lower := bytes.ToLower(bytes.TrimSpace(line))
+		if bytes.HasPrefix(lower, []byte("content-length:")) {
+			val := bytes.TrimSpace(lower[len("content-length:"):])
+			var n int
+			if _, err := fmt.Sscanf(string(val), "%d", &n); err == nil {
+				return n
+			}
+		}
+	}
+	return -1
 }
 
 func pushIPCControl(ipc *ipcServer, state string) {
@@ -353,11 +485,12 @@ func readWSFrame(r io.Reader) (opcode byte, payload []byte, fin bool, err error)
 	opcode = hdr[0] & 0x0F
 	masked := hdr[1]&0x80 != 0
 	plen := uint64(hdr[1] & 0x7F)
-	if plen == 126 {
+	switch plen {
+	case 126:
 		ext := make([]byte, 2)
 		io.ReadFull(r, ext)
 		plen = uint64(binary.BigEndian.Uint16(ext))
-	} else if plen == 127 {
+	case 127:
 		ext := make([]byte, 8)
 		io.ReadFull(r, ext)
 		plen = binary.BigEndian.Uint64(ext)
@@ -411,16 +544,8 @@ func relayWS(clientR io.Reader, clientW io.Writer,
 	beginWSRelay(ipc, host)
 	defer endWSRelay(ipc, host)
 
-	var liveSignaled bool
-	signalLive := func() {
-		if liveSignaled {
-			return
-		}
-		liveSignaled = true
-		setLiveActive(true, ipc, host)
-	}
-
 	// server → client: reassemble fragmented frames, push complete payloads to IPC
+	// 开播判定改由 room/enter HTTP status=2 触发，不再用首包二进制帧确认
 	go func() {
 		var acc []byte
 		var curOpcode byte
@@ -439,7 +564,6 @@ func relayWS(clientR io.Reader, clientW io.Writer,
 				acc = append(acc, payload...)
 			}
 			if fin && curOpcode == 2 { // complete binary message from server
-				signalLive()
 				ipc.push(acc)
 				acc = nil
 			}
@@ -486,6 +610,13 @@ func relayHTTP(clientConn, serverConn net.Conn, host string, ipc *ipcServer) {
 		return
 	}
 	isWS := bytes.Contains(bytes.ToLower(req), []byte("upgrade: websocket"))
+	// Forward any request body already available (fixed Content-Length POST etc.)
+	if cl := headerContentLength(req); cl > 0 && cl <= 4<<20 {
+		body := make([]byte, cl)
+		if _, err := io.ReadFull(clientBuf, body); err == nil {
+			req = append(req, body...)
+		}
+	}
 	serverConn.Write(req)
 
 	resp, err := readHeaders(serverBuf)
@@ -503,6 +634,20 @@ func relayHTTP(clientConn, serverConn net.Conn, host string, ipc *ipcServer) {
 		logger.Printf("WS: %s", host)
 		relayWS(clientBuf, clientConn, serverBuf, serverConn, host, ipc)
 		return
+	}
+
+	// Sniff room/enter JSON for开播状态（status 2=开播, 4=结束）
+	if isRoomEnterRequest(req) {
+		if cl := headerContentLength(resp); cl > 0 && cl <= 4<<20 {
+			body := make([]byte, cl)
+			if _, err := io.ReadFull(serverBuf, body); err == nil {
+				clientConn.Write(body)
+				if st, ok := parseRoomEnterStatus(body); ok {
+					logger.Printf("room enter status=%d host=%s", st, host)
+					setLiveActive(st == 2, ipc, host)
+				}
+			}
+		}
 	}
 
 	done := make(chan struct{}, 2)
@@ -670,7 +815,7 @@ func main() {
 	selfCheck()
 	go watchParent()
 
-	if err := loadCA(); err != nil {
+	if err := ensureCA(); err != nil {
 		logger.Printf("WARN: %v", err)
 		logger.Println("Proxy will run without TLS MITM until CA cert is available")
 		// Don't exit — proxy can still tunnel non-webcast traffic.

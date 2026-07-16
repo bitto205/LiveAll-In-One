@@ -1,4 +1,4 @@
-"""应用日志：统一格式，连接成功后可写文件。"""
+"""应用日志：单次启动一份按时间命名的 session 日志（boot + listener 共用）。"""
 from __future__ import annotations
 
 import logging
@@ -9,10 +9,13 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from util.paths import app_root, log_dir
+from util.paths import log_dir
 
-_attached: set[str] = set()
-_session_ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+# 进程级 session：可用环境变量复用（便于测试）；默认按启动时刻命名
+_session_ts = os.environ.get("LIVEAIO_LOG_SESSION") or datetime.now().strftime("%Y%m%d_%H%M%S")
+_SESSION_LOG_PATH: Path | None = None
+_attached_connect: set[str] = set()
+
 _LOG_FMT = "%(asctime)s | %(levelname)s | %(message)s"
 
 _MSG_LOG_DIR = log_dir() / "msg_log"
@@ -52,6 +55,31 @@ class _PrefixAdapter(logging.LoggerAdapter):
         return text, kwargs
 
 
+def session_timestamp() -> str:
+    return _session_ts
+
+
+def session_log_path() -> Path:
+    """本次运行唯一日志文件：log/YYYYMMDD_HHMMSS.log"""
+    global _SESSION_LOG_PATH
+    if _SESSION_LOG_PATH is None:
+        root = log_dir()
+        root.mkdir(parents=True, exist_ok=True)
+        _SESSION_LOG_PATH = root / f"{_session_ts}.log"
+    return _SESSION_LOG_PATH
+
+
+def write_boot_line(msg: str) -> None:
+    """启动早期文本行（UAC / launcher），写入同一份 session 日志。"""
+    try:
+        path = session_log_path()
+        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S,%f")[:-3]
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(f"{ts} | INFO | [boot] {msg}\n")
+    except Exception:
+        pass
+
+
 def get_logger(name: str) -> logging.Logger:
     return logging.getLogger(name)
 
@@ -80,21 +108,29 @@ def suppress_proxy_noise() -> None:
         _attach_noise_filter(handler)
 
 
-def ensure_startup_log() -> Path:
-    """打包后无控制台时，把日志写到 exe 旁 log/liveaio.log。"""
-    root = log_dir()
-    root.mkdir(parents=True, exist_ok=True)
-    path = root / "liveaio.log"
+def _ensure_session_file_handler() -> Path:
+    """把 root logger 接到本次 session 日志文件（幂等）。"""
+    path = session_log_path()
     logger = logging.getLogger()
     logger.setLevel(logging.INFO)
     abs_path = str(path.resolve())
-    if any(getattr(h, "baseFilename", "") == abs_path for h in logger.handlers
-           if isinstance(h, logging.FileHandler)):
+    if any(
+        getattr(h, "baseFilename", "") == abs_path
+        for h in logger.handlers
+        if isinstance(h, logging.FileHandler)
+    ):
         return path
     fh = logging.FileHandler(path, encoding="utf-8")
     fh.setFormatter(logging.Formatter(_LOG_FMT))
     _attach_noise_filter(fh)
     logger.addHandler(fh)
+    return path
+
+
+def ensure_startup_log() -> Path:
+    """启动时挂上本次 session 文件日志（boot / listener / UI 共用）。"""
+    path = _ensure_session_file_handler()
+    ensure_console_logging()
     return path
 
 
@@ -119,29 +155,23 @@ def ensure_console_logging(level: int = logging.INFO) -> None:
 
 
 def on_connect_success(listener_name: str) -> None:
+    """连接成功：继续写入同一份 session 日志（不再另开 listener_*.log）。"""
     ensure_console_logging()
-    if listener_name in _attached:
+    _ensure_session_file_handler()
+    if listener_name in _attached_connect:
         return
-    _attached.add(listener_name)
-    root_dir = log_dir()
-    root_dir.mkdir(parents=True, exist_ok=True)
-    root = logging.getLogger()
-    fmt = logging.Formatter(_LOG_FMT)
-    path = root_dir / f"{listener_name}_{_session_ts}.log"
-    abs_path = str(path.resolve())
-    if not any(getattr(h, "baseFilename", "") == abs_path for h in root.handlers):
-        fh = logging.FileHandler(path, encoding="utf-8")
-        fh.setFormatter(fmt)
-        _attach_noise_filter(fh)
-        root.addHandler(fh)
+    _attached_connect.add(listener_name)
     tag = _ROUTE_BY_LISTENER.get(listener_name, listener_name)
     if listener_name.startswith("listener"):
-        get_listener_logger(tag).info("✅ 连接成功，开始记录日志")
+        get_listener_logger(tag).info("✅ 连接成功，开始记录日志 → %s", session_log_path().name)
     else:
-        get_tagged_logger(tag, listener_name).info("✅ 连接成功，开始记录日志")
+        get_tagged_logger(tag, listener_name).info(
+            "✅ 连接成功，开始记录日志 → %s", session_log_path().name
+        )
 
 
 def make_msg_logger(live_id: str) -> logging.Logger:
+    """debug 弹幕明细仍单独落盘（与 session 运行日志分离）。"""
     root_dir = _MSG_LOG_DIR
     root_dir.mkdir(parents=True, exist_ok=True)
     safe_id = re.sub(r'[\\/*?:"<>|]', "_", live_id)

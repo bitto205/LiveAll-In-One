@@ -5,6 +5,7 @@ import asyncio
 import sys
 
 from PySide6.QtCore import QObject, QThread, QTimer, QtMsgType, Signal, qInstallMessageHandler
+from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QApplication
 
 from util.overlay_capture import prepare_app_alpha_format
@@ -41,6 +42,17 @@ def _set_process_name(name: str) -> None:
         )
     except Exception:
         pass
+
+
+def _load_app_icon() -> QIcon | None:
+    icon_path = app_root() / "image" / "icon.png"
+    if not icon_path.is_file():
+        return None
+    icon = QIcon(str(icon_path))
+    # QIcon.isNull() 只表示对象是否初始化；用 pixmap 可验证资源是否可实际解码渲染。
+    if icon.pixmap(64, 64).isNull():
+        return None
+    return icon
 
 
 class ListenerThread(QThread):
@@ -87,7 +99,7 @@ class ListenerThread(QThread):
                     pass
             try:
                 if self._loop and not self._loop.is_closed():
-                    pending = asyncio.all_tasks(self._loop)
+                    pending = [t for t in asyncio.all_tasks(self._loop) if not t.done()]
                     for t in pending:
                         t.cancel()
                     if pending:
@@ -96,11 +108,30 @@ class ListenerThread(QThread):
                         )
             except Exception:
                 pass
+            # Windows Proactor：关 loop 前收尾 asyncgen / executor，给管道 transport 收尾机会
+            try:
+                if self._loop and not self._loop.is_closed():
+                    self._loop.run_until_complete(self._loop.shutdown_asyncgens())
+            except Exception:
+                pass
+            try:
+                if self._loop and not self._loop.is_closed() and hasattr(
+                    self._loop, "shutdown_default_executor"
+                ):
+                    self._loop.run_until_complete(self._loop.shutdown_default_executor())
+            except Exception:
+                pass
+            try:
+                if self._loop and not self._loop.is_closed():
+                    self._loop.run_until_complete(asyncio.sleep(0.05))
+            except Exception:
+                pass
             try:
                 if self._loop and not self._loop.is_closed():
                     self._loop.close()
             except Exception:
                 pass
+            self._loop = None
 
     async def _listen(self):
         if self._route == "4":
@@ -139,6 +170,20 @@ class ListenerThread(QThread):
                     return
             except Exception:
                 pass
+        if self._route == "1":
+            try:
+                from listener.listener1 import request_listener_stop
+                if request_listener_stop():
+                    return
+            except Exception:
+                pass
+        if self._route == "2":
+            try:
+                from listener.listener2 import request_listener_stop
+                if request_listener_stop():
+                    return
+            except Exception:
+                pass
         if self._loop and not self._loop.is_closed():
             if self._route == "3":
                 import listener.listener3 as l3
@@ -161,6 +206,9 @@ class App(QObject):
         self._qt.setApplicationName(APP_NAME)
         self._qt.setApplicationDisplayName(APP_NAME)
         self._qt.setOrganizationName(APP_NAME)
+        icon = _load_app_icon()
+        if icon is not None:
+            self._qt.setWindowIcon(icon)
         import config as _cfg
         self._qt.setQuitOnLastWindowClosed(not _cfg.get("minimize_to_tray", True))
         _set_process_name(APP_NAME)
@@ -170,6 +218,8 @@ class App(QObject):
 
         from pages.main_page import MainPage
         self._win = MainPage()
+        if icon is not None:
+            self._win.setWindowIcon(icon)
 
         self.message_received.connect(self._win.broadcast_message)
         self.status_changed.connect(self._win.broadcast_status)
