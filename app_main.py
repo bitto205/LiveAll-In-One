@@ -296,7 +296,7 @@ def run_app() -> int:
     qInstallMessageHandler(_qt_msg_handler)
     logger.info("%s 启动", APP_NAME)
 
-    from listener.browser_trim import trim_playwright_browsers
+    from util.browser_trim import trim_playwright_browsers
     trim_playwright_browsers(app_root() / "browsers")
 
     app = App(sys.argv)
