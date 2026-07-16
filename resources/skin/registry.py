@@ -39,7 +39,7 @@ def _read_meta(skin_dir: Path) -> dict:
     if not path.is_file():
         return {"id": skin_dir.name, "name": skin_dir.name}
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
+        data = json.loads(path.read_text(encoding="utf-8-sig"))
         return data if isinstance(data, dict) else {"id": skin_dir.name}
     except Exception as e:
         logger.warning("读取皮肤失败 %s: %s", path, e)
