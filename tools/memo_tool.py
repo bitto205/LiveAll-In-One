@@ -71,7 +71,7 @@ def _qss():
 
 
 def _gift_diamonds(msg: GiftMessage) -> int | None:
-    from gift.gift_info import get_diamonds, all_gifts
+    from resources.gift.gift_info import get_diamonds, all_gifts
     d = get_diamonds(msg.gift)
     if d is not None:
         return d

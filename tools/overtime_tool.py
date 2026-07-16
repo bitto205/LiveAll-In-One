@@ -69,7 +69,7 @@ RULE_COUNT = 6
 def make_sim_gift_message(gift: str, count: int):
     """构造模拟 GiftMessage（字段与 listener.models.GiftMessage 一致）。"""
     from util.models import GiftMessage
-    from gift.gift_info import get_gift_id
+    from resources.gift.gift_info import get_gift_id
 
     name = (gift or SIM_DEFAULT_GIFT).strip() or SIM_DEFAULT_GIFT
     n = _clamp_int(count, 0, 9999)
@@ -209,7 +209,7 @@ def _next_unused_gift(used: set[str], *, prefer_index: int) -> str:
         if g not in used:
             return g
     try:
-        from gift.gift_info import all_gifts
+        from resources.gift.gift_info import all_gifts
         for g in sorted(all_gifts().keys()):
             if g not in used:
                 return g

@@ -1182,7 +1182,7 @@ class DanmuTool(ToolSingleton, QMainWindow):
                 return
             min_d = int(self._active.get("danmu_gift_min_diamonds", 0) or 0)
             if min_d > 0:
-                from gift.gift_info import get_diamonds
+                from resources.gift.gift_info import get_diamonds
                 if (get_diamonds(msg.gift) or 0) < min_d:
                     return
             self._send_to_danmu(msg)

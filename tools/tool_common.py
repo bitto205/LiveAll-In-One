@@ -102,13 +102,13 @@ def _force_close_all_tool_windows() -> int:
 def gift_names_cached() -> list[str]:
     global _GIFT_NAMES_CACHE
     if _GIFT_NAMES_CACHE is None:
-        from gift.gift_info import all_gifts
+        from resources.gift.gift_info import all_gifts
         _GIFT_NAMES_CACHE = sorted(all_gifts().keys())
     return _GIFT_NAMES_CACHE
 
 
 def load_gift_pixmap(gift_name: str, side: int) -> QPixmap | None:
-    from gift.gift_info import get_gift_id, get_icon_path
+    from resources.gift.gift_info import get_gift_id, get_icon_path
 
     path = get_icon_path(gift_name)
     if not path:

@@ -172,7 +172,7 @@ class DanmuGiftBubble(DanmuBubbleBase):
     @staticmethod
     def _load_icon(gift_id: int, gift_name: str) -> QPixmap | None:
         try:
-            from gift.gift_info import get_icon_path
+            from resources.gift.gift_info import get_icon_path
             path = get_icon_path(gift_name)
         except Exception:
             path = None
