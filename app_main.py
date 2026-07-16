@@ -328,8 +328,15 @@ class App(QObject):
 
 def _warmup_background() -> None:
     from util.playwright_bootstrap import configure_playwright_browsers, log_browser_mode
+    from util.browser_trim import trim_playwright_browsers
+
     configure_playwright_browsers(app_root())
     log_browser_mode()
+    # trim 可能扫盘，放到后台，避免堵住启动
+    try:
+        trim_playwright_browsers(app_root() / "browsers")
+    except Exception:
+        pass
 
 
 def _defer_save_location() -> None:
@@ -346,8 +353,9 @@ def run_app() -> int:
     qInstallMessageHandler(_qt_msg_handler)
     logger.info("%s 启动", APP_NAME)
 
-    from util.browser_trim import trim_playwright_browsers
-    trim_playwright_browsers(app_root() / "browsers")
+    # 启动路径只做轻量探测；精简 browsers/ 放到 _warmup_background
+    from util.playwright_bootstrap import configure_playwright_browsers
+    configure_playwright_browsers(app_root())
 
     app = App(sys.argv)
     QTimer.singleShot(0, _warmup_background)

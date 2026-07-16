@@ -16,11 +16,6 @@ _BASE_ARGS = ["--disable-blink-features=AutomationControlled", "--no-sandbox"]
 # Chrome headless 部分环境需 CLI 显式 new 模式
 _CHROME_HEADLESS_ARGS = ("--headless=new",)
 
-_WIN_CANDIDATES = (
-    ("chromium_headless_shell-*", "chrome-headless-shell-win64", "chrome-headless-shell.exe"),
-    ("chromium_headless_shell-*", "chrome-headless-shell-win32", "chrome-headless-shell.exe"),
-)
-
 
 from util.paths import app_root
 
@@ -30,10 +25,24 @@ def _app_root() -> Path:
 
 
 def _find_bundled_exe(browsers_dir: Path) -> Path | None:
+    """只扫 browsers/ 顶层目录名，避免 glob 扫进大树。"""
     if not browsers_dir.is_dir():
         return None
-    for glob_pat, sub, exe in _WIN_CANDIDATES:
-        for d in browsers_dir.glob(glob_pat):
+    try:
+        children = list(browsers_dir.iterdir())
+    except OSError:
+        return None
+    # 同名前缀可能有多版，取名字排序后的最新（revision 一般递增）
+    shells = sorted(
+        (d for d in children if d.is_dir() and d.name.startswith("chromium_headless_shell-")),
+        key=lambda p: p.name,
+        reverse=True,
+    )
+    for d in shells:
+        for sub, exe in (
+            ("chrome-headless-shell-win64", "chrome-headless-shell.exe"),
+            ("chrome-headless-shell-win32", "chrome-headless-shell.exe"),
+        ):
             path = d / sub / exe
             if path.is_file():
                 return path

@@ -26,34 +26,76 @@ _SHELL_DIR_NAMES = (
 )
 
 # browsers/ 下只保留 headless shell，其余 Playwright 附带物直接删
-_ROOT_REMOVE_DIR_GLOBS = (
-    "ffmpeg-*",
-    "winldd-*",
-    "chromium-*",
+_ROOT_REMOVE_PREFIXES = (
+    "ffmpeg-",
+    "winldd-",
+    "chromium-",  # 不含 chromium_headless_shell-
 )
 
 # 运行/调试残留，不应随包分发
 _PRIVACY_FILES = ("debug.log",)
 
 
-def _dir_size_mb(path: Path) -> float:
-    if not path.is_dir():
-        return 0.0
-    total = sum(f.stat().st_size for f in path.rglob("*") if f.is_file())
-    return round(total / (1024 * 1024), 1)
-
-
 def _shell_dirs(browsers: Path) -> list[Path]:
-    return [
-        d / sub
-        for d in browsers.glob("chromium_headless_shell-*")
-        for sub in ("chrome-headless-shell-win64", "chrome-headless-shell-win32")
-        if (d / sub).is_dir()
-    ]
+    out: list[Path] = []
+    try:
+        children = list(browsers.iterdir())
+    except OSError:
+        return out
+    for d in children:
+        if not d.is_dir() or not d.name.startswith("chromium_headless_shell-"):
+            continue
+        for sub in ("chrome-headless-shell-win64", "chrome-headless-shell-win32"):
+            path = d / sub
+            if path.is_dir():
+                out.append(path)
+    return out
+
+
+def _root_junk_dirs(browsers: Path) -> list[Path]:
+    junk: list[Path] = []
+    try:
+        children = list(browsers.iterdir())
+    except OSError:
+        return junk
+    for d in children:
+        if not d.is_dir():
+            continue
+        name = d.name
+        if name.startswith("chromium_headless_shell-"):
+            continue
+        if any(name.startswith(p) for p in _ROOT_REMOVE_PREFIXES):
+            junk.append(d)
+    return junk
+
+
+def _shell_needs_trim(shell: Path) -> bool:
+    for name in _SHELL_DIR_NAMES:
+        if (shell / name).is_dir():
+            return True
+    locales = shell / "locales"
+    if locales.is_dir():
+        try:
+            for f in locales.iterdir():
+                if f.is_file() and f.name not in _KEEP_LOCALES:
+                    return True
+        except OSError:
+            pass
+    for name in _PRIVACY_FILES:
+        if (shell / name).is_file():
+            return True
+    return False
+
+
+def _needs_trim(browsers: Path) -> bool:
+    """浅层探测：有垃圾才 trim，避免每次启动全树 rglob 算体积。"""
+    if _root_junk_dirs(browsers):
+        return True
+    return any(_shell_needs_trim(s) for s in _shell_dirs(browsers))
 
 
 def trim_playwright_browsers(browsers_dir: str | Path | None = None) -> float:
-    """精简 browsers/。返回节省的 MB（约数）。"""
+    """精简 browsers/。返回大致节省的 MB（仅在实际删除时估算，可能为 0）。"""
     if browsers_dir is None:
         root = Path(__file__).resolve().parent.parent / "browsers"
     else:
@@ -61,42 +103,45 @@ def trim_playwright_browsers(browsers_dir: str | Path | None = None) -> float:
     if not root.is_dir():
         return 0.0
 
-    before = _dir_size_mb(root)
+    if not _needs_trim(root):
+        return 0.0
 
-    for pattern in _ROOT_REMOVE_DIR_GLOBS:
-        for d in root.glob(pattern):
-            if not d.is_dir():
-                continue
-            if pattern == "chromium-*" and "headless_shell" in d.name:
-                continue
-            shutil.rmtree(d, ignore_errors=True)
-            logger.info("已删除浏览器目录: %s", d.name)
+    removed = 0
+    for d in _root_junk_dirs(root):
+        shutil.rmtree(d, ignore_errors=True)
+        removed += 1
+        logger.info("已删除浏览器目录: %s", d.name)
 
     for shell in _shell_dirs(root):
         for name in _SHELL_DIR_NAMES:
             target = shell / name
             if target.is_dir():
                 shutil.rmtree(target, ignore_errors=True)
+                removed += 1
                 logger.info("已删除: %s/%s", shell.name, name)
 
         locales = shell / "locales"
         if locales.is_dir():
-            for f in locales.iterdir():
-                if f.is_file() and f.name not in _KEEP_LOCALES:
-                    try:
-                        f.unlink()
-                    except OSError:
-                        pass
+            try:
+                for f in locales.iterdir():
+                    if f.is_file() and f.name not in _KEEP_LOCALES:
+                        try:
+                            f.unlink()
+                            removed += 1
+                        except OSError:
+                            pass
+            except OSError:
+                pass
 
         for name in _PRIVACY_FILES:
             f = shell / name
             if f.is_file():
                 try:
                     f.unlink()
+                    removed += 1
                 except OSError:
                     pass
 
-    saved = round(before - _dir_size_mb(root), 1)
-    if saved > 0:
-        logger.info("浏览器精简: %.1f MB -> %.1f MB（省 %.1f MB）", before, _dir_size_mb(root), saved)
-    return saved
+    if removed:
+        logger.info("浏览器精简完成（删除 %d 项）", removed)
+    return float(removed)
