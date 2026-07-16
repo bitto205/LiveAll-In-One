@@ -24,7 +24,7 @@ from PySide6.QtCore  import (
 )
 from PySide6.QtGui   import (
     QPainter, QColor, QPainterPath, QPen, QRegion,
-    QLinearGradient, QFont, QFontMetrics, QPixmap,
+    QFont, QFontMetrics, QPixmap,
 )
 
 import util.theme as _theme
@@ -44,13 +44,31 @@ _BTN_W      = 32    # 每个控制按钮宽度（px）
 # 顶栏拖动区左边距（为圆圈留空）
 _DRAG_L     = _CIRCLE_OFF + _CIRCLE_D + 4
 
-# 弹幕气泡渐变参数
-_BUBBLE_FADE_W  = 22   # 左右淡出区宽度（文字区以外的延伸，px）
-_BUBBLE_PAD_H   = 12   # 文字区水平内边距（px）
-_BUBBLE_PAD_V   = 7    # 文字区垂直内边距（px）
-# 礼物气泡图标参数
-_GIFT_ICON_SIZE = 32   # 礼物图标边长（px，正方）
-_GIFT_ICON_GAP  = 8    # 图标与文字区间距（px）
+# 弹幕气泡默认度量（无皮肤 JSON 时的回退；正式值见 resources/skin/danmu/）
+_BUBBLE_FADE_W  = 22
+_BUBBLE_PAD_H   = 12
+_BUBBLE_PAD_V   = 7
+_GIFT_ICON_SIZE = 32
+_GIFT_ICON_GAP  = 8
+
+
+def _danmu_skin():
+    from util.skin import get_active_skin
+    return get_active_skin("danmu")
+
+
+def _danmu_metrics():
+    try:
+        return _danmu_skin().metrics()
+    except Exception:
+        from util.skin.base import SkinMetrics
+        return SkinMetrics(
+            fade_w=_BUBBLE_FADE_W,
+            pad_h=_BUBBLE_PAD_H,
+            pad_v=_BUBBLE_PAD_V,
+            gift_icon_size=_GIFT_ICON_SIZE,
+            gift_icon_gap=_GIFT_ICON_GAP,
+        )
 
 
 # ─────────────────────────────────────────────
@@ -59,12 +77,12 @@ _GIFT_ICON_GAP  = 8    # 图标与文字区间距（px）
 class _DanmuBubbleBase(QWidget):
     """
     弹幕/礼物气泡基类。
-    提供：透明背景、无边框横向渐变（中心 50% → 边缘 0%）、淡入淡出生命周期。
-    子类只需实现 _build() 并在 __init__ 中调用 _start_lifecycle()。
+    外观由 util.skin（tool=danmu）绘制；子类实现 _build() 并调用 _start_lifecycle()。
     """
     _FADE_IN_MS  = 300
     _STAY_MS     = 3000
     _FADE_OUT_MS = 500
+    _SKIN_SURFACE = "bubble"
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -102,19 +120,10 @@ class _DanmuBubbleBase(QWidget):
 
     def paintEvent(self, _event):
         p = QPainter(self)
-        w = self.width()
-        h = self.height()
-        f = _BUBBLE_FADE_W / w if w > 0 else 0.2
-
-        grad = QLinearGradient(0, 0, w, 0)
-        grad.setColorAt(0.0,     QColor(0, 0, 0, 0))
-        grad.setColorAt(f,       QColor(0, 0, 0, 128))
-        grad.setColorAt(1.0 - f, QColor(0, 0, 0, 128))
-        grad.setColorAt(1.0,     QColor(0, 0, 0, 0))
-
-        p.setPen(Qt.NoPen)
-        p.setBrush(grad)
-        p.drawRect(0, 0, w, h)
+        try:
+            _danmu_skin().paint_surface(self, self._SKIN_SURFACE, p)
+        except Exception:
+            pass
         p.end()
 
 
@@ -148,27 +157,27 @@ class _DanmuBubble(_DanmuBubbleBase):
         else:
             content_w = max(min_w, user_w, text_w) + slack
 
-        h_margin = _BUBBLE_PAD_H + _BUBBLE_FADE_W
+        m = _danmu_metrics()
+        skin = _danmu_skin()
+        h_margin = m.pad_h + m.fade_w
         self.setFixedWidth(content_w + h_margin * 2)
 
         lay = QVBoxLayout(self)
-        lay.setContentsMargins(h_margin, _BUBBLE_PAD_V, h_margin, _BUBBLE_PAD_V)
+        lay.setContentsMargins(h_margin, m.pad_v, h_margin, m.pad_v)
         lay.setSpacing(2)
         lay.setAlignment(Qt.AlignHCenter)
 
         id_lbl = QLabel(user)
         id_lbl.setFont(f11)
         id_lbl.setAlignment(Qt.AlignHCenter)
-        id_lbl.setStyleSheet(
-            "color: rgba(255,255,255,200); font-weight:600; background:transparent;"
-        )
+        id_lbl.setStyleSheet(skin.stylesheet("user") + " font-weight:600;")
         id_lbl.setFixedWidth(content_w)
 
         msg_lbl = QLabel(content)
         msg_lbl.setFont(f13)
         msg_lbl.setAlignment(Qt.AlignHCenter)
         msg_lbl.setWordWrap(need_wrap)
-        msg_lbl.setStyleSheet("color: white; background: transparent;")
+        msg_lbl.setStyleSheet(skin.stylesheet("body"))
         msg_lbl.setFixedWidth(content_w)
 
         lay.addWidget(id_lbl)
@@ -178,18 +187,17 @@ class _DanmuBubble(_DanmuBubbleBase):
 # ─────────────────────────────────────────────
 # 礼物气泡（GiftMessage）
 # ─────────────────────────────────────────────
-_GIFT_ICONS_DIR = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-    "gift", "icon",
-)
+from util.paths import gift_dir
+
+_GIFT_ICONS_DIR = str(gift_dir() / "icon")
 
 
 class _DanmuGiftBubble(_DanmuBubbleBase):
     """
-    左边礼物图标（有则显示，正方 _GIFT_ICON_SIZE px），
-    右边两行左对齐文字：昵称 / 送出了 礼物名 × 数量。
-    无图标时仅显示双行文字。
+    左边礼物图标（有则显示），右边两行左对齐文字：昵称 / 送出了 礼物名 × 数量。
+    无图标时仅显示双行文字。外观走 danmu 皮肤 gift_bubble。
     """
+    _SKIN_SURFACE = "gift_bubble"
 
     def __init__(self, msg, suffix: str = "", parent=None):
         super().__init__(parent)
@@ -229,20 +237,24 @@ class _DanmuGiftBubble(_DanmuBubbleBase):
                          fm13.horizontalAdvance(gift_line),
                          fm11.horizontalAdvance(suffix) if suffix else 0) + slack
 
-        pixmap   = self._load_icon(msg.gift_id, msg.gift)
-        h_margin = _BUBBLE_PAD_H + _BUBBLE_FADE_W
-        inner_w  = text_cw + ((_GIFT_ICON_SIZE + _GIFT_ICON_GAP) if pixmap else 0)
+        pixmap = self._load_icon(msg.gift_id, msg.gift)
+        m = _danmu_metrics()
+        skin = _danmu_skin()
+        icon_sz = m.gift_icon_size
+        icon_gap = m.gift_icon_gap
+        h_margin = m.pad_h + m.fade_w
+        inner_w = text_cw + ((icon_sz + icon_gap) if pixmap else 0)
         self.setFixedWidth(inner_w + h_margin * 2)
 
         outer = QHBoxLayout(self)
-        outer.setContentsMargins(h_margin, _BUBBLE_PAD_V, h_margin, _BUBBLE_PAD_V)
-        outer.setSpacing(_GIFT_ICON_GAP)
+        outer.setContentsMargins(h_margin, m.pad_v, h_margin, m.pad_v)
+        outer.setSpacing(icon_gap)
         outer.setAlignment(Qt.AlignVCenter)
         if pixmap:
             icon_lbl = QLabel()
-            icon_lbl.setFixedSize(_GIFT_ICON_SIZE, _GIFT_ICON_SIZE)
+            icon_lbl.setFixedSize(icon_sz, icon_sz)
             icon_lbl.setPixmap(
-                pixmap.scaled(_GIFT_ICON_SIZE, _GIFT_ICON_SIZE,
+                pixmap.scaled(icon_sz, icon_sz,
                               Qt.KeepAspectRatio, Qt.SmoothTransformation)
             )
             icon_lbl.setStyleSheet("background: transparent;")
@@ -255,16 +267,14 @@ class _DanmuGiftBubble(_DanmuBubbleBase):
         id_lbl = QLabel(msg.user)
         id_lbl.setFont(f11)
         id_lbl.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
-        id_lbl.setStyleSheet(
-            "color: rgba(255,255,255,200); font-weight:600; background:transparent;"
-        )
+        id_lbl.setStyleSheet(skin.stylesheet("user") + " font-weight:600;")
         id_lbl.setFixedWidth(text_cw)
 
         gift_lbl = QLabel(f"送出了 {msg.gift} ×{msg.count}")
         gift_lbl.setFont(f13)
         gift_lbl.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         gift_lbl.setWordWrap(False)
-        gift_lbl.setStyleSheet("color: white; background: transparent;")
+        gift_lbl.setStyleSheet(skin.stylesheet("body"))
         gift_lbl.setFixedWidth(text_cw)
 
         text_col.addWidget(id_lbl)
@@ -274,9 +284,7 @@ class _DanmuGiftBubble(_DanmuBubbleBase):
             suf_lbl = QLabel(suffix)
             suf_lbl.setFont(f11)
             suf_lbl.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
-            suf_lbl.setStyleSheet(
-                "color: rgba(255,255,255,200); background:transparent;"
-            )
+            suf_lbl.setStyleSheet(skin.stylesheet("user"))
             suf_lbl.setFixedWidth(text_cw)
             text_col.addWidget(suf_lbl)
 

@@ -33,3 +33,17 @@ def log_dir() -> Path:
 
 def state_file() -> Path:
     return app_root() / "state.json"
+
+
+def resources_dir() -> Path:
+    return app_root() / "resources"
+
+
+def skin_root() -> Path:
+    """resources/skin/ — 其下一级为工具 id（danmu、overtime…）。"""
+    return resources_dir() / "skin"
+
+
+def gift_dir() -> Path:
+    """resources/gift/ — gift_info.json 与 icon/。"""
+    return resources_dir() / "gift"

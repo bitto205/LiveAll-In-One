@@ -1,10 +1,10 @@
-"""礼物信息查询（gift_info.json + icon/）"""
+"""礼物信息查询（resources/gift：gift_info.json + icon/）"""
 import json
 import os
 
-from util.paths import app_root
+from util.paths import gift_dir
 
-_DIR  = str(app_root() / "gift")
+_DIR = str(gift_dir())
 _JSON = os.path.join(_DIR, "gift_info.json")
 _ICON = os.path.join(_DIR, "icon")
 

@@ -1750,6 +1750,11 @@ def _gift_like_text_px(max_w: int, max_h: int, scale: float) -> int:
 # ─────────────────────────────────────────────
 # 白字 + 阴影标签
 # ─────────────────────────────────────────────
+def _overtime_skin():
+    from util.skin import get_active_skin
+    return get_active_skin("overtime")
+
+
 class _ShadowLabel(QLabel):
     def __init__(self, text: str = "", parent=None, *, bold: bool = False):
         super().__init__(text, parent)
@@ -1777,10 +1782,14 @@ class _ShadowLabel(QLabel):
         flags = int(self.alignment())
         if self.wordWrap():
             flags |= int(Qt.TextWordWrap)
+        try:
+            fill, shadow = _overtime_skin().paint_text_shadow_style()
+        except Exception:
+            fill, shadow = QColor(255, 255, 255), QColor(0, 0, 0, 160)
         for dx, dy in ((1, 1), (1, 0), (0, 1)):
-            p.setPen(QColor(0, 0, 0, 160))
+            p.setPen(shadow)
             p.drawText(rect.translated(dx, dy), flags, self.text())
-        p.setPen(QColor(255, 255, 255))
+        p.setPen(fill)
         p.drawText(rect, flags, self.text())
         p.end()
 
@@ -2090,6 +2099,14 @@ class _OvertimeBlock(QWidget):
             bw,
             int(round(_ref_block_h() * s)),
         )
+
+    def paintEvent(self, _event):
+        p = QPainter(self)
+        try:
+            _overtime_skin().paint_surface(self, "panel", p)
+        except Exception:
+            pass
+        p.end()
 
 
 class _CircleToggle(QPushButton):

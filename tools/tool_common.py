@@ -8,13 +8,11 @@ from PySide6.QtCore import Qt
 from PySide6.QtGui import QPixmap
 
 from util.log_util import get_tagged_logger
+from util.paths import gift_dir
 
 logger = get_tagged_logger("工具", "tools.common")
 
-_GIFT_ICON_DIR = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-    "gift", "icon",
-)
+_GIFT_ICON_DIR = str(gift_dir() / "icon")
 _GIFT_NAMES_CACHE: list[str] | None = None
 _APP_SHUTTING_DOWN = False
 _TOOLS_PAGE = None

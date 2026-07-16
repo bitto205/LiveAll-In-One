@@ -1,1 +1,1 @@
-"""gift — 礼物图标与配置资源。"""
+"""gift — 礼物查询 API；资源文件在 resources/gift/。"""

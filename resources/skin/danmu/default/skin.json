@@ -1,0 +1,24 @@
+{
+  "id": "default",
+  "name": "默认",
+  "version": 1,
+  "tool": "danmu",
+  "surfaces": ["bubble", "gift_bubble"],
+  "metrics": {
+    "fade_w": 22,
+    "pad_h": 12,
+    "pad_v": 7,
+    "gift_icon_size": 32,
+    "gift_icon_gap": 8
+  },
+  "colors": {
+    "user": [255, 255, 255, 200],
+    "body": [255, 255, 255, 255],
+    "gradient_mid": [0, 0, 0, 128],
+    "gradient_edge": [0, 0, 0, 0]
+  },
+  "styles": {
+    "user": "color: rgba(255,255,255,200); background: transparent;",
+    "body": "color: rgba(255,255,255,255); background: transparent;"
+  }
+}
