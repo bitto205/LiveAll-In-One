@@ -19,6 +19,47 @@
   },
   "styles": {
     "user": "color: rgba(255,255,255,200); background: transparent;",
-    "body": "color: rgba(255,255,255,255); background: transparent;"
+    "body": "color: rgba(255,255,255,255); background: transparent;",
+    "suffix": "color: rgba(255,255,255,200); background: transparent;"
+  },
+  "layouts": {
+    "bubble": {
+      "spacing": 2,
+      "row_align": "center",
+      "roles": {
+        "user": {
+          "pixel_size": 11,
+          "align": "center",
+          "style_extra": "font-weight:600;"
+        },
+        "body": {
+          "pixel_size": 13,
+          "align": "center",
+          "word_wrap": true,
+          "min_chars": 4,
+          "max_chars": 16,
+          "slack_px": 2
+        }
+      }
+    },
+    "gift_bubble": {
+      "spacing": 2,
+      "text_slack": 4,
+      "roles": {
+        "user": {
+          "pixel_size": 11,
+          "align": "left",
+          "style_extra": "font-weight:600;"
+        },
+        "body": {
+          "pixel_size": 13,
+          "align": "left"
+        },
+        "suffix": {
+          "pixel_size": 11,
+          "align": "left"
+        }
+      }
+    }
   }
 }

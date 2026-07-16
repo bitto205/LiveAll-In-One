@@ -1,4 +1,4 @@
-"""
+﻿"""
 tools/danmu_tool.py — 弹幕机
 
 DanmuTool   — 控制面板（普通窗口，注册为 Tool）
@@ -15,7 +15,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QPushButton, QFrame, QSizePolicy,
-    QGraphicsOpacityEffect, QSpinBox, QLineEdit,
+    QSpinBox, QLineEdit,
 )
 from PySide6.QtCore  import (
     Qt, QPoint, QRect, QEvent, Signal,
@@ -24,10 +24,10 @@ from PySide6.QtCore  import (
 )
 from PySide6.QtGui   import (
     QPainter, QColor, QPainterPath, QPen, QRegion,
-    QFont, QFontMetrics, QPixmap,
 )
 
 import util.theme as _theme
+from util.widgets import ThemedComboBox
 from util.overlay_capture import enable_capture_transparency
 from util.overlay_window import OverlayFrameMixin, show_tutorial_dialog
 
@@ -44,251 +44,12 @@ _BTN_W      = 32    # 每个控制按钮宽度（px）
 # 顶栏拖动区左边距（为圆圈留空）
 _DRAG_L     = _CIRCLE_OFF + _CIRCLE_D + 4
 
-# 弹幕气泡默认度量（无皮肤 JSON 时的回退；正式值见 resources/skin/danmu/）
-_BUBBLE_FADE_W  = 22
-_BUBBLE_PAD_H   = 12
-_BUBBLE_PAD_V   = 7
-_GIFT_ICON_SIZE = 32
-_GIFT_ICON_GAP  = 8
+# 弹幕气泡组件见 resources/skin/danmu/components.py
 
 
 def _danmu_skin():
-    from util.skin import get_active_skin
+    from resources.skin import get_active_skin
     return get_active_skin("danmu")
-
-
-def _danmu_metrics():
-    try:
-        return _danmu_skin().metrics()
-    except Exception:
-        from util.skin.base import SkinMetrics
-        return SkinMetrics(
-            fade_w=_BUBBLE_FADE_W,
-            pad_h=_BUBBLE_PAD_H,
-            pad_v=_BUBBLE_PAD_V,
-            gift_icon_size=_GIFT_ICON_SIZE,
-            gift_icon_gap=_GIFT_ICON_GAP,
-        )
-
-
-# ─────────────────────────────────────────────
-# 气泡公共基类
-# ─────────────────────────────────────────────
-class _DanmuBubbleBase(QWidget):
-    """
-    弹幕/礼物气泡基类。
-    外观由 util.skin（tool=danmu）绘制；子类实现 _build() 并调用 _start_lifecycle()。
-    """
-    _FADE_IN_MS  = 300
-    _STAY_MS     = 3000
-    _FADE_OUT_MS = 500
-    _SKIN_SURFACE = "bubble"
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setAttribute(Qt.WA_TranslucentBackground)
-        self.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
-
-        self._effect = QGraphicsOpacityEffect(self)
-        self._effect.setOpacity(0.0)
-        self.setGraphicsEffect(self._effect)
-
-    def _start_lifecycle(self):
-        anim_in = QPropertyAnimation(self._effect, b"opacity", self)
-        anim_in.setStartValue(0.0)
-        anim_in.setEndValue(1.0)
-        anim_in.setDuration(self._FADE_IN_MS)
-        anim_in.setEasingCurve(QEasingCurve.OutCubic)
-
-        anim_out = QPropertyAnimation(self._effect, b"opacity", self)
-        anim_out.setStartValue(1.0)
-        anim_out.setEndValue(0.0)
-        anim_out.setDuration(self._FADE_OUT_MS)
-        anim_out.setEasingCurve(QEasingCurve.InCubic)
-        anim_out.finished.connect(self._remove)
-
-        anim_in.finished.connect(
-            lambda: QTimer.singleShot(self._STAY_MS, anim_out.start)
-        )
-        anim_in.start()
-        self._anim_in  = anim_in
-        self._anim_out = anim_out
-
-    def _remove(self):
-        self.hide()
-        self.deleteLater()
-
-    def paintEvent(self, _event):
-        p = QPainter(self)
-        try:
-            _danmu_skin().paint_surface(self, self._SKIN_SURFACE, p)
-        except Exception:
-            pass
-        p.end()
-
-
-# ─────────────────────────────────────────────
-# 弹幕气泡（ChatMessage）
-# ─────────────────────────────────────────────
-class _DanmuBubble(_DanmuBubbleBase):
-    """ID 行（上，居中）+ 内容行（下，居中，可换行）。"""
-
-    def __init__(self, user: str, content: str, parent=None):
-        super().__init__(parent)
-        self._build(user, content)
-        self._start_lifecycle()
-
-    def _build(self, user: str, content: str):
-        f13 = QFont("Microsoft YaHei"); f13.setPixelSize(13)
-        f11 = QFont("Microsoft YaHei"); f11.setPixelSize(11)
-        fm13, fm11 = QFontMetrics(f13), QFontMetrics(f11)
-
-        cw     = fm13.horizontalAdvance("国")
-        min_w  = cw * 4
-        max_w  = cw * 16
-        user_w = fm11.horizontalAdvance(user)
-        text_w = fm13.horizontalAdvance(content)
-        # 略加余量：advance 刚好贴边时 QLabel 常会把末尾几字挤到下一行
-        slack  = max(2, cw // 4)
-
-        need_wrap = text_w > max_w
-        if need_wrap:
-            content_w = max_w
-        else:
-            content_w = max(min_w, user_w, text_w) + slack
-
-        m = _danmu_metrics()
-        skin = _danmu_skin()
-        h_margin = m.pad_h + m.fade_w
-        self.setFixedWidth(content_w + h_margin * 2)
-
-        lay = QVBoxLayout(self)
-        lay.setContentsMargins(h_margin, m.pad_v, h_margin, m.pad_v)
-        lay.setSpacing(2)
-        lay.setAlignment(Qt.AlignHCenter)
-
-        id_lbl = QLabel(user)
-        id_lbl.setFont(f11)
-        id_lbl.setAlignment(Qt.AlignHCenter)
-        id_lbl.setStyleSheet(skin.stylesheet("user") + " font-weight:600;")
-        id_lbl.setFixedWidth(content_w)
-
-        msg_lbl = QLabel(content)
-        msg_lbl.setFont(f13)
-        msg_lbl.setAlignment(Qt.AlignHCenter)
-        msg_lbl.setWordWrap(need_wrap)
-        msg_lbl.setStyleSheet(skin.stylesheet("body"))
-        msg_lbl.setFixedWidth(content_w)
-
-        lay.addWidget(id_lbl)
-        lay.addWidget(msg_lbl)
-
-
-# ─────────────────────────────────────────────
-# 礼物气泡（GiftMessage）
-# ─────────────────────────────────────────────
-from util.paths import gift_dir
-
-_GIFT_ICONS_DIR = str(gift_dir() / "icon")
-
-
-class _DanmuGiftBubble(_DanmuBubbleBase):
-    """
-    左边礼物图标（有则显示），右边两行左对齐文字：昵称 / 送出了 礼物名 × 数量。
-    无图标时仅显示双行文字。外观走 danmu 皮肤 gift_bubble。
-    """
-    _SKIN_SURFACE = "gift_bubble"
-
-    def __init__(self, msg, suffix: str = "", parent=None):
-        super().__init__(parent)
-        self._build(msg, suffix)
-        self._start_lifecycle()
-
-    # ── 图标加载 ────────────────────────────
-    @staticmethod
-    def _load_icon(gift_id: int, gift_name: str) -> "QPixmap | None":
-        try:
-            from gift.gift_info import get_icon_path
-            path = get_icon_path(gift_name)
-        except Exception:
-            path = None
-        if not path:
-            # 保底：按 gift_id 在图标目录直接查找
-            for ext in (".webp", ".png", ".jpg"):
-                p = os.path.join(_GIFT_ICONS_DIR, f"{gift_id}{ext}")
-                if os.path.exists(p):
-                    path = p
-                    break
-        if path:
-            px = QPixmap(path)
-            if not px.isNull():
-                return px
-        return None
-
-    # ── UI 构建 ──────────────────────────────
-    def _build(self, msg, suffix: str = ""):
-        f13 = QFont("Microsoft YaHei"); f13.setPixelSize(13)
-        f11 = QFont("Microsoft YaHei"); f11.setPixelSize(11)
-        fm13, fm11 = QFontMetrics(f13), QFontMetrics(f11)
-        gift_line  = f"送出了 {msg.gift} ×{msg.count}"
-        # 余量：避免文字宽度与布局可用宽差 1～2px 时异常折行
-        slack = 4
-        text_cw    = max(fm11.horizontalAdvance(msg.user),
-                         fm13.horizontalAdvance(gift_line),
-                         fm11.horizontalAdvance(suffix) if suffix else 0) + slack
-
-        pixmap = self._load_icon(msg.gift_id, msg.gift)
-        m = _danmu_metrics()
-        skin = _danmu_skin()
-        icon_sz = m.gift_icon_size
-        icon_gap = m.gift_icon_gap
-        h_margin = m.pad_h + m.fade_w
-        inner_w = text_cw + ((icon_sz + icon_gap) if pixmap else 0)
-        self.setFixedWidth(inner_w + h_margin * 2)
-
-        outer = QHBoxLayout(self)
-        outer.setContentsMargins(h_margin, m.pad_v, h_margin, m.pad_v)
-        outer.setSpacing(icon_gap)
-        outer.setAlignment(Qt.AlignVCenter)
-        if pixmap:
-            icon_lbl = QLabel()
-            icon_lbl.setFixedSize(icon_sz, icon_sz)
-            icon_lbl.setPixmap(
-                pixmap.scaled(icon_sz, icon_sz,
-                              Qt.KeepAspectRatio, Qt.SmoothTransformation)
-            )
-            icon_lbl.setStyleSheet("background: transparent;")
-            outer.addWidget(icon_lbl)
-
-        text_col = QVBoxLayout()
-        text_col.setContentsMargins(0, 0, 0, 0)
-        text_col.setSpacing(2)
-
-        id_lbl = QLabel(msg.user)
-        id_lbl.setFont(f11)
-        id_lbl.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
-        id_lbl.setStyleSheet(skin.stylesheet("user") + " font-weight:600;")
-        id_lbl.setFixedWidth(text_cw)
-
-        gift_lbl = QLabel(f"送出了 {msg.gift} ×{msg.count}")
-        gift_lbl.setFont(f13)
-        gift_lbl.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
-        gift_lbl.setWordWrap(False)
-        gift_lbl.setStyleSheet(skin.stylesheet("body"))
-        gift_lbl.setFixedWidth(text_cw)
-
-        text_col.addWidget(id_lbl)
-        text_col.addWidget(gift_lbl)
-
-        if suffix:
-            suf_lbl = QLabel(suffix)
-            suf_lbl.setFont(f11)
-            suf_lbl.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
-            suf_lbl.setStyleSheet(skin.stylesheet("user"))
-            suf_lbl.setFixedWidth(text_cw)
-            text_col.addWidget(suf_lbl)
-
-        outer.addLayout(text_col)
 
 
 # ─────────────────────────────────────────────
@@ -644,7 +405,7 @@ class DanmuWindow(OverlayFrameMixin, QMainWindow):
         return max(20, int(QApplication.primaryScreen().logicalDotsPerInch() / 2.54))
 
     # ── 公共放置逻辑 ─────────────────────────
-    def _place_and_show(self, bubble: "_DanmuBubbleBase", bw: int, bh: int):
+    def _place_and_show(self, bubble, bw: int, bh: int):
         cw_widget = self._root._content
         M         = self._bubble_margin()
         cw_area, ch_area = cw_widget.width(), cw_widget.height()
@@ -691,18 +452,29 @@ class DanmuWindow(OverlayFrameMixin, QMainWindow):
         bubble.destroyed.connect(lambda _=None, b=bubble: self._on_bubble_gone(b))
         bubble.show()
 
+    def refresh_skin(self):
+        for b in list(self._active_bubbles):
+            try:
+                if b.isVisible():
+                    b.refresh_skin()
+            except RuntimeError:
+                pass
+        self._root.update()
+
     def add_message(self, msg, suffix: str = ""):
         from util.models import ChatMessage, GiftMessage, LikeMessage, FollowMessage
+        from resources.skin.danmu.components import create_chat_bubble, create_gift_bubble
 
         cw_widget = self._root._content
+        skin = _danmu_skin()
         if isinstance(msg, ChatMessage):
-            bubble = _DanmuBubble(msg.user, msg.content + suffix, cw_widget)
+            bubble = create_chat_bubble(skin, cw_widget, msg.user, msg.content + suffix)
         elif isinstance(msg, GiftMessage):
-            bubble = _DanmuGiftBubble(msg, suffix, cw_widget)
+            bubble = create_gift_bubble(skin, cw_widget, msg, suffix)
         elif isinstance(msg, LikeMessage):
-            bubble = _DanmuBubble(msg.user, f"点了{msg.count}个赞" + suffix, cw_widget)
+            bubble = create_chat_bubble(skin, cw_widget, msg.user, f"点了{msg.count}个赞" + suffix)
         elif isinstance(msg, FollowMessage):
-            bubble = _DanmuBubble(msg.user, "关注了" + suffix, cw_widget)
+            bubble = create_chat_bubble(skin, cw_widget, msg.user, "关注了" + suffix)
         else:
             return
 
@@ -965,6 +737,41 @@ class DanmuTool(ToolSingleton, QMainWindow):
         desc.setStyleSheet(f"font-size: 12px; color: {C['text_muted']};")
         cl.addWidget(desc)
         lay.addWidget(card)
+
+        theme_card = self._make_card()
+        tcl = theme_card.layout()
+        trow = QHBoxLayout()
+        trow.setSpacing(12)
+        tlbl = QLabel("弹幕外观主题")
+        tlbl.setStyleSheet("font-size: 14px; font-weight: 600;")
+        trow.addWidget(tlbl)
+        trow.addStretch()
+        from resources.skin import get_active_skin, list_skins
+        skins = list_skins("danmu")
+        self._skin_name_to_id = {s["name"]: s["id"] for s in skins}
+        self._skin_combo = ThemedComboBox()
+        names = [s["name"] for s in skins] or ["默认"]
+        if not self._skin_name_to_id:
+            self._skin_name_to_id = {"默认": "default"}
+        self._skin_combo.addItems(names)
+        active = get_active_skin("danmu")
+        if active.name in names:
+            self._skin_combo.setCurrentText(active.name)
+        else:
+            self._skin_combo.setCurrentText(names[0])
+        self._skin_combo.setFixedHeight(34)
+        self._skin_combo.setMinimumWidth(160)
+        self._skin_combo.currentTextChanged.connect(self._on_skin_changed)
+        trow.addWidget(self._skin_combo)
+        tcl.addLayout(trow)
+        lay.addWidget(theme_card)
+
+    def _on_skin_changed(self, name: str):
+        from resources.skin import set_active_skin
+        sid = self._skin_name_to_id.get(name, "default")
+        set_active_skin("danmu", sid)
+        if self._danmu_win is not None and self._danmu_win.isVisible():
+            self._danmu_win.refresh_skin()
 
     def _build_chat_panel(self, lay):
         lay.addWidget(self._page_title("弹幕"))

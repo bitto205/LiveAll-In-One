@@ -8,5 +8,52 @@
   "colors": {
     "text_fill": [255, 255, 255, 255],
     "text_shadow": [0, 0, 0, 160]
+  },
+  "layouts": {
+    "overlay": {
+      "roles": {
+        "title": {
+          "pixel_size": 13,
+          "align": "center",
+          "v_align": "bottom",
+          "max_px": 13
+        },
+        "timer": {
+          "pixel_size": 13,
+          "align": "center",
+          "bold": true,
+          "max_px": 32
+        },
+        "gift_name": {
+          "pixel_size": 13,
+          "align": "left",
+          "max_px": 16,
+          "fit_ref": "中文字符占占"
+        },
+        "gift_time": {
+          "pixel_size": 13,
+          "align": "left",
+          "max_px": 16,
+          "fit_ref": "中文字符占占"
+        },
+        "custom": {
+          "pixel_size": 13,
+          "align": "center",
+          "word_wrap": true,
+          "max_px": 16,
+          "fit_ref": "中文字符占占"
+        },
+        "log_left": {
+          "pixel_size": 13,
+          "align": "left",
+          "max_px": 13
+        },
+        "log_right": {
+          "pixel_size": 13,
+          "align": "right",
+          "max_px": 13
+        }
+      }
+    }
   }
 }

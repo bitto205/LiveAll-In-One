@@ -1,9 +1,9 @@
-"""透明窗皮肤：按工具隔离。资源在 resources/skin/，实现在本包。"""
+﻿"""透明窗皮肤：按工具隔离。资源与实现都在 resources/skin/。"""
 from __future__ import annotations
 
 from util.paths import skin_root
-from util.skin.base import SkinMetrics, ToolSkin
-from util.skin.registry import (
+from resources.skin.base import SkinMetrics, ToolSkin, RoleTextStyle
+from resources.skin.registry import (
     get_active_skin,
     get_skin,
     list_skins,
@@ -13,6 +13,7 @@ from util.skin.registry import (
 
 __all__ = [
     "SkinMetrics",
+    "RoleTextStyle",
     "ToolSkin",
     "get_active_skin",
     "get_skin",

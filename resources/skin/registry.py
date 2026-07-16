@@ -1,4 +1,4 @@
-"""皮肤发现与选用。JSON 在 resources/skin/<tool>/<id>/，绘制实现在本包。"""
+﻿"""皮肤发现与选用。JSON 在 resources/skin/<tool>/<id>/，绘制实现在本目录。"""
 from __future__ import annotations
 
 import json
@@ -8,9 +8,9 @@ from typing import Callable
 
 import config as _cfg
 from util.paths import skin_root
-from util.skin.base import ToolSkin
-from util.skin.danmu_default import DanmuDefaultSkin
-from util.skin.overtime_default import OvertimeDefaultSkin
+from resources.skin.base import ToolSkin
+from resources.skin.danmu.default.skin import DanmuDefaultSkin
+from resources.skin.overtime.default.skin import OvertimeDefaultSkin
 
 logger = logging.getLogger(__name__)
 
@@ -58,10 +58,7 @@ def list_skins(tool_id: str) -> list[dict]:
         sid = str(meta.get("id") or child.name)
         declared = meta.get("tool")
         if declared and str(declared) != tool_id:
-            logger.warning(
-                "忽略皮肤 %s：tool=%s 与目录 %s 不一致",
-                child, declared, tool_id,
-            )
+            logger.warning("忽略皮肤 %s：tool=%s 与目录 %s 不一致", child, declared, tool_id)
             continue
         out.append({
             "id": sid,
@@ -93,10 +90,7 @@ def get_skin(tool_id: str, skin_id: str | None = None) -> ToolSkin:
     factories = _SKIN_FACTORIES.get(tool_id) or {}
     factory = factories.get(sid) or factories.get("default")
     root = skin_dir if skin_dir.is_dir() else skin_tool_dir(tool_id) / "default"
-    if factory is None:
-        skin: ToolSkin = ToolSkin(root, meta)
-    else:
-        skin = factory(root, meta)
+    skin = ToolSkin(root, meta) if factory is None else factory(root, meta)
     skin.tool_id = tool_id
     _CACHE[key] = skin
     return skin

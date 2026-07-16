@@ -1,4 +1,4 @@
-"""
+﻿"""
 tools/overtime_tool.py — 加班机（配置 + 设置 UI + 悬浮窗 + 控制面板）
 """
 from __future__ import annotations
@@ -26,6 +26,7 @@ from PySide6.QtGui import (
 
 import util.theme as _theme
 from util.widgets import ThemedComboBox
+from resources.skin.overtime.components import OvertimeTextLabel
 from tools import register_tool
 from util.overlay_capture import enable_capture_transparency
 from util.overlay_window import OverlayFrameMixin, show_tutorial_dialog
@@ -1599,12 +1600,6 @@ _DEFAULT_RULES = DEFAULT_SETTINGS["rules"]
 
 _DEMO_TIMER = format_timer_display(0, 0, 0)
 _DEMO_CUSTOM = DEFAULT_SETTINGS["custom_text"]
-
-# 字号微调（1x 参考）
-_GIFT_TEXT_REF = "中文字符占占"   # 礼物格宽度按 5 个汉字适配
-_GIFT_TEXT_MAX_PX = 16           # 礼物名 / 自定义 1x 上限
-_TITLE_MAX_PX = 13               # 标题 1x 上限
-_LOG_MAX_PX = 13                 # 送礼日志 1x 上限
 _TIMER_EDGE_PAD = 2              # 倒计时阴影/描边留白（px，随 scale）
 
 
@@ -1643,7 +1638,7 @@ def _ref_title_timer_gap() -> int:
 
 def _ref_title_row_h() -> int:
     """标题行 1x 高度（贴文字，供置底）。"""
-    return max(_cm_to_px(0.35), _TITLE_MAX_PX + 6)
+    return max(_cm_to_px(0.35), 19)
 
 
 def _ref_title_timer_section_h() -> int:
@@ -1707,91 +1702,9 @@ def _default_window_size() -> tuple[int, int]:
     return bw + 2 * m, _TOPBAR_H + bh + 2 * m
 
 
-def _fit_font_pixel_size(
-    text: str, max_w: int, max_h: int, *,
-    bold: bool = False,
-    max_px: int | None = None,
-    min_px: int = 8,
-    edge_pad: int = 1,
-) -> int:
-    max_w = max(1, max_w - edge_pad * 2)
-    max_h = max(1, max_h - edge_pad * 2)
-    lo, hi = min_px, max(8, max_h)
-    if max_px is not None:
-        hi = min(hi, max_px)
-    if lo > hi:
-        return max(min_px, hi)
-    best = lo
-    while lo <= hi:
-        mid = (lo + hi) // 2
-        f = QFont("Microsoft YaHei")
-        f.setPixelSize(mid)
-        if bold:
-            f.setWeight(QFont.Bold)
-        fm = QFontMetrics(f)
-        tw = fm.horizontalAdvance(text)
-        th = fm.height()
-        if tw <= max_w and th <= max_h:
-            best = mid
-            lo = mid + 1
-        else:
-            hi = mid - 1
-    return best
-
-
-def _gift_like_text_px(max_w: int, max_h: int, scale: float) -> int:
-    """礼物名 / 自定义文字：偏小，且至少容得下 5 个汉字宽。"""
-    cap = max(8, int(round(_GIFT_TEXT_MAX_PX * scale)))
-    return _fit_font_pixel_size(
-        _GIFT_TEXT_REF, max_w, max_h, max_px=cap,
-    )
-
-
 # ─────────────────────────────────────────────
-# 白字 + 阴影标签
+# 加班机悬浮大组件（文字外观见 resources/skin/overtime/components.py）
 # ─────────────────────────────────────────────
-def _overtime_skin():
-    from util.skin import get_active_skin
-    return get_active_skin("overtime")
-
-
-class _ShadowLabel(QLabel):
-    def __init__(self, text: str = "", parent=None, *, bold: bool = False):
-        super().__init__(text, parent)
-        self.setAttribute(Qt.WA_TranslucentBackground)
-        self._bold = bold
-        self._px = 13
-        self._apply_font()
-
-    def set_pixel_size(self, px: int):
-        self._px = max(8, int(px))
-        self._apply_font()
-
-    def _apply_font(self):
-        f = QFont("Microsoft YaHei")
-        f.setPixelSize(self._px)
-        if self._bold:
-            f.setWeight(QFont.Bold)
-        self.setFont(f)
-
-    def paintEvent(self, _event):
-        p = QPainter(self)
-        p.setRenderHint(QPainter.TextAntialiasing)
-        p.setFont(self.font())
-        rect = self.rect()
-        flags = int(self.alignment())
-        if self.wordWrap():
-            flags |= int(Qt.TextWordWrap)
-        try:
-            fill, shadow = _overtime_skin().paint_text_shadow_style()
-        except Exception:
-            fill, shadow = QColor(255, 255, 255), QColor(0, 0, 0, 160)
-        for dx, dy in ((1, 1), (1, 0), (0, 1)):
-            p.setPen(shadow)
-            p.drawText(rect.translated(dx, dy), flags, self.text())
-        p.setPen(fill)
-        p.drawText(rect, flags, self.text())
-        p.end()
 
 
 class _GiftSlotWidget(QFrame):
@@ -1807,10 +1720,8 @@ class _GiftSlotWidget(QFrame):
         self._icon_lbl = QLabel()
         self._icon_lbl.setAlignment(Qt.AlignCenter)
         self._icon_lbl.setStyleSheet("background: transparent;")
-        self._name_lbl = _ShadowLabel(self._gift_name)
-        self._name_lbl.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
-        self._time_lbl = _ShadowLabel(self._time_label)
-        self._time_lbl.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        self._name_lbl = OvertimeTextLabel("gift_name", self._gift_name)
+        self._time_lbl = OvertimeTextLabel("gift_time", self._time_label)
 
         root = QHBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
@@ -1850,23 +1761,16 @@ class _GiftSlotWidget(QFrame):
             self._icon_lbl.setText("·")
         text_w = max(20, slot_w - icon_side - int(round(6 * s)))
         text_h = max(8, (slot_h - int(round(2 * s))) // 2)
-        name_px = _gift_like_text_px(text_w, text_h, s)
-        self._name_lbl.set_pixel_size(name_px)
-        time_px = _fit_font_pixel_size(
-            self._time_lbl.text(), text_w, text_h,
-            max_px=max(8, name_px),
-        )
-        self._time_lbl.set_pixel_size(time_px)
+        self._name_lbl.fit_to_box(self._gift_name, text_w, text_h, scale=s)
+        self._time_lbl.fit_to_box(self._time_lbl.text(), text_w, text_h, scale=s)
 
 
 class _ResultRow(QWidget):
     def __init__(self, left: str = "", delta_seconds: int = 0, parent=None):
         super().__init__(parent)
         self.setAttribute(Qt.WA_TranslucentBackground)
-        self._left_lbl = _ShadowLabel(left)
-        self._left_lbl.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
-        self._right_lbl = _ShadowLabel("")
-        self._right_lbl.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self._left_lbl = OvertimeTextLabel("log_left", left)
+        self._right_lbl = OvertimeTextLabel("log_right", "")
         lay = QHBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(6)
@@ -1890,15 +1794,11 @@ class _ResultRow(QWidget):
         w = int(round(_ref_block_w() * s))
         self.setFixedHeight(h)
         pad = max(2, int(round(2 * s)))
-        log_cap = max(8, int(round(_LOG_MAX_PX * s)))
         text_w = max(20, w // 2 - pad)
-        px = _fit_font_pixel_size(
-            self._left_lbl.text() or "占位", text_w, h - pad, max_px=log_cap,
-        )
-        self._left_lbl.set_pixel_size(px)
-        right_text = self._right_lbl.text() or "+0秒"
-        self._right_lbl.set_pixel_size(
-            _fit_font_pixel_size(right_text, text_w, h - pad, max_px=log_cap),
+        box_h = h - pad
+        self._left_lbl.fit_to_box(self._left_lbl.text() or "占位", text_w, box_h, scale=s)
+        self._right_lbl.fit_to_box(
+            self._right_lbl.text() or "+0秒", text_w, box_h, scale=s,
         )
 
 
@@ -1908,8 +1808,7 @@ class _TimerBox(QFrame):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setAttribute(Qt.WA_TranslucentBackground)
-        self._lbl = _ShadowLabel(_DEMO_TIMER, bold=True)
-        self._lbl.setAlignment(Qt.AlignCenter)
+        self._lbl = OvertimeTextLabel("timer", _DEMO_TIMER)
         self._lay = QVBoxLayout(self)
         self._lay.setContentsMargins(0, 0, 0, 0)
         self._lay.addWidget(self._lbl, 0, Qt.AlignHCenter | Qt.AlignTop)
@@ -1931,10 +1830,7 @@ class _TimerBox(QFrame):
         self._lay.setContentsMargins(edge, top, edge, edge)
         inner_w = max(1, w - edge * 2)
         inner_h = max(1, h - top - edge)
-        px = _fit_font_pixel_size(
-            self._lbl.text(), inner_w, inner_h, bold=True, edge_pad=1,
-        )
-        self._lbl.set_pixel_size(px)
+        self._lbl.fit_to_box(self._lbl.text(), inner_w, inner_h, scale=s)
 
 
 class _TitleTimerSection(QWidget):
@@ -1946,8 +1842,7 @@ class _TitleTimerSection(QWidget):
 
         self._title_wrap = QWidget()
         self._title_wrap.setAttribute(Qt.WA_TranslucentBackground)
-        self._title_lbl = _ShadowLabel("距离下播时间")
-        self._title_lbl.setAlignment(Qt.AlignCenter)
+        self._title_lbl = OvertimeTextLabel("title", "距离下播时间")
         tw_lay = QVBoxLayout(self._title_wrap)
         tw_lay.setContentsMargins(0, 0, 0, 0)
         tw_lay.setSpacing(0)
@@ -1963,7 +1858,7 @@ class _TitleTimerSection(QWidget):
         lay.addWidget(self._timer_box, 0, Qt.AlignHCenter)
 
     @property
-    def title_lbl(self) -> _ShadowLabel:
+    def title_lbl(self) -> OvertimeTextLabel:
         return self._title_lbl
 
     @property
@@ -1975,12 +1870,9 @@ class _TitleTimerSection(QWidget):
         section_gap = max(1, int(round(_ref_title_timer_gap() * s)))
         self.layout().setSpacing(section_gap)
 
-        title_cap = max(8, int(round(_TITLE_MAX_PX * s)))
-        title_px = _fit_font_pixel_size(
-            self._title_lbl.text(), block_w - pad, _ref_title_row_h(),
-            max_px=title_cap,
+        self._title_lbl.fit_to_box(
+            self._title_lbl.text(), block_w - pad, _ref_title_row_h(), scale=s,
         )
-        self._title_lbl.set_pixel_size(title_px)
         title_row_h = QFontMetrics(self._title_lbl.font()).height() + max(
             1, int(round(2 * s)),
         )
@@ -2024,12 +1916,7 @@ class _OvertimeBlock(QWidget):
         self._root_lay.addWidget(self._grid_wrap)
 
         custom = self._settings.get("custom_text", _DEMO_CUSTOM)
-        align = self._settings.get("custom_align", "居中")
-        self._custom_lbl = _ShadowLabel(custom)
-        self._custom_lbl.setAlignment(
-            Qt.AlignmentFlag(align_to_qt(align)) | Qt.AlignTop,
-        )
-        self._custom_lbl.setWordWrap(True)
+        self._custom_lbl = OvertimeTextLabel("custom", custom, word_wrap=True)
         self._root_lay.addWidget(self._custom_lbl)
 
         self._result_row = _ResultRow()
@@ -2088,9 +1975,9 @@ class _OvertimeBlock(QWidget):
 
         custom_h = int(round(_ref_custom_row_h() * s))
         self._custom_lbl.setFixedHeight(custom_h)
-        self._custom_lbl.set_pixel_size(_gift_like_text_px(
-            bw - pad, custom_h - pad, s,
-        ))
+        self._custom_lbl.fit_to_box(
+            self._custom_lbl.text(), bw - pad, custom_h - pad, scale=s,
+        )
 
         if self._result_row:
             self._result_row.apply_scale(s)
@@ -2103,7 +1990,8 @@ class _OvertimeBlock(QWidget):
     def paintEvent(self, _event):
         p = QPainter(self)
         try:
-            _overtime_skin().paint_surface(self, "panel", p)
+            from resources.skin import get_active_skin
+            get_active_skin("overtime").paint_surface(self, "panel", p)
         except Exception:
             pass
         p.end()
@@ -2498,6 +2386,11 @@ class OvertimeWindow(OverlayFrameMixin, QMainWindow):
         else:
             self._tick.stop()
 
+    def refresh_skin(self):
+        self._root.block.update()
+        for lbl in self._root.block.findChildren(OvertimeTextLabel):
+            lbl.refresh_skin()
+
     def handle_gift(self, msg) -> bool:
         rules = self._settings.get("rules", _DEFAULT_RULES)
         rule = find_rule_for_gift(rules, msg.gift)
@@ -2669,6 +2562,34 @@ class OvertimeTool(ToolSingleton, QMainWindow):
         cl.addWidget(desc)
         lay.addWidget(card)
 
+        theme_card = self._make_card()
+        tcl = theme_card.layout()
+        trow = QHBoxLayout()
+        trow.setSpacing(12)
+        tlbl = QLabel("加班外观主题")
+        tlbl.setStyleSheet("font-size: 14px; font-weight: 600;")
+        trow.addWidget(tlbl)
+        trow.addStretch()
+        from resources.skin import get_active_skin, list_skins
+        skins = list_skins("overtime")
+        self._skin_name_to_id = {s["name"]: s["id"] for s in skins}
+        self._skin_combo = ThemedComboBox()
+        names = [s["name"] for s in skins] or ["默认"]
+        if not self._skin_name_to_id:
+            self._skin_name_to_id = {"默认": "default"}
+        self._skin_combo.addItems(names)
+        active = get_active_skin("overtime")
+        if active.name in names:
+            self._skin_combo.setCurrentText(active.name)
+        else:
+            self._skin_combo.setCurrentText(names[0])
+        self._skin_combo.setFixedHeight(34)
+        self._skin_combo.setMinimumWidth(160)
+        self._skin_combo.currentTextChanged.connect(self._on_skin_changed)
+        trow.addWidget(self._skin_combo)
+        tcl.addLayout(trow)
+        lay.addWidget(theme_card)
+
         sim_card = self._make_card()
         scl = sim_card.layout()
         sim_title = QLabel("模拟送礼")
@@ -2702,6 +2623,13 @@ class OvertimeTool(ToolSingleton, QMainWindow):
         lay.addStretch()
         self._style_user_time_btn()
         self._refresh_btn()
+
+    def _on_skin_changed(self, name: str):
+        from resources.skin import set_active_skin
+        sid = self._skin_name_to_id.get(name, "default")
+        set_active_skin("overtime", sid)
+        if self._overtime_win is not None and self._overtime_win.isVisible():
+            self._overtime_win.refresh_skin()
 
     def _style_user_time_btn(self):
         if not getattr(self, "_user_time_btn", None):

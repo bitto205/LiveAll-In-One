@@ -1,11 +1,11 @@
-"""弹幕机默认皮肤：横向黑渐变底。"""
+﻿"""弹幕机默认皮肤：横向黑渐变底。"""
 from __future__ import annotations
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor, QLinearGradient, QPainter
 from PySide6.QtWidgets import QWidget
 
-from util.skin.base import ToolSkin
+from resources.skin.base import ToolSkin
 
 
 class DanmuDefaultSkin(ToolSkin):
