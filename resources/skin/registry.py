@@ -51,8 +51,15 @@ def list_skins(tool_id: str) -> list[dict]:
     out: list[dict] = []
     if not base.is_dir():
         return out
+    factories = _SKIN_FACTORIES.get(tool_id) or {}
     for child in sorted(base.iterdir(), key=lambda p: p.name):
         if not child.is_dir():
+            continue
+        # 忽略 Python 缓存与私有目录，避免被识别成皮肤
+        if child.name.startswith("__") or child.name.startswith("."):
+            continue
+        has_meta = (child / "skin.json").is_file()
+        if not has_meta and child.name not in factories:
             continue
         meta = _read_meta(child)
         sid = str(meta.get("id") or child.name)

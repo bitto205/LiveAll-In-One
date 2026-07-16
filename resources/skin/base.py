@@ -59,7 +59,7 @@ class RoleTextStyle:
         )
 
 
-def qt_alignment(align: str, *, v_align: str = "vcenter") -> int:
+def qt_alignment(align: str, *, v_align: str = "vcenter") -> Qt.AlignmentFlag:
     h_map = {
         "left": Qt.AlignLeft,
         "center": Qt.AlignHCenter,
@@ -70,7 +70,7 @@ def qt_alignment(align: str, *, v_align: str = "vcenter") -> int:
         "vcenter": Qt.AlignVCenter,
         "bottom": Qt.AlignBottom,
     }
-    return int(h_map.get(align, Qt.AlignHCenter) | v_map.get(v_align, Qt.AlignVCenter))
+    return h_map.get(align, Qt.AlignHCenter) | v_map.get(v_align, Qt.AlignVCenter)
 
 
 def make_font(style: RoleTextStyle, *, pixel_size: int | None = None) -> QFont:
