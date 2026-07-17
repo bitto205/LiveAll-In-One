@@ -6,8 +6,17 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QColor, QFont, QFontMetrics, QPainter
+from PySide6.QtGui import QColor, QFont, QFontMetrics, QPainter, QPixmap
 from PySide6.QtWidgets import QWidget
+
+from resources.skin.media import (
+    LoadedAnim,
+    LoadedStill,
+    ScaleMode,
+    load_anim as _load_anim,
+    load_still as _load_still,
+    screen_dpr,
+)
 
 
 @dataclass(frozen=True)
@@ -214,6 +223,95 @@ class ToolSkin:
         fill = _parse_color(colors.get("text_fill"), QColor(255, 255, 255))
         shadow = _parse_color(colors.get("text_shadow"), QColor(0, 0, 0, 160))
         return fill, shadow
+
+    # ── 媒体接口 ─────────────────────────────────────────
+
+    def default_image_scale(self) -> ScaleMode:
+        raw = (self.meta.get("images_default") or {}).get("scale") or "smooth"
+        s = str(raw).lower()
+        return "nearest" if s == "nearest" else "smooth"
+
+    def image_spec(self, key: str):
+        from resources.skin.media import SkinImageSpec
+        images = self.meta.get("images") or {}
+        raw = images.get(key) if isinstance(images, dict) else None
+        if not isinstance(raw, dict):
+            return None
+        return SkinImageSpec.from_dict(raw)
+
+    def resolve_image_path(self, file: str) -> Path:
+        """file 相对 skin.root；以 image/ 开头则相对 app_root。"""
+        f = (file or "").replace("\\", "/").lstrip("/")
+        if not f:
+            return self.root
+        if f.startswith("image/"):
+            from util.paths import app_root
+            return app_root() / f
+        return self.root / f
+
+    def load_still(
+        self,
+        key: str,
+        *,
+        dpr: float | None = None,
+        logical_h: int | None = None,
+        ui_scale: float = 1.0,
+    ) -> LoadedStill:
+        spec = self.image_spec(key)
+        if spec is None or not spec.file:
+            h = max(1, int(round(int(logical_h or 16) * max(0.25, float(ui_scale)))))
+            return LoadedStill(QPixmap(), h, h)
+        h = int(logical_h) if logical_h is not None else spec.logical_h
+        path = self.resolve_image_path(spec.file)
+        scale = spec.scale or self.default_image_scale()
+        return _load_still(
+            path,
+            h,
+            dpr if dpr is not None else screen_dpr(),
+            scale=scale,
+            ui_scale=ui_scale,
+        )
+
+    def load_anim(
+        self,
+        key: str,
+        *,
+        dpr: float | None = None,
+        logical_h: int | None = None,
+        ui_scale: float = 1.0,
+    ) -> LoadedAnim:
+        spec = self.image_spec(key)
+        if spec is None or not spec.file:
+            h = max(1, int(round(int(logical_h or 16) * max(0.25, float(ui_scale)))))
+            return LoadedAnim([], [100], h, h)
+        h = int(logical_h) if logical_h is not None else spec.logical_h
+        path = self.resolve_image_path(spec.file)
+        scale = spec.scale or self.default_image_scale()
+        return _load_anim(
+            path,
+            h,
+            dpr if dpr is not None else screen_dpr(),
+            scale=scale,
+            ui_scale=ui_scale,
+        )
+
+    def present_image(
+        self,
+        path: str | Path,
+        box_h: int,
+        *,
+        dpr: float | None = None,
+        scale: ScaleMode | None = None,
+        ui_scale: float = 1.0,
+    ) -> LoadedStill:
+        """任意路径（如礼物图标）按皮肤默认展示方式加载。"""
+        return _load_still(
+            path,
+            max(1, int(box_h)),
+            dpr if dpr is not None else screen_dpr(),
+            scale=scale or self.default_image_scale(),
+            ui_scale=ui_scale,
+        )
 
 
 def _parse_color(raw: Any, default: QColor) -> QColor:

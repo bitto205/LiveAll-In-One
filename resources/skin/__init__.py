@@ -3,6 +3,13 @@ from __future__ import annotations
 
 from util.paths import skin_root
 from resources.skin.base import SkinMetrics, ToolSkin, RoleTextStyle
+from resources.skin.media import (
+    LoadedAnim,
+    LoadedStill,
+    SkinAnimPlayer,
+    SkinImageSpec,
+    clear_media_cache,
+)
 from resources.skin.registry import (
     get_active_skin,
     get_skin,
@@ -16,6 +23,11 @@ __all__ = [
     "SkinMetrics",
     "RoleTextStyle",
     "ToolSkin",
+    "SkinImageSpec",
+    "LoadedStill",
+    "LoadedAnim",
+    "SkinAnimPlayer",
+    "clear_media_cache",
     "get_active_skin",
     "get_skin",
     "list_skins",

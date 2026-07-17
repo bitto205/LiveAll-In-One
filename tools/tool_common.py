@@ -122,8 +122,9 @@ def scale_pixmap_dpr(px: QPixmap, side: int) -> QPixmap:
     return out
 
 
-def load_gift_pixmap(gift_name: str, side: int) -> QPixmap | None:
+def load_gift_pixmap(gift_name: str, side: int, *, tool_id: str = "overtime") -> QPixmap | None:
     from resources.gift.gift_info import get_gift_id, get_icon_path
+    from resources.skin import get_active_skin
 
     path = get_icon_path(gift_name)
     if not path:
@@ -136,7 +137,7 @@ def load_gift_pixmap(gift_name: str, side: int) -> QPixmap | None:
                     break
     if not path:
         return None
-    px = QPixmap(path)
-    if px.isNull():
+    still = get_active_skin(tool_id).present_image(path, side)
+    if still.pixmap.isNull():
         return None
-    return scale_pixmap_dpr(px, side)
+    return still.pixmap
