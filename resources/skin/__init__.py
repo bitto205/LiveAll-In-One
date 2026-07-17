@@ -7,6 +7,7 @@ from resources.skin.registry import (
     get_active_skin,
     get_skin,
     list_skins,
+    register_skin,
     set_active_skin,
     skin_tool_dir,
 )
@@ -18,6 +19,7 @@ __all__ = [
     "get_active_skin",
     "get_skin",
     "list_skins",
+    "register_skin",
     "set_active_skin",
     "skin_root",
     "skin_tool_dir",
