@@ -107,6 +107,21 @@ def gift_names_cached() -> list[str]:
     return _GIFT_NAMES_CACHE
 
 
+def _screen_dpr() -> float:
+    from PySide6.QtWidgets import QApplication
+    scr = QApplication.primaryScreen()
+    return float(scr.devicePixelRatio()) if scr else 1.0
+
+
+def scale_pixmap_dpr(px: QPixmap, side: int) -> QPixmap:
+    """缩到逻辑边长×DPR 的物理像素，再标记 devicePixelRatio，避免高分屏发糊。"""
+    dpr = _screen_dpr()
+    phys = max(1, round(max(1, int(side)) * dpr))
+    out = px.scaled(phys, phys, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+    out.setDevicePixelRatio(dpr)
+    return out
+
+
 def load_gift_pixmap(gift_name: str, side: int) -> QPixmap | None:
     from resources.gift.gift_info import get_gift_id, get_icon_path
 
@@ -124,4 +139,4 @@ def load_gift_pixmap(gift_name: str, side: int) -> QPixmap | None:
     px = QPixmap(path)
     if px.isNull():
         return None
-    return px.scaled(side, side, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+    return scale_pixmap_dpr(px, side)

@@ -29,7 +29,7 @@ def _trace_boot(msg: str) -> None:
 def _resolve_uac_launch() -> tuple[str, str | None]:
     """ShellExecuteW 的 lpFile / lpParameters；必须在 os.chdir 之前调用。"""
     from util.paths import is_compiled
-
+ 
     script = os.path.abspath(sys.argv[0])
     extra = [f'"{a}"' for a in sys.argv[1:]]
 

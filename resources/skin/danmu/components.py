@@ -1,19 +1,14 @@
 """弹幕机悬浮组件：尺寸、字体、对齐、折行均由皮肤定义。"""
 from __future__ import annotations
 
-import os
-
 from PySide6.QtCore import Qt, QPropertyAnimation, QEasingCurve, QTimer
-from PySide6.QtGui import QFont, QFontMetrics, QPainter, QPixmap
+from PySide6.QtGui import QFont, QFontMetrics, QPainter
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QSizePolicy,
     QGraphicsOpacityEffect,
 )
 
 from resources.skin.base import ToolSkin, make_font, qt_alignment
-from util.paths import gift_dir
-
-_GIFT_ICONS_DIR = str(gift_dir() / "icon")
 
 _FADE_IN_MS = 300
 _STAY_MS = 3000
@@ -169,25 +164,6 @@ class DanmuGiftBubble(DanmuBubbleBase):
         self._build(msg, suffix)
         self._start_lifecycle()
 
-    @staticmethod
-    def _load_icon(gift_id: int, gift_name: str) -> QPixmap | None:
-        try:
-            from resources.gift.gift_info import get_icon_path
-            path = get_icon_path(gift_name)
-        except Exception:
-            path = None
-        if not path:
-            for ext in (".webp", ".png", ".jpg"):
-                p = os.path.join(_GIFT_ICONS_DIR, f"{gift_id}{ext}")
-                if os.path.exists(p):
-                    path = p
-                    break
-        if path:
-            px = QPixmap(path)
-            if not px.isNull():
-                return px
-        return None
-
     def _build(self, msg, suffix: str = ""):
         skin = self._active_skin()
         body_style = skin.role_style(self._SKIN_SURFACE, "body")
@@ -205,10 +181,11 @@ class DanmuGiftBubble(DanmuBubbleBase):
             fm_user.horizontalAdvance(suffix) if suffix else 0,
         ) + text_slack
 
-        pixmap = self._load_icon(msg.gift_id, msg.gift)
         m = skin.metrics()
         icon_sz = m.gift_icon_size
         icon_gap = m.gift_icon_gap
+        from tools.tool_common import load_gift_pixmap
+        pixmap = load_gift_pixmap(msg.gift, icon_sz)
         h_margin = m.pad_h + m.fade_w
         inner_w = text_cw + ((icon_sz + icon_gap) if pixmap else 0)
         self.setFixedWidth(inner_w + h_margin * 2)
@@ -220,10 +197,7 @@ class DanmuGiftBubble(DanmuBubbleBase):
         if pixmap:
             icon_lbl = QLabel()
             icon_lbl.setFixedSize(icon_sz, icon_sz)
-            icon_lbl.setPixmap(
-                pixmap.scaled(icon_sz, icon_sz,
-                              Qt.KeepAspectRatio, Qt.SmoothTransformation)
-            )
+            icon_lbl.setPixmap(pixmap)
             icon_lbl.setStyleSheet("background: transparent;")
             outer.addWidget(icon_lbl)
 
