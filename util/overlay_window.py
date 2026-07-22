@@ -5,15 +5,78 @@ import math
 import os
 import re
 
-from PySide6.QtCore import QEvent, Qt, QTimer, QVariantAnimation
+from PySide6.QtCore import QAbstractAnimation, QEvent, Qt, QTimer, QVariantAnimation
 from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import (
-    QDialog, QLabel, QPushButton, QVBoxLayout, QMessageBox,
+    QDialog, QLabel, QPushButton, QVBoxLayout, QMessageBox, QWidget,
 )
 
 from util.paths import app_root
 
 _TUTORIAL_BTN_W = 44
+
+
+class OverlayResizeFreeze:
+    """拖拽缩放期间冻结整窗绘制；松手后恢复并回调 on_resume。
+
+    数据逻辑可继续跑；UI 更新应检查 frozen，把待渲染项排队，resume 时再刷。
+    已在播的 QAbstractAnimation 会 pause，松手后 resume。
+    """
+
+    def __init__(self, host: QWidget, on_resume):
+        self._host = host
+        self._on_resume = on_resume
+        self._live = False
+        self._paused: list[QAbstractAnimation] = []
+
+    @property
+    def frozen(self) -> bool:
+        return self._live
+
+    @property
+    def live(self) -> bool:
+        return self._live
+
+    def begin(self) -> None:
+        if self._live:
+            return
+        self._live = True
+        self._paused = []
+        for anim in self._host.findChildren(QAbstractAnimation):
+            if anim.state() == QAbstractAnimation.Running:
+                anim.pause()
+                self._paused.append(anim)
+        self._host.setUpdatesEnabled(False)
+
+    def end(self) -> None:
+        if not self._live:
+            return
+        self._live = False
+        for anim in self._paused:
+            try:
+                if anim.state() == QAbstractAnimation.Paused:
+                    anim.resume()
+            except RuntimeError:
+                pass
+        self._paused = []
+        self._host.setUpdatesEnabled(True)
+        try:
+            self._on_resume()
+        finally:
+            self._host.update()
+
+    def begin_live(self) -> None:
+        self.begin()
+
+    def end_live(self) -> None:
+        self.end()
+
+    def request(self) -> None:
+        if not self._live:
+            self._on_resume()
+
+
+ResizeLayoutGate = OverlayResizeFreeze
 
 
 def tutorial_image_path() -> str | None:

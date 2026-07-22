@@ -29,7 +29,7 @@ from PySide6.QtGui   import (
 import util.theme as _theme
 from util.widgets import ThemedComboBox
 from util.overlay_capture import enable_capture_transparency
-from util.overlay_window import OverlayFrameMixin, show_tutorial_dialog
+from util.overlay_window import OverlayFrameMixin, OverlayResizeFreeze, show_tutorial_dialog
 
 # ─────────────────────────────────────────────
 # 常量
@@ -144,6 +144,20 @@ class _DanmuRoot(QWidget):
         self._content.setAttribute(Qt.WA_TranslucentBackground)
         self._content.setAttribute(Qt.WA_TransparentForMouseEvents)
         self._content.setStyleSheet("background: transparent;")
+        self._resize_freeze = OverlayResizeFreeze(self._win, self._on_resize_resume)
+
+    def is_resize_frozen(self) -> bool:
+        return self._resize_freeze.frozen
+
+    def _on_resize_resume(self):
+        from PySide6.QtCore import QAbstractAnimation
+        if (self._win._shown and
+                self._win._anim.state() != QAbstractAnimation.Running):
+            r = self.max_radius()
+            self._r = r
+            self._win._anim_r = r
+        self.set_radius(self._r)
+        self._win._flush_pending_messages()
 
     # ── 圆圈中心（本组件坐标系）────────────────
     def _cx(self) -> float:
@@ -187,7 +201,8 @@ class _DanmuRoot(QWidget):
         r  = self._r
 
         p = QPainter(self)
-        p.setRenderHint(QPainter.Antialiasing)
+        # 拖拽缩放时关抗锯齿，降低半透明窗圆形 clip 重绘成本
+        p.setRenderHint(QPainter.Antialiasing, self._resize_data is None)
 
         # 圆形裁剪路径（与 setMask 圆同心同径）
         clip = QPainterPath()
@@ -221,15 +236,9 @@ class _DanmuRoot(QWidget):
         self._content.setGeometry(
             0, _TOPBAR_H, self.width(), self.height() - _TOPBAR_H
         )
-        # 展开状态且动画未运行：把 _r 更新到新尺寸的 max_radius，
-        # 否则窗口变大后旧半径覆盖不到新边角，边框/顶栏右侧消失
-        from PySide6.QtCore import QAbstractAnimation
-        if (self._win._shown and
-                self._win._anim.state() != QAbstractAnimation.Running):
-            r = self.max_radius()
-            self._r = r
-            self._win._anim_r = r
-        self.set_radius(self._r)
+        # 冻结期只改几何；松手由 freeze.end 恢复边框与积压弹幕
+        if not self._resize_freeze.frozen:
+            self._resize_freeze.request()
 
     # ── 鼠标事件：拖动 + 边缘 resize ─────────
     def mousePressEvent(self, event):
@@ -240,6 +249,7 @@ class _DanmuRoot(QWidget):
 
         edge = self._edge_at(pos)
         if edge:
+            self._resize_freeze.begin()
             self._resize_data = (
                 edge,
                 QRect(self._win.geometry()),
@@ -270,9 +280,12 @@ class _DanmuRoot(QWidget):
         ))
 
     def mouseReleaseEvent(self, _event):
+        was_resize = self._resize_data is not None
         self._drag_anchor = None
         self._resize_data = None
         self.setCursor(Qt.ArrowCursor)
+        if was_resize:
+            self._resize_freeze.end()
 
     def _edge_at(self, pos: QPoint) -> str | None:
         x, y  = pos.x(), pos.y()
@@ -325,6 +338,7 @@ class DanmuWindow(OverlayFrameMixin, QMainWindow):
         self._anim_r        = 0.0
         self._first_show    = True    # 第一次 show 后初始化到展开状态
         self._active_bubbles: list[_DanmuBubble] = []
+        self._pending_msgs: list[tuple] = []
 
         self._root = _DanmuRoot(self)
         self.setCentralWidget(self._root)
@@ -465,6 +479,14 @@ class DanmuWindow(OverlayFrameMixin, QMainWindow):
         from util.models import ChatMessage, GiftMessage, LikeMessage, FollowMessage
         from resources.skin.danmu.components import create_chat_bubble, create_gift_bubble
 
+        # 缩放冻结：只排队，松手后统一补渲染
+        if self._root.is_resize_frozen():
+            self._pending_msgs.append((msg, suffix))
+            # 防止极端堆积占内存
+            if len(self._pending_msgs) > 80:
+                self._pending_msgs = self._pending_msgs[-80:]
+            return
+
         cw_widget = self._root._content
         skin = _danmu_skin()
         if isinstance(msg, ChatMessage):
@@ -480,6 +502,12 @@ class DanmuWindow(OverlayFrameMixin, QMainWindow):
 
         bubble.adjustSize()
         self._place_and_show(bubble, bubble.width(), bubble.height())
+
+    def _flush_pending_messages(self):
+        pending = self._pending_msgs
+        self._pending_msgs = []
+        for msg, suffix in pending:
+            self.add_message(msg, suffix)
 
     def _on_bubble_gone(self, bubble):
         try:

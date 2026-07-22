@@ -14,6 +14,7 @@ logger = get_tagged_logger("工具", "tools.common")
 
 _GIFT_ICON_DIR = str(gift_dir() / "icon")
 _GIFT_NAMES_CACHE: list[str] | None = None
+_GIFT_SRC_CACHE: dict[str, QPixmap] = {}
 _APP_SHUTTING_DOWN = False
 _TOOLS_PAGE = None
 
@@ -124,7 +125,6 @@ def scale_pixmap_dpr(px: QPixmap, side: int) -> QPixmap:
 
 def load_gift_pixmap(gift_name: str, side: int, *, tool_id: str = "overtime") -> QPixmap | None:
     from resources.gift.gift_info import get_gift_id, get_icon_path
-    from resources.skin import get_active_skin
 
     path = get_icon_path(gift_name)
     if not path:
@@ -137,7 +137,18 @@ def load_gift_pixmap(gift_name: str, side: int, *, tool_id: str = "overtime") ->
                     break
     if not path:
         return None
-    still = get_active_skin(tool_id).present_image(path, side)
-    if still.pixmap.isNull():
-        return None
-    return still.pixmap
+
+    src = _GIFT_SRC_CACHE.get(path)
+    if src is None or src.isNull():
+        src = QPixmap(path)
+        if src.isNull():
+            # 部分 webp：Pillow 解码一次，按 DPR=1 缓存源图，后续 Qt 缩放
+            from resources.skin.media import load_still
+            still = load_still(path, max(side, 168), dpr=1.0, scale="smooth")
+            if still.pixmap.isNull():
+                return None
+            src = still.pixmap
+            src.setDevicePixelRatio(1.0)
+        _GIFT_SRC_CACHE[path] = src
+
+    return scale_pixmap_dpr(src, side)

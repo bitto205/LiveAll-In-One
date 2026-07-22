@@ -29,7 +29,7 @@ from util.widgets import ThemedComboBox
 from resources.skin.overtime.components import OvertimeTextLabel
 from tools import register_tool
 from util.overlay_capture import enable_capture_transparency
-from util.overlay_window import OverlayFrameMixin, show_tutorial_dialog
+from util.overlay_window import OverlayFrameMixin, OverlayResizeFreeze, show_tutorial_dialog
 from tools.tool_common import (
     ToolSingleton,
     gift_names_cached,
@@ -1714,6 +1714,7 @@ class _GiftSlotWidget(QFrame):
         super().__init__(parent)
         self.setAttribute(Qt.WA_TranslucentBackground)
         self._scale = 1.0
+        self._loaded_icon_side = -1
         self._gift_name = rule.get("gift", "小心心")
         self._time_label = rule_slot_label(rule)
 
@@ -1742,9 +1743,10 @@ class _GiftSlotWidget(QFrame):
         self._time_label = time_label
         self._name_lbl.setText(gift_name)
         self._time_lbl.setText(time_label)
+        self._loaded_icon_side = -1
         self.apply_scale(self._scale)
 
-    def apply_scale(self, scale: float):
+    def apply_scale(self, scale: float, *, heavy: bool = True):
         s = max(0.5, scale)
         self._scale = s
         slot_w = int(round(_ref_slot_w() * s))
@@ -1752,17 +1754,25 @@ class _GiftSlotWidget(QFrame):
         icon_side = max(14, int(round(slot_h * 0.82)))
         self.setFixedSize(slot_w, slot_h)
         self._icon_lbl.setFixedSize(icon_side, icon_side)
-        px = load_gift_pixmap(self._gift_name, icon_side)
-        if px:
-            self._icon_lbl.setPixmap(px)
-            self._icon_lbl.setText("")
-        else:
-            self._icon_lbl.setPixmap(QPixmap())
-            self._icon_lbl.setText("·")
+        if heavy or self._loaded_icon_side < 0 or abs(icon_side - self._loaded_icon_side) >= 2:
+            px = load_gift_pixmap(self._gift_name, icon_side)
+            if px:
+                self._icon_lbl.setPixmap(px)
+                self._icon_lbl.setText("")
+            else:
+                self._icon_lbl.setPixmap(QPixmap())
+                self._icon_lbl.setText("·")
+            self._loaded_icon_side = icon_side
         text_w = max(20, slot_w - icon_side - int(round(6 * s)))
         text_h = max(8, (slot_h - int(round(2 * s))) // 2)
-        self._name_lbl.fit_to_box(self._gift_name, text_w, text_h, scale=s)
-        self._time_lbl.fit_to_box(self._time_lbl.text(), text_w, text_h, scale=s)
+        if heavy:
+            self._name_lbl.fit_to_box(self._gift_name, text_w, text_h, scale=s)
+            self._time_lbl.fit_to_box(self._time_lbl.text(), text_w, text_h, scale=s)
+        else:
+            # 拖拽中用近似字号，避免每帧二分 fit
+            approx = max(8, int(round(13 * s)))
+            self._name_lbl.set_pixel_size(approx)
+            self._time_lbl.set_pixel_size(approx)
 
 
 class _ResultRow(QWidget):
@@ -1787,7 +1797,7 @@ class _ResultRow(QWidget):
         if self._scale > 0:
             self.apply_scale(self._scale)
 
-    def apply_scale(self, scale: float):
+    def apply_scale(self, scale: float, *, heavy: bool = True):
         s = max(0.5, scale)
         self._scale = s
         h = int(round(_ref_log_row_h() * s))
@@ -1796,10 +1806,15 @@ class _ResultRow(QWidget):
         pad = max(2, int(round(2 * s)))
         text_w = max(20, w // 2 - pad)
         box_h = h - pad
-        self._left_lbl.fit_to_box(self._left_lbl.text() or "占位", text_w, box_h, scale=s)
-        self._right_lbl.fit_to_box(
-            self._right_lbl.text() or "+0秒", text_w, box_h, scale=s,
-        )
+        if heavy:
+            self._left_lbl.fit_to_box(self._left_lbl.text() or "占位", text_w, box_h, scale=s)
+            self._right_lbl.fit_to_box(
+                self._right_lbl.text() or "+0秒", text_w, box_h, scale=s,
+            )
+        else:
+            approx = max(8, int(round(13 * s)))
+            self._left_lbl.set_pixel_size(approx)
+            self._right_lbl.set_pixel_size(approx)
 
 
 class _TimerBox(QFrame):
@@ -1819,7 +1834,7 @@ class _TimerBox(QFrame):
         self._lbl.setText(text)
         self.apply_scale(self._last_scale)
 
-    def apply_scale(self, scale: float):
+    def apply_scale(self, scale: float, *, heavy: bool = True):
         s = max(0.5, scale)
         self._last_scale = s
         w = int(round(_ref_timer_w() * s))
@@ -1830,7 +1845,10 @@ class _TimerBox(QFrame):
         self._lay.setContentsMargins(edge, top, edge, edge)
         inner_w = max(1, w - edge * 2)
         inner_h = max(1, h - top - edge)
-        self._lbl.fit_to_box(self._lbl.text(), inner_w, inner_h, scale=s)
+        if heavy:
+            self._lbl.fit_to_box(self._lbl.text(), inner_w, inner_h, scale=s)
+        else:
+            self._lbl.set_pixel_size(max(8, int(round(24 * s))))
 
 
 class _TitleTimerSection(QWidget):
@@ -1865,20 +1883,23 @@ class _TitleTimerSection(QWidget):
     def timer_box(self) -> _TimerBox:
         return self._timer_box
 
-    def apply_scale(self, scale: float, block_w: int, pad: int):
+    def apply_scale(self, scale: float, block_w: int, pad: int, *, heavy: bool = True):
         s = max(0.5, scale)
         section_gap = max(1, int(round(_ref_title_timer_gap() * s)))
         self.layout().setSpacing(section_gap)
 
-        self._title_lbl.fit_to_box(
-            self._title_lbl.text(), block_w - pad, _ref_title_row_h(), scale=s,
-        )
+        if heavy:
+            self._title_lbl.fit_to_box(
+                self._title_lbl.text(), block_w - pad, _ref_title_row_h(), scale=s,
+            )
+        else:
+            self._title_lbl.set_pixel_size(max(8, int(round(13 * s))))
         title_row_h = QFontMetrics(self._title_lbl.font()).height() + max(
             1, int(round(2 * s)),
         )
         self._title_wrap.setFixedHeight(title_row_h)
 
-        self._timer_box.apply_scale(s)
+        self._timer_box.apply_scale(s, heavy=heavy)
         self.setFixedHeight(title_row_h + section_gap + self._timer_box.height())
 
 
@@ -1952,7 +1973,7 @@ class _OvertimeBlock(QWidget):
         if self._scale > 0:
             self.apply_scale(self._scale)
 
-    def apply_scale(self, scale: float):
+    def apply_scale(self, scale: float, *, heavy: bool = True):
         s = max(0.5, scale)
         self._scale = s
         gap = max(1, int(round(_ref_row_gap() * s)))
@@ -1966,21 +1987,24 @@ class _OvertimeBlock(QWidget):
         bw = int(round(_ref_block_w() * s))
         pad = max(2, int(round(2 * s)))
 
-        self._title_timer.apply_scale(s, bw, pad)
+        self._title_timer.apply_scale(s, bw, pad, heavy=heavy)
 
         grid_h = int(round((3 * _ref_slot_row_h() + 2 * _ref_grid_gap()) * s))
         self._grid_wrap.setFixedHeight(grid_h)
         for slot in self._gift_slots:
-            slot.apply_scale(s)
+            slot.apply_scale(s, heavy=heavy)
 
         custom_h = int(round(_ref_custom_row_h() * s))
         self._custom_lbl.setFixedHeight(custom_h)
-        self._custom_lbl.fit_to_box(
-            self._custom_lbl.text(), bw - pad, custom_h - pad, scale=s,
-        )
+        if heavy:
+            self._custom_lbl.fit_to_box(
+                self._custom_lbl.text(), bw - pad, custom_h - pad, scale=s,
+            )
+        else:
+            self._custom_lbl.set_pixel_size(max(8, int(round(13 * s))))
 
         if self._result_row:
-            self._result_row.apply_scale(s)
+            self._result_row.apply_scale(s, heavy=heavy)
 
         self.setFixedSize(
             bw,
@@ -2077,8 +2101,26 @@ class _OvertimeRoot(QWidget):
         self._content.setStyleSheet("background: transparent;")
 
         self._block = _OvertimeBlock(self._content)
+        self._resize_freeze = OverlayResizeFreeze(self._win, self._on_resize_resume)
 
-    def layout_block(self):
+    def is_resize_frozen(self) -> bool:
+        return self._resize_freeze.frozen
+
+    def _on_resize_resume(self):
+        # 松手后按当前数据重新布局渲染即可，无需堆积队列
+        self.layout_block(heavy=True)
+        from PySide6.QtCore import QAbstractAnimation
+        if (self._win._shown and
+                self._win._anim.state() != QAbstractAnimation.Running):
+            r = self.max_radius()
+            self._r = r
+            self._win._anim_r = r
+        self.set_radius(self._r)
+        self._win._refresh_after_resize()
+
+    def layout_block(self, *, heavy: bool = True):
+        if self._resize_freeze.frozen:
+            return
         cw, ch = self._content.width(), self._content.height()
         if cw <= 0 or ch <= 0:
             return
@@ -2093,7 +2135,7 @@ class _OvertimeRoot(QWidget):
         by = m + (avail_h - bh) // 2
 
         self._block.setGeometry(bx, by, bw, bh)
-        self._block.apply_scale(s)
+        self._block.apply_scale(s, heavy=heavy)
 
     @property
     def block(self) -> _OvertimeBlock:
@@ -2130,7 +2172,7 @@ class _OvertimeRoot(QWidget):
         cx, cy, r = self._cx(), self._cy(), self._r
 
         p = QPainter(self)
-        p.setRenderHint(QPainter.Antialiasing)
+        p.setRenderHint(QPainter.Antialiasing, self._resize_data is None)
 
         clip = QPainterPath()
         clip.addEllipse(cx - r, cy - r, r * 2, r * 2)
@@ -2159,14 +2201,9 @@ class _OvertimeRoot(QWidget):
         self._content.setGeometry(
             0, _TOPBAR_H, self.width(), self.height() - _TOPBAR_H
         )
-        self.layout_block()
-        from PySide6.QtCore import QAbstractAnimation
-        if (self._win._shown and
-                self._win._anim.state() != QAbstractAnimation.Running):
-            r = self.max_radius()
-            self._r = r
-            self._win._anim_r = r
-        self.set_radius(self._r)
+        # 拖拽冻结期只改几何，不布局/不重绘；松手由 freeze.end 恢复
+        if not self._resize_freeze.frozen:
+            self._resize_freeze.request()
 
     def mousePressEvent(self, event):
         if event.button() != Qt.LeftButton:
@@ -2176,6 +2213,7 @@ class _OvertimeRoot(QWidget):
 
         edge = self._edge_at(pos)
         if edge:
+            self._resize_freeze.begin()
             self._resize_data = (
                 edge,
                 QRect(self._win.geometry()),
@@ -2205,9 +2243,12 @@ class _OvertimeRoot(QWidget):
         ))
 
     def mouseReleaseEvent(self, _event):
+        was_resize = self._resize_data is not None
         self._drag_anchor = None
         self._resize_data = None
         self.setCursor(Qt.ArrowCursor)
+        if was_resize:
+            self._resize_freeze.end()
 
     def _edge_at(self, pos: QPoint) -> str | None:
         x, y = pos.x(), pos.y()
@@ -2291,6 +2332,7 @@ class OvertimeWindow(OverlayFrameMixin, QMainWindow):
 
         self._settings = load_settings()
         self._remaining_seconds = 0
+        self._last_gift_log: tuple[str, int] | None = None
         self._ledger = OvertimeUserLedger(self)
         self._tick = QTimer(self)
         self._tick.setInterval(1000)
@@ -2401,21 +2443,30 @@ class OvertimeWindow(OverlayFrameMixin, QMainWindow):
             return False
         self._ledger.record(_gift_user_key(msg), delta)
         self._remaining_seconds = max(0, self._remaining_seconds + delta)
-        self._refresh_timer_display()
-        self._root.block.set_gift_log(
+        self._last_gift_log = (
             gift_log_left(msg.user, msg.gift, msg.count),
             delta,
         )
+        if not self._root.is_resize_frozen():
+            self._refresh_timer_display()
+            self._root.block.set_gift_log(*self._last_gift_log)
         return True
 
     def _refresh_timer_display(self):
         self._root.block.set_remaining_display(self._remaining_seconds)
 
+    def _refresh_after_resize(self):
+        """缩放结束后按当前状态重绘，不回放过程中的中间帧。"""
+        self._refresh_timer_display()
+        if self._last_gift_log is not None:
+            self._root.block.set_gift_log(*self._last_gift_log)
+
     def _on_tick(self):
         if self._remaining_seconds <= 0:
             return
         self._remaining_seconds -= 1
-        self._refresh_timer_display()
+        if not self._root.is_resize_frozen():
+            self._refresh_timer_display()
 
     def _on_r(self, r: float):
         self._anim_r = r

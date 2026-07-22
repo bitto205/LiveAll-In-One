@@ -48,7 +48,10 @@ class OvertimeTextLabel(QLabel):
         return get_active_skin(self._tool_id)
 
     def set_pixel_size(self, px: int):
-        self._px = max(8, int(px))
+        npx = max(8, int(px))
+        if npx == self._px:
+            return
+        self._px = npx
         self._apply_font()
 
     def fit_to_box(self, text: str, max_w: int, max_h: int, *, scale: float = 1.0):
