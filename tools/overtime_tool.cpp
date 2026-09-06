@@ -1066,8 +1066,6 @@ private:
 // ═══════════════════════════════════════════
 
 static constexpr int kRefBlockW = 280;
-static constexpr qreal kCmTimerW = 4.0;
-static constexpr qreal kCmTimerH = 2.0;
 static constexpr qreal kCmSlotH = 1.5;
 static constexpr qreal kCmCustomH = 1.2;
 static constexpr qreal kCmLogH = 1.2;
@@ -1095,11 +1093,7 @@ static int windowMarginPx() {
     return margin;
 }
 
-static int refTimerW() { return cmToPx(kCmTimerW); }
-static int refTimerH() { return cmToPx(kCmTimerH); }
 static int refTitleTimerGap() { return cmToPx(kCmTitleTimerGap); }
-static int refTitleRowH() { return std::max(cmToPx(0.35), 19); }
-static int refTitleTimerSectionH() { return refTitleRowH() + refTitleTimerGap() + refTimerH(); }
 static int refSlotRowH() { return cmToPx(kCmSlotH); }
 static int refCustomRowH() { return cmToPx(kCmCustomH); }
 static int refLogRowH() { return cmToPx(kCmLogH); }
@@ -1108,25 +1102,6 @@ static int refGridGap() { return cmToPx(kCmGridGap); }
 static int refColGap() { return cmToPx(kCmColGap); }
 static int refBlockW() { return kRefBlockW; }
 static int refSlotW() { return (refBlockW() - refColGap()) / 2; }
-
-static int refBlockH() {
-    const int gridH = 3 * refSlotRowH() + 2 * refGridGap();
-    const QVector<int> rows = {refTitleTimerSectionH(), gridH, refCustomRowH(), refLogRowH()};
-    int sum = 0;
-    for (int h : rows) sum += h;
-    return sum + refRowGap() * (rows.size() - 1);
-}
-
-static QSize defaultWindowSize() {
-    const int m = windowMarginPx();
-    return QSize(refBlockW() + 2 * m,
-                 RippleOverlayRoot::kTopbarH + refBlockH() + 2 * m);
-}
-
-static qreal windowAspect() {
-    const QSize s = defaultWindowSize();
-    return qreal(s.width()) / std::max(1, s.height());
-}
 
 // 皮肤驱动的文字：字号按盒子二分拟合，绘制带描边阴影。
 class SkinTextLabel final : public QLabel {
@@ -1570,8 +1545,11 @@ public:
         update();
     }
 
+    QMargins chromeMargins() const { return rootLay_->contentsMargins(); }
+
     void applyChromeMargins() {
         if (!skin_.usesPixelChrome()) {
+            chromeOuterMargins_ = {};
             rootLay_->setContentsMargins(0, 0, 0, 0);
             return;
         }
@@ -1590,7 +1568,12 @@ public:
         const int left = std::max(edge, int(std::lround(deco.value(QStringLiteral("busy_over_x")).toDouble(10))));
         const int right = std::max(corner.logicalW / 2, outW + depth);
         const int bot = std::max(corner.logicalH / 2, outW + depth);
-        rootLay_->setContentsMargins(left, top, right, bot);
+        chromeOuterMargins_ = QMargins(left, top, right, bot);
+        // 装饰占外侧空间，内容还需与框线保持安全距离；否则大字号的墨迹会贴框。
+        const int contentPad = std::max(
+            6, ch.value(QStringLiteral("content_pad")).toInt(10));
+        rootLay_->setContentsMargins(left + contentPad, top + contentPad,
+                                     right + contentPad, bot + contentPad);
         // 缓存装饰贴图供 paintEvent 使用
         otBusy_ = skin_.loadNamedAnim(QStringLiteral("busy"));
         otCorner_ = skin_.loadNamedAnim(QStringLiteral("corner"));
@@ -1655,7 +1638,11 @@ protected:
         QPainter p(this);
         if (skin_.usesPixelChrome()) {
             p.setRenderHint(QPainter::Antialiasing, false);
-            const QRect inner = contentsRect();
+            // 框体向内偏移，四周留给 Busy/Logo/窗口按钮/右下角装饰。
+            // 旧实现把框画在 QWidget 外沿，所有负坐标装饰都会被控件自身裁掉。
+            const QRect inner = contentsRect().adjusted(
+                chromeOuterMargins_.left(), chromeOuterMargins_.top(),
+                -chromeOuterMargins_.right(), -chromeOuterMargins_.bottom());
             skin_.paintPixelChrome(&p, inner, 1.0);
             auto blit = [&](const QPixmap& pm, const QRect& r) {
                 if (pm.isNull() || r.isEmpty()) return;
@@ -1723,6 +1710,7 @@ private:
     SkinTextLabel* customLbl_ = nullptr;
     ResultRow* resultRow_ = nullptr;
     qreal scale_ = 1.0;
+    QMargins chromeOuterMargins_;
     liveaio::resources::LoadedAnim otBusy_;
     liveaio::resources::LoadedAnim otCorner_;
     liveaio::resources::LoadedStill otLogo_, otWinMin_, otWinMax_, otWinClose_;
@@ -1736,9 +1724,37 @@ public:
     OvertimeRoot(QMainWindow* win, std::function<void()> onResume)
         : RippleOverlayRoot(win), onResume_(std::move(onResume)) {
         block_ = new OvertimeBlock(content());
+        referenceBlockSize_ = block_->size();
     }
 
     OvertimeBlock* block() const { return block_; }
+
+    QSize preferredWindowSize() const {
+        const int m = windowMarginPx();
+        return QSize(referenceBlockSize_.width() + 2 * m,
+                     kTopbarH + referenceBlockSize_.height() + 2 * m);
+    }
+
+    qreal preferredWindowAspect() const {
+        const QSize s = preferredWindowSize();
+        return qreal(s.width()) / std::max(1, s.height());
+    }
+
+    void refreshSkin() {
+        block_->refreshSkin();
+        block_->applyScale(1.0, true);
+        referenceBlockSize_ = block_->size();
+        normalizeHostAspect();
+        layoutBlock(true);
+    }
+
+    void normalizeHostAspect() {
+        const qreal aspect = preferredWindowAspect();
+        const int w = std::max(hostWindow()->minimumWidth(), hostWindow()->width());
+        const int h = std::max(hostWindow()->minimumHeight(),
+                               static_cast<int>(std::lround(w / aspect)));
+        if (std::abs(hostWindow()->height() - h) > 1) hostWindow()->resize(w, h);
+    }
 
     // 大组件按 0.5cm 边距居中。字号只跟宽度走（各角色自己的 pixel_size/max_px），
     // 不再因高度不够二次缩小整块——那会把标题/倒计时/礼物再次绑死。
@@ -1749,7 +1765,11 @@ public:
         const int m = windowMarginPx();
         const int availW = std::max(1, cw - 2 * m);
         const int availH = std::max(1, ch - 2 * m);
-        const qreal s = std::max(0.5, qreal(availW) / refBlockW());
+        // 皮肤装饰边距不随内容缩放；先从可用宽度扣掉，否则 Nemuru 框会越界，
+        // 缩到最小时文字和礼物格就会被悬浮窗外框盖住。
+        const QMargins chrome = block_->chromeMargins();
+        const int bodyAvailW = std::max(1, availW - chrome.left() - chrome.right());
+        const qreal s = std::max(0.5, qreal(bodyAvailW) / refBlockW());
         block_->applyScale(s, heavy);
         const int bw = block_->width();
         const int bh = block_->height();
@@ -1768,7 +1788,7 @@ protected:
 
     // 整窗按初始比例缩放，避免大组件留白。
     QRect resizeGeometry(Edge edge, const QPoint& delta, const QRect& start) const override {
-        const qreal aspect = windowAspect();
+        const qreal aspect = preferredWindowAspect();
         const int minW = hostWindow()->minimumWidth();
         const int minH = hostWindow()->minimumHeight();
         QRect geo = start;
@@ -1799,6 +1819,7 @@ protected:
 
 private:
     OvertimeBlock* block_ = nullptr;
+    QSize referenceBlockSize_;
     std::function<void()> onResume_;
 };
 
@@ -1855,17 +1876,21 @@ public:
 
     void show(const Settings& settings, std::function<void()> onClosed) {
         auto& host = OverlayHostService::instance();
-        const QSize def = defaultWindowSize();
         root_ = nullptr;
         auto* shell = host.shell(OverlayToolId::Overtime);
         root_ = new OvertimeRoot(shell, [this]() { onFrameResumed(); });
+        const QSize def = root_->preferredWindowSize();
+        constexpr qreal kMinWindowScale = 0.90;
+        const int minW = static_cast<int>(std::ceil(def.width() * kMinWindowScale));
+        const int minH = static_cast<int>(std::ceil(def.height() * kMinWindowScale));
         host.show(OverlayToolId::Overtime, QStringLiteral("加班机"),
                   QStringLiteral("overtime_window_geometry"),
-                  static_cast<int>(def.width() * 0.75), static_cast<int>(def.height() * 0.75),
+                  minW, minH,
                   def.width(), def.height(), root_, [this, onClosed]() {
                       unmount();
                       if (onClosed) onClosed();
                   });
+        root_->normalizeHostAspect();
         applySettings(settings);
         if (root_) root_->layoutBlock(true);
     }
@@ -1908,7 +1933,7 @@ public:
     }
 
     void refreshSkin() {
-        if (root_) root_->block()->refreshSkin();
+        if (root_) root_->refreshSkin();
     }
 
     void applyCoreRemaining(int seconds) {

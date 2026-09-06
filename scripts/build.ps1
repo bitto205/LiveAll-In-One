@@ -242,12 +242,13 @@ function Invoke-CmakeBuild([string]$OutDir, [string]$QtRoot) {
         $windeploy = Find-CommandPath "windeployqt.exe" @($qtBin)
     }
     if ($windeploy) {
-        # PowerShell $ErrorActionPreference=Stop 会把 stderr 警告当终止错误；
-        # windeployqt 缺 dxcompiler 时仍 exit 0，必须吞掉 stderr 只看退出码。
+        # PowerShell can promote native stderr warnings to terminating errors.
+        # Ignore windeployqt stderr here and use its process exit code instead.
         $prevEap = $ErrorActionPreference
         $ErrorActionPreference = "Continue"
         try {
-            foreach ($bin in @("LiveAIO.exe", "LiveAIOPages.dll", "LiveAIOTools.dll")) {
+            # The host shell does not link Qt; deploy the two Qt modules only.
+            foreach ($bin in @("LiveAIOPages.dll", "LiveAIOTools.dll")) {
                 $path = Join-Path $OutDir $bin
                 if (-not (Test-Path $path)) { continue }
                 Write-Step "windeployqt $bin"
@@ -264,7 +265,7 @@ function Invoke-CmakeBuild([string]$OutDir, [string]$QtRoot) {
         Write-Warn "windeployqt not found — Qt runtime DLLs may be missing beside the exe"
     }
 
-    # MinGW 运行时不总被 windeployqt 带上，显式从 toolchain 拷贝。
+    # windeployqt does not always copy the MinGW runtime; copy it explicitly.
     $mingwBins = @(
         "C:\Qt\Tools\mingw1310_64\bin",
         "C:\Qt\Tools\mingw1120_64\bin",
