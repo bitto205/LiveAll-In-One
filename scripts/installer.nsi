@@ -1,4 +1,4 @@
-; LiveAIO NSIS installer (Qt/Go DLL layout)
+﻿; LiveAIO NSIS installer (Qt/Go DLL layout)
 ; Built by: .\scripts\build.ps1 -Release -Installer
 ; Or:
 ;   makensis /DSRCDIR=...\build_work\<ver> /DOUTFILE=...\LiveAIO-setup.exe /DAPP_VERSION=... /DLICENSE_FILE=...\LICENSE scripts\installer.nsi

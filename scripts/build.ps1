@@ -422,6 +422,13 @@ function Invoke-Nsis([string]$StageDir, [string]$AppVer) {
         Fail "makensis not found — install NSIS or skip -Nsis/-Installer"
         return
     }
+    # UPX 会破坏 PE 内嵌图标，NSIS 的 MUI_ICON 不能再指向压过的 LiveAIO.exe。
+    $ico = Join-Path $Root "resources\image\LiveAIO.ico"
+    if (-not (Test-Path $ico)) {
+        Fail "missing installer icon: $ico"
+        return
+    }
+    Copy-Item $ico (Join-Path $StageDir "LiveAIO.ico") -Force
     $outDir = Join-Path $Root "build\installers"
     New-Item -ItemType Directory -Force -Path $outDir | Out-Null
     $safeVer = ($AppVer -replace '[^\w\.\-]', '_')
@@ -435,6 +442,7 @@ function Invoke-Nsis([string]$StageDir, [string]$AppVer) {
         "/DOUTFILE=$outfile" `
         "/DAPP_VERSION=$AppVer" `
         "/DLICENSE_FILE=$license" `
+        "/DAPP_ICON=$ico" `
         $nsi
     if ($LASTEXITCODE -ne 0) {
         Fail "makensis failed"

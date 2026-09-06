@@ -24,7 +24,9 @@ for p in paths:
             if "QStringLiteral" in line and line.count('"') % 2 != 0:
                 odd += 1
                 print(f"ODD_QUOTE {p}:{i}")
-    status = "OK" if ok and not bom and fffd == 0 and odd == 0 else "BAD"
+    # NSIS Unicode 脚本需要 UTF-8 BOM；其它源码仍要求无 BOM。
+    allow_bom = Path(p).suffix.lower() == ".nsi"
+    status = "OK" if ok and (allow_bom or not bom) and fffd == 0 and odd == 0 else "BAD"
     if status != "OK":
         rc = 1
     print(f"{status} {p} bom={bom} fffd={fffd} odd_quotes={odd} {err}")
