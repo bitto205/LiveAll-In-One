@@ -1577,6 +1577,10 @@ public:
         // 缓存装饰贴图供 paintEvent 使用
         otBusy_ = skin_.loadNamedAnim(QStringLiteral("busy"));
         otCorner_ = skin_.loadNamedAnim(QStringLiteral("corner"));
+        otBusyFrame_ = 0;
+        otCornerFrame_ = 0;
+        otBusyElapsedMs_ = 0;
+        otCornerElapsedMs_ = 0;
         otLogo_ = logo;
         otWinMin_ = winMin;
         otWinMax_ = skin_.loadNamedStill(QStringLiteral("win_max"));
@@ -1585,20 +1589,29 @@ public:
             otChromeTimer_ = new QTimer(this);
             otChromeTimer_->setTimerType(Qt::PreciseTimer);
             QObject::connect(otChromeTimer_, &QTimer::timeout, this, [this]() {
-                bool dirty = false;
-                if (otBusy_.frames.size() > 1) {
-                    otBusyFrame_ = (otBusyFrame_ + 1) % otBusy_.frames.size();
-                    dirty = true;
-                }
-                if (otCorner_.frames.size() > 1) {
-                    otCornerFrame_ = (otCornerFrame_ + 1) % otCorner_.frames.size();
-                    dirty = true;
-                }
+                const int stepMs = std::max(1, otChromeTimer_->interval());
+                auto advance = [stepMs](const liveaio::resources::LoadedAnim& anim,
+                                        int& frame, int& elapsedMs) {
+                    if (anim.frames.size() <= 1) return false;
+                    elapsedMs += stepMs;
+                    bool changed = false;
+                    for (int guard = 0; guard < anim.frames.size(); ++guard) {
+                        const int delay = std::max(30, anim.delays.value(frame, 100));
+                        if (elapsedMs < delay) break;
+                        elapsedMs -= delay;
+                        frame = (frame + 1) % anim.frames.size();
+                        changed = true;
+                    }
+                    return changed;
+                };
+                const bool dirty =
+                    advance(otBusy_, otBusyFrame_, otBusyElapsedMs_)
+                    | advance(otCorner_, otCornerFrame_, otCornerElapsedMs_);
                 if (dirty) update();
             });
         }
         if (otBusy_.frames.size() > 1 || otCorner_.frames.size() > 1) {
-            otChromeTimer_->start(std::max(30, otBusy_.delays.value(0, 100)));
+            otChromeTimer_->start(30);
         } else {
             otChromeTimer_->stop();
         }
@@ -1716,6 +1729,8 @@ private:
     liveaio::resources::LoadedStill otLogo_, otWinMin_, otWinMax_, otWinClose_;
     int otBusyFrame_ = 0;
     int otCornerFrame_ = 0;
+    int otBusyElapsedMs_ = 0;
+    int otCornerElapsedMs_ = 0;
     QTimer* otChromeTimer_ = nullptr;
 };
 

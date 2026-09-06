@@ -177,7 +177,10 @@ static LoadedAnim loadAnimPath(const QString& path, int logicalH, qreal dpr = 0,
         return out;
     }
     int i = 0;
-    while (true) {
+    // Animated WebP advances to the next frame as part of read(). Calling
+    // jumpToImage/jumpToNextImage afterwards makes Qt's WebP handler fail
+    // immediately, leaving callers with a one-frame "animation".
+    while (reader.canRead() && i <= 256) {
         QImage img = reader.read();
         if (img.isNull()) break;
         const int lw = std::max(1, int(std::lround(img.width() * double(lh) / std::max(1, img.height()))));
@@ -190,8 +193,6 @@ static LoadedAnim loadAnimPath(const QString& path, int logicalH, qreal dpr = 0,
         out.delays.push_back(std::max(30, reader.nextImageDelay() > 0 ? reader.nextImageDelay() : 100));
         out.logicalW = lw;
         ++i;
-        if (!reader.jumpToImage(i)) break;
-        if (i > 256) break;
     }
     if (out.frames.isEmpty()) {
         auto still = loadStillPath(path, logicalH, dpr, uiScale);
