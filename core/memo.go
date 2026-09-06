@@ -6,14 +6,27 @@ import (
 )
 
 type Memo struct {
-	mu sync.Mutex
-	s  MemoSettings
+	mu     sync.Mutex
+	active bool
+	s      MemoSettings
 }
 
 func NewMemo() *Memo {
 	return &Memo{s: MemoSettings{
 		GiftEnabled: true, FollowEnabled: true, LikeEnabled: true,
 	}}
+}
+
+func (f *Memo) Active() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.active
+}
+
+func (f *Memo) SetActive(v bool) {
+	f.mu.Lock()
+	f.active = v
+	f.mu.Unlock()
 }
 
 func (f *Memo) Set(s MemoSettings) {
@@ -25,6 +38,9 @@ func (f *Memo) Set(s MemoSettings) {
 func (f *Memo) Accept(msg map[string]any, giftDiamonds int) map[string]any {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if !f.active {
+		return nil
+	}
 	t, _ := msg["type"].(string)
 	user, _ := msg["user"].(string)
 	uid, _ := msg["user_id"].(string)

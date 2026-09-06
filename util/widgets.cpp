@@ -6,6 +6,9 @@
 #define LIVEAIO_UTIL_WIDGETS_CPP
 
 #include <QAbstractAnimation>
+#include <QApplication>
+#include <QChildEvent>
+#include <QCursor>
 #include <QEasingCurve>
 #include <QEvent>
 #include <QFile>
@@ -263,7 +266,8 @@ inline QString qssSuccess(int h = 36) {
     return QStringLiteral(
         "QPushButton { background: %1; color: #ffffff; border: none; border-radius: 8px;"
         " font-size: 13px; font-weight: 600; %2 padding: 0 16px; }"
-    ).arg(C.activeLine, qssBoxHeight(h, 0.0));
+        "QPushButton:hover { background: %3; }"
+    ).arg(C.activeLine, qssBoxHeight(h, 0.0), C.active);
 }
 
 inline QString qssDanger(int h = 36) {
@@ -279,9 +283,9 @@ inline QString qssBack() {
     const ThemePalette& C = theme();
     return QStringLiteral(
         "QPushButton { background: transparent; color: %1; border: none;"
-        " font-size: 13px; padding: 4px 8px; }"
-        "QPushButton:hover { color: %2; }"
-    ).arg(C.textMuted, C.activeLine);
+        " border-radius: 6px; font-size: 13px; padding: 4px 8px; }"
+        "QPushButton:hover { background: %3; color: %2; }"
+    ).arg(C.textMuted, C.activeLine, C.hover);
 }
 
 inline QString qssMutedLabel(int size = 13) {
@@ -335,6 +339,92 @@ inline void suppressButtonFocus(QPushButton* btn) {
     btn->setFocusPolicy(Qt::NoFocus);
     btn->setAutoDefault(false);
     btn->setDefault(false);
+}
+
+// QSS 的 :hover 认的是 WA_UnderMouse；直接改这个属性，全仓已有的 :hover 规则都能生效，
+// 不必给每个按钮再补一份属性选择器。
+inline void forceHoverState(QWidget* w, bool on) {
+    if (!w || w->underMouse() == on) return;
+    w->setAttribute(Qt::WA_UnderMouse, on);
+    if (w->style()) {
+        w->style()->unpolish(w);
+        w->style()->polish(w);
+    }
+    w->update();
+}
+
+// 由父容器代理判定：容器拿到 hover/move 后，按真实光标坐标决定按钮悬停态。
+// 按钮自身 Enter 被上方标签或兄弟控件截走时（「从上方划入」），这条路径仍然有效。
+inline void wireHoverProxy(QWidget* host, QWidget* target) {
+    if (!host || !target) return;
+    host->setAttribute(Qt::WA_Hover, true);
+    host->setMouseTracking(true);
+    class HoverProxyFilter final : public QObject {
+    public:
+        HoverProxyFilter(QWidget* host, QWidget* target)
+            : QObject(host), host_(host), target_(target) {}
+    protected:
+        bool eventFilter(QObject*, QEvent* e) override {
+            switch (e->type()) {
+            case QEvent::HoverEnter:
+            case QEvent::HoverMove:
+            case QEvent::HoverLeave:
+            case QEvent::Enter:
+            case QEvent::Leave:
+            case QEvent::MouseMove:
+                sync();
+                break;
+            default:
+                break;
+            }
+            return false;
+        }
+    private:
+        // 一律按当前光标位置重算：容器 Leave 往往只是光标进了子控件，不能直接清掉。
+        void sync() {
+            if (!host_ || !target_) return;
+            const QPoint global = QCursor::pos();
+            const QRect r(target_->mapTo(host_, QPoint(0, 0)), target_->size());
+            const bool hit = target_->isVisible() && target_->isEnabled()
+                && r.contains(host_->mapFromGlobal(global));
+            forceHoverState(target_, hit);
+        }
+        QPointer<QWidget> host_;
+        QPointer<QWidget> target_;
+    };
+    host->installEventFilter(new HoverProxyFilter(host, target));
+}
+
+// 给整棵子树里的按钮统一接上代理判定，并跟踪后续新建控件（懒加载 Tab / 动态卡片）。
+inline void installHoverAutoWiring(QWidget* root) {
+    if (!root) return;
+    class HoverAutoWirer final : public QObject {
+    public:
+        explicit HoverAutoWirer(QWidget* root) : QObject(root) { attach(root); }
+    protected:
+        bool eventFilter(QObject*, QEvent* e) override {
+            if (e->type() != QEvent::ChildAdded) return false;
+            // ChildAdded 时派生类构造还没跑完，qobject_cast 会失手，延后一轮再接。
+            QPointer<QObject> child(static_cast<QChildEvent*>(e)->child());
+            QTimer::singleShot(0, this, [this, child]() {
+                if (auto* w = qobject_cast<QWidget*>(child.data())) attach(w);
+            });
+            return false;
+        }
+    private:
+        void attach(QWidget* w) {
+            if (!w || w->property("liveaioHoverWired").toBool()) return;
+            w->setProperty("liveaioHoverWired", true);
+            w->installEventFilter(this);
+            if (qobject_cast<QPushButton*>(w)) {
+                if (QWidget* host = w->parentWidget()) wireHoverProxy(host, w);
+            }
+            for (QObject* child : w->children()) {
+                if (auto* cw = qobject_cast<QWidget*>(child)) attach(cw);
+            }
+        }
+    };
+    new HoverAutoWirer(root);
 }
 
 // 自绘顶栏/悬浮窗图标钮：关焦点并禁止系统 hover 底纹。
@@ -917,7 +1007,7 @@ public:
         : QPushButton(QStringLiteral("✕"), parent) {
         setObjectName(QStringLiteral("WinBtn_close"));
         setFixedSize(kW, kH);
-        setCursor(Qt::ArrowCursor);
+        setCursor(Qt::PointingHandCursor);
         polishFlatChromeButton(this);
     }
 
@@ -982,7 +1072,7 @@ public:
 
         auto* minBtn = new QPushButton(QStringLiteral("─"), this);
         minBtn->setObjectName(QStringLiteral("WinBtn"));
-        minBtn->setCursor(Qt::ArrowCursor);
+        minBtn->setCursor(Qt::PointingHandCursor);
         suppressButtonFocus(minBtn);
         QObject::connect(minBtn, &QPushButton::clicked, this, [this]() {
             if (window()) window()->showMinimized();

@@ -30,12 +30,6 @@ type hub struct {
 }
 
 func startHub(ctx context.Context, root, tcp string, log *slog.Logger, shutdown func()) (*hub, *Server) {
-	if err := LoadGifts(root); err != nil {
-		log.Warn("gift catalog", "err", err)
-	} else {
-		log.Info("gift catalog loaded", "count", len(Names()))
-	}
-
 	h := &hub{
 		root:     root,
 		log:      log,
@@ -89,7 +83,6 @@ func startHub(ctx context.Context, root, tcp string, log *slog.Logger, shutdown 
 	})
 	h.danmu = NewDanmu()
 	h.memo = NewMemo()
-	h.overtime.StartTicker()
 
 	srv := &Server{
 		TCPAddr: tcp,
@@ -138,8 +131,56 @@ func (h *hub) send(env Envelope) {
 		conns = append(conns, c)
 	}
 	h.mu.Unlock()
+	var dead []*Conn
 	for _, c := range conns {
-		_ = c.Send(env)
+		if err := c.Send(env); err != nil {
+			dead = append(dead, c)
+		}
+	}
+	for _, c := range dead {
+		h.removeConn(c)
+		_ = c.Close()
+	}
+}
+
+func (h *hub) ensureGiftCatalog() {
+	if GiftCatalogLoaded() {
+		return
+	}
+	if err := LoadGifts(h.root); err != nil {
+		h.log.Warn("gift catalog", "err", err)
+		return
+	}
+	h.log.Info("gift catalog loaded", "count", len(Names()))
+}
+
+func (h *hub) setToolDemand(tool string, active bool) {
+	switch tool {
+	case "overtime":
+		h.overtime.SetActive(active)
+		if active {
+			h.ensureGiftCatalog()
+		}
+	case "leaf":
+		h.leaf.SetActive(active)
+		if active {
+			h.ensureGiftCatalog()
+		}
+	case "danmu":
+		h.danmu.SetActive(active)
+		if active {
+			h.ensureGiftCatalog()
+		}
+	case "memo":
+		h.memo.SetActive(active)
+		if active {
+			h.ensureGiftCatalog()
+		}
+	default:
+		return
+	}
+	if !active && !h.overtime.Active() && !h.leaf.Active() && !h.danmu.Active() && !h.memo.Active() {
+		ClearGiftCatalog()
 	}
 }
 
@@ -366,6 +407,11 @@ func (h *hub) handle(c *Conn, env Envelope) {
 		s := NormalizeMemoSettings(env["settings"])
 		h.memo.Set(s)
 
+	case OpToolDemand:
+		tool, _ := env["tool"].(string)
+		active, _ := env["active"].(bool)
+		h.setToolDemand(tool, active)
+
 	case OpConfigSet:
 		key, _ := env["key"].(string)
 		if key == "" {
@@ -395,6 +441,21 @@ func (h *hub) handle(c *Conn, env Envelope) {
 			return
 		}
 		_ = c.Send(Envelope{"op": OpConfigValue, "key": key, "value": value, "exists": ok})
+
+	case OpUIOverlayState:
+		tool, _ := env["tool"].(string)
+		state := 0
+		switch v := env["state"].(type) {
+		case float64:
+			state = int(v)
+		case int:
+			state = v
+		case int64:
+			state = int(v)
+		}
+		if tool != "" {
+			setOverlayStateCache(tool, state)
+		}
 
 	case OpUICommand:
 		h.handleUICommand(c, env)
@@ -461,14 +522,25 @@ func (h *hub) afterMessage(m listener.Msg) {
 		case int64:
 			count = int(v)
 		}
-		diamonds = Diamonds(gift)
-		h.overtime.HandleGift(user, uid, gift, count)
-		h.leaf.HandleGift(user, uid, gift, count)
+		if h.overtime.Active() || h.leaf.Active() || h.danmu.Active() || h.memo.Active() {
+			h.ensureGiftCatalog()
+			diamonds = Diamonds(gift)
+		}
+		if h.overtime.Active() {
+			h.overtime.HandleGift(user, uid, gift, count)
+		}
+		if h.leaf.Active() {
+			h.leaf.HandleGift(user, uid, gift, count)
+		}
 	}
-	if show := h.danmu.Accept(m, diamonds); show != nil {
-		h.send(Envelope(show))
+	if h.danmu.Active() {
+		if show := h.danmu.Accept(m, diamonds); show != nil {
+			h.send(Envelope(show))
+		}
 	}
-	if item := h.memo.Accept(m, diamonds); item != nil {
-		h.send(Envelope(item))
+	if h.memo.Active() {
+		if item := h.memo.Accept(m, diamonds); item != nil {
+			h.send(Envelope(item))
+		}
 	}
 }

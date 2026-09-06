@@ -4,213 +4,157 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
-	"runtime"
 	"sync"
-	"syscall"
 	"time"
-	"unsafe"
-
-	"golang.org/x/sys/windows"
 )
 
 var (
-	pagesInitMu         sync.Mutex
-	pagesProcMu         sync.Mutex
-	pagesRun            uintptr
-	pagesShow           uintptr
-	pagesSetStartHidden uintptr
-	pagesOverlayCommand uintptr
-	pagesOverlayState   uintptr
-	pagesDir            string
-	pagesRunning        bool
-	pagesEverRan        bool
+	pagesProcMu   sync.Mutex
+	pagesRunning  bool
+	pagesEverRan  bool
+	pagesChild    *exec.Cmd
+	pagesBridgeMu sync.Mutex
+	pagesHub      *hub
+	overlayStates = map[string]int{}
 )
 
-// OpenPages loads LiveAIOPages.dll (once) and shows the pages UI.
+// bindPagesBridge wires hub broadcast for out-of-process Pages (overlay / focus).
+func bindPagesBridge(h *hub) {
+	pagesBridgeMu.Lock()
+	pagesHub = h
+	pagesBridgeMu.Unlock()
+}
+
+func pagesHubSend(env Envelope) {
+	pagesBridgeMu.Lock()
+	h := pagesHub
+	pagesBridgeMu.Unlock()
+	if h != nil {
+		h.send(env)
+	}
+}
+
+func setOverlayStateCache(tool string, state int) {
+	pagesProcMu.Lock()
+	overlayStates[tool] = state
+	pagesProcMu.Unlock()
+}
+
+// OpenPages raises an already-running Pages UI via IPC (ui.focus already sent by hub).
+// First start must use StartPagesChild — Qt must not load into the Go/Core process.
 func OpenPages(root string) error {
-	pagesInitMu.Lock()
-	if pagesRun == 0 {
-		if err := initPagesDLL(root); err != nil {
-			pagesInitMu.Unlock()
-			return err
-		}
-	}
-	pagesInitMu.Unlock()
-	return showPages(root)
-}
-
-// prepareQtEnv points Qt at plugins next to LiveAIOPages.dll.
-// Required for F5/debug: the Go exe is not in the same directory as qwindows.dll.
-func prepareQtEnv(dllDir, root string) {
-	_ = windows.SetDllDirectory(dllDir)
-	_ = os.Setenv("PATH", dllDir+";"+os.Getenv("PATH"))
-	_ = os.Setenv("LIVEAIO_ROOT", root)
-	_ = os.Setenv("QT_PLUGIN_PATH", dllDir)
-	_ = os.Setenv("QT_QPA_PLATFORM_PLUGIN_PATH", filepath.Join(dllDir, "platforms"))
-}
-
-func initPagesDLL(root string) error {
-	dllPath, err := findPagesDLL(root)
-	if err != nil {
-		return err
-	}
-	dir := filepath.Dir(dllPath)
-	prepareQtEnv(dir, root)
-
-	h, err := windows.LoadLibraryEx(dllPath, 0, windows.LOAD_WITH_ALTERED_SEARCH_PATH)
-	if err != nil {
-		return fmt.Errorf("LoadLibrary %s: %w", dllPath, err)
-	}
-	proc, err := windows.GetProcAddress(h, "LiveAIO_PagesRun")
-	if err != nil {
-		_ = windows.FreeLibrary(h)
-		return fmt.Errorf("GetProcAddress LiveAIO_PagesRun: %w", err)
-	}
-	pagesRun = proc
-	if show, err := windows.GetProcAddress(h, "LiveAIO_PagesShow"); err == nil {
-		pagesShow = show
-	}
-	if proc, err := windows.GetProcAddress(h, "LiveAIO_PagesSetStartHidden"); err == nil {
-		pagesSetStartHidden = proc
-	}
-	if proc, err := windows.GetProcAddress(h, "LiveAIO_PagesOverlayCommand"); err == nil {
-		pagesOverlayCommand = proc
-	}
-	if proc, err := windows.GetProcAddress(h, "LiveAIO_PagesOverlayState"); err == nil {
-		pagesOverlayState = proc
-	}
-	pagesDir = dir
-	_ = h // keep module loaded for process lifetime
-	return nil
-}
-
-// OverlayCommand controls a transparent tool window without raising the main UI.
-func OverlayCommand(root, tool, action string) error {
-	pagesInitMu.Lock()
-	if pagesRun == 0 {
-		if err := initPagesDLL(root); err != nil {
-			pagesInitMu.Unlock()
-			return err
-		}
-	}
-	proc := pagesOverlayCommand
-	pagesInitMu.Unlock()
-	if proc == 0 {
-		return fmt.Errorf("LiveAIO_PagesOverlayCommand export not found")
-	}
-
+	_ = root
 	pagesProcMu.Lock()
 	running := pagesRunning
+	ever := pagesEverRan
 	pagesProcMu.Unlock()
-	startedHidden := false
-	if !running {
-		if pagesSetStartHidden != 0 {
-			_, _, _ = syscall.SyscallN(pagesSetStartHidden, 1)
-		}
-		if err := showPages(root); err != nil {
-			return err
-		}
-		startedHidden = true
-	}
-
-	toolPtr, _ := syscall.BytePtrFromString(tool)
-	actionPtr, _ := syscall.BytePtrFromString(action)
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		rc, _, _ := syscall.SyscallN(
-			proc,
-			uintptr(unsafe.Pointer(toolPtr)),
-			uintptr(unsafe.Pointer(actionPtr)),
-		)
-		if rc == 0 {
-			runtime.KeepAlive(toolPtr)
-			runtime.KeepAlive(actionPtr)
-			return nil
-		}
-		if !startedHidden || time.Now().After(deadline) {
-			return fmt.Errorf("overlay command %s/%s failed: %d", tool, action, rc)
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
-}
-
-// OverlayState returns bits 1=open, 2=frame shown, 4=locked without starting UI.
-func OverlayState(tool string) int {
-	pagesProcMu.Lock()
-	running := pagesRunning
-	pagesProcMu.Unlock()
-	if !running || pagesOverlayState == 0 {
-		return 0
-	}
-	toolPtr, _ := syscall.BytePtrFromString(tool)
-	state, _, _ := syscall.SyscallN(pagesOverlayState, uintptr(unsafe.Pointer(toolPtr)))
-	runtime.KeepAlive(toolPtr)
-	return int(state)
-}
-
-func findPagesDLL(root string) (string, error) {
-	candidates := []string{
-		filepath.Join(root, "build", "build_work", "custom", "LiveAIOPages.dll"),
-	}
-	verDir := filepath.Join(root, "build", "build_work")
-	if st, err := os.Stat(verDir); err == nil && st.IsDir() {
-		entries, _ := os.ReadDir(verDir)
-		for _, e := range entries {
-			if !e.IsDir() || e.Name() == "custom" {
-				continue
-			}
-			candidates = append(candidates, filepath.Join(verDir, e.Name(), "LiveAIOPages.dll"))
-		}
-	}
-	for _, p := range candidates {
-		if st, err := os.Stat(p); err == nil && !st.IsDir() {
-			return p, nil
-		}
-	}
-	return "", fmt.Errorf("LiveAIOPages.dll not found under build/build_work/custom or build/build_work/<version>")
-}
-
-func showPages(root string) error {
-	pagesProcMu.Lock()
-	defer pagesProcMu.Unlock()
-
-	if pagesRunning {
-		// 一个进程只能有一个 QApplication，界面已在跑就只让它抬窗。
-		if pagesShow != 0 {
-			if ok, _, _ := syscall.SyscallN(pagesShow); ok != 0 {
-				return nil
-			}
-		}
+	if running {
 		return nil
 	}
-	if pagesRun == 0 {
-		return fmt.Errorf("pages module not loaded")
-	}
-	if pagesEverRan {
-		// 界面退出即整体退出；重新起一个 QApplication 会让 Qt 崩在静态状态上。
+	if ever {
 		return fmt.Errorf("pages UI already exited")
 	}
-	if pagesDir != "" {
-		prepareQtEnv(pagesDir, root)
-	} else {
-		_ = os.Setenv("LIVEAIO_ROOT", root)
+	return fmt.Errorf("pages UI not started yet")
+}
+
+// OverlayCommand asks the Pages child (via hub broadcast) to toggle overlay chrome.
+func OverlayCommand(root, tool, action string) error {
+	_ = root
+	pagesProcMu.Lock()
+	running := pagesRunning
+	pagesProcMu.Unlock()
+	if !running {
+		return fmt.Errorf("pages UI not running (open UI first)")
 	}
+	pagesHubSend(Envelope{
+		"op":     OpUIOverlay,
+		"tool":   tool,
+		"action": action,
+	})
+	return nil
+}
+
+// OverlayState returns cached bits 1=open, 2=frame shown, 4=locked (updated by Pages).
+func OverlayState(tool string) int {
+	pagesProcMu.Lock()
+	defer pagesProcMu.Unlock()
+	if !pagesRunning {
+		return 0
+	}
+	return overlayStates[tool]
+}
+
+func findHostExe(root string) (string, error) {
+	return FindArtifact(root, "LiveAIO.exe")
+}
+
+// StartPagesChild launches LiveAIO.exe --pages in a separate process so Qt never
+// shares an address space with the Go runtime (avoids winthrow / 0xc0000005).
+func StartPagesChild(root string, noAdmin bool) (*exec.Cmd, error) {
+	exe, err := findHostExe(root)
+	if err != nil {
+		return nil, err
+	}
+	pagesProcMu.Lock()
+	if pagesRunning {
+		cmd := pagesChild
+		pagesProcMu.Unlock()
+		return cmd, nil
+	}
+	if pagesEverRan {
+		pagesProcMu.Unlock()
+		return nil, fmt.Errorf("pages UI already exited")
+	}
+	pagesProcMu.Unlock()
+
+	args := []string{"--pages"}
+	if noAdmin {
+		args = append(args, "--no-admin")
+	}
+	cmd := exec.Command(exe, args...)
+	cmd.Dir = filepath.Dir(exe)
+	cmd.Env = append(os.Environ(),
+		"LIVEAIO_ROOT="+root,
+		"LIVEAIO_SHELL_ELEVATED=1",
+	)
+
+	if err := cmd.Start(); err != nil {
+		return nil, fmt.Errorf("start %s --pages: %w", exe, err)
+	}
+
+	pagesProcMu.Lock()
 	pagesRunning = true
 	pagesEverRan = true
+	pagesChild = cmd
+	pagesProcMu.Unlock()
+	return cmd, nil
+}
 
-	go func() {
-		runtime.LockOSThread()
-		defer runtime.UnlockOSThread()
-
-		argv0, _ := syscall.BytePtrFromString(os.Args[0])
-		argv := []*byte{argv0, nil}
-		_, _, _ = syscall.SyscallN(pagesRun, uintptr(1), uintptr(unsafe.Pointer(&argv[0])))
-		pagesProcMu.Lock()
+// WaitPagesChild blocks until the Pages child exits, then clears running state.
+func WaitPagesChild(cmd *exec.Cmd) error {
+	if cmd == nil {
+		return nil
+	}
+	err := cmd.Wait()
+	pagesProcMu.Lock()
+	if pagesChild == cmd {
 		pagesRunning = false
-		pagesProcMu.Unlock()
-	}()
-	return nil
+		pagesChild = nil
+	}
+	pagesProcMu.Unlock()
+	return err
+}
+
+// StopPagesChild kills the Pages child if still running.
+func StopPagesChild() {
+	pagesProcMu.Lock()
+	cmd := pagesChild
+	pagesProcMu.Unlock()
+	if cmd != nil && cmd.Process != nil {
+		_ = cmd.Process.Kill()
+	}
 }
 
 // LoginUIState reads state.json and returns (display text, login button enabled).

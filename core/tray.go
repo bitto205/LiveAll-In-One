@@ -169,6 +169,8 @@ func loadAppIcon(root string) windows.Handle {
 }
 
 func wndProc(h windows.Handle, msgU uint32, w, l uintptr) uintptr {
+	// 回调线程上的 panic 会进 Windows SEH / winthrow，拖死进程。
+	defer func() { _ = recover() }()
 	switch msgU {
 	case wmTray:
 		switch l {

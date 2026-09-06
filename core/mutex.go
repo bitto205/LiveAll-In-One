@@ -6,8 +6,8 @@ const launcherMutexName = `Local\LiveAIO-launcher`
 
 var launcherMu windows.Handle
 
-// TryHoldLauncher is single-instance for the tray process.
-// False = another liveaio.exe already owns the tray.
+// TryHoldLauncher is single-instance for the shell/supervisor process.
+// False = another LiveAIO already owns the process lifetime.
 func TryHoldLauncher() bool {
 	name, err := windows.UTF16PtrFromString(launcherMutexName)
 	if err != nil {

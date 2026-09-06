@@ -49,7 +49,23 @@ type BrowserSession struct {
 
 	trimPhase atomic.Int32 // 1=bootstrap(仅拦流) 2=post-WSS 止血
 	trimOnce  sync.Once
+
+	// CDP 旁路任务共用 1 条常驻栈（fetch 放行/拦截 + trim），不再按请求/阶段开 goroutine。
+	jobOnce sync.Once
+	jobQ    chan sessJob
 }
+
+type fetchReply struct {
+	id    fetch.RequestID
+	allow bool
+}
+
+type sessJob struct {
+	fetch *fetchReply
+	run   func()
+}
+
+const jobQueue = 256
 
 func statePath(root string) string { return filepath.Join(root, "state.json") }
 
@@ -179,8 +195,71 @@ func launchBrowser(parent context.Context, opt BrowserOptions) (*BrowserSession,
 
 // Phase 1：只拦拉流，Document/Script/XHR 全放行（进房 + 建 WSS 必需）。
 // Phase 2：WSS /push/v2/ 建立后，再拦 CSS/图/字体/礼物 UI 等。
+func (s *BrowserSession) ensureJobs() {
+	if s == nil {
+		return
+	}
+	s.jobOnce.Do(func() {
+		s.jobQ = make(chan sessJob, jobQueue)
+		go s.jobWorker()
+	})
+}
+
+func (s *BrowserSession) jobWorker() {
+	for {
+		select {
+		case <-s.Ctx.Done():
+			return
+		case job, ok := <-s.jobQ:
+			if !ok {
+				return
+			}
+			if job.fetch != nil {
+				if job.fetch.allow {
+					_ = fetch.ContinueRequest(job.fetch.id).Do(s.Ctx)
+				} else {
+					_ = fetch.FailRequest(job.fetch.id, network.ErrorReasonBlockedByClient).Do(s.Ctx)
+				}
+			}
+			if job.run != nil {
+				job.run()
+			}
+		}
+	}
+}
+
+func (s *BrowserSession) enqueueFetch(id fetch.RequestID, allow bool) {
+	s.ensureJobs()
+	job := sessJob{fetch: &fetchReply{id: id, allow: allow}}
+	select {
+	case s.jobQ <- job:
+	case <-s.Ctx.Done():
+	default:
+		// 队列满时不得阻塞 ListenTarget；尽量入队拒绝以放行浏览器。
+		deny := sessJob{fetch: &fetchReply{id: id, allow: false}}
+		select {
+		case s.jobQ <- deny:
+		default:
+		}
+	}
+}
+
+func (s *BrowserSession) enqueueRun(fn func()) {
+	if fn == nil {
+		return
+	}
+	s.ensureJobs()
+	select {
+	case s.jobQ <- sessJob{run: fn}:
+	case <-s.Ctx.Done():
+	default:
+		// trim 可丢；勿反压 CDP 事件环
+	}
+}
+
 func (s *BrowserSession) installBootstrapFilter() {
 	s.trimPhase.Store(1)
+	s.ensureJobs()
 	chromedp.ListenTarget(s.Ctx, func(ev any) {
 		e, ok := ev.(*fetch.EventRequestPaused)
 		if !ok || e == nil {
@@ -191,14 +270,8 @@ func (s *BrowserSession) installBootstrapFilter() {
 			u = e.Request.URL
 		}
 		allow := captureAllow(s.trimPhase.Load(), e.ResourceType, u)
-		reqID := e.RequestID
-		go func() {
-			if allow {
-				_ = fetch.ContinueRequest(reqID).Do(s.Ctx)
-				return
-			}
-			_ = fetch.FailRequest(reqID, network.ErrorReasonBlockedByClient).Do(s.Ctx)
-		}()
+		// 不在此 go：页面加载期 RequestPaused 极多，无界 goroutine 会堆栈并把崩溃回溯拖死。
+		s.enqueueFetch(e.RequestID, allow)
 	})
 	_ = chromedp.Run(s.Ctx, chromedp.ActionFunc(func(ctx context.Context) error {
 		return fetch.Enable().WithPatterns(captureBootstrapPatterns()).Do(ctx)
@@ -210,7 +283,7 @@ func (s *BrowserSession) applyPostWSSTrim(logf func(string, ...any)) {
 		logf = func(string, ...any) {}
 	}
 	s.trimOnce.Do(func() {
-		go func() {
+		s.enqueueRun(func() {
 			if !s.trimPhase.CompareAndSwap(1, 2) {
 				return
 			}
@@ -233,7 +306,7 @@ func (s *BrowserSession) applyPostWSSTrim(logf func(string, ...any)) {
 				}),
 				chromedp.Evaluate(killMediaJS, nil),
 			)
-		}()
+		})
 	})
 }
 
@@ -849,20 +922,22 @@ func runBrowserCapture(ctx context.Context, p Params, jsHook bool) error {
 	}
 	fail := func() {
 		mu.Lock()
-		defer mu.Unlock()
 		if stopped || liveOK {
+			mu.Unlock()
 			return
 		}
 		stopped = true
+		mu.Unlock()
 		emitStatus(false)
 	}
 	confirm := func() {
 		mu.Lock()
-		defer mu.Unlock()
 		if liveOK || stopped {
+			mu.Unlock()
 			return
 		}
 		liveOK = true
+		mu.Unlock()
 		emitStatus(true)
 	}
 	// endLive: 开播后关播（control / WSS），与进房失败区分。
@@ -902,6 +977,56 @@ func runBrowserCapture(ctx context.Context, p Params, jsHook bool) error {
 		}
 	}
 
+	// 采集旁路：帧解析 + 进房 body 共用 1 条栈。
+	type capJob struct {
+		frame []byte
+		enter network.RequestID
+		hasEnter bool
+	}
+	capCh := make(chan capJob, 128)
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case job, ok := <-capCh:
+				if !ok {
+					return
+				}
+				if job.hasEnter {
+					var body []byte
+					errB := chromedp.Run(sess.Ctx, chromedp.ActionFunc(func(c context.Context) error {
+						b, er := network.GetResponseBody(job.enter).Do(c)
+						if er != nil {
+							return er
+						}
+						body = b
+						return nil
+					}))
+					if errB != nil || len(body) == 0 {
+						continue
+					}
+					applyEnter(parseRoomEnterPayload(body))
+					continue
+				}
+				if len(job.frame) == 0 {
+					continue
+				}
+				if p.OnFrame != nil {
+					p.OnFrame(job.frame)
+				}
+				if parsed, msgs := TryParseFrame(job.frame); parsed {
+					for _, m := range msgs {
+						if t, _ := m["type"].(string); t == "control" && ControlEnded(m["status"]) {
+							endLive("control")
+							break
+						}
+					}
+				}
+			}
+		}
+	}()
+
 	chromedp.ListenTarget(sess.Ctx, func(ev any) {
 		switch e := ev.(type) {
 		case *network.EventResponseReceived:
@@ -918,22 +1043,11 @@ func runBrowserCapture(ctx context.Context, p Params, jsHook bool) error {
 				return
 			}
 			// Never chromedp.Run inside ListenTarget synchronously — it deadlocks the CDP event loop.
-			reqID := e.RequestID
-			go func() {
-				var body []byte
-				errB := chromedp.Run(sess.Ctx, chromedp.ActionFunc(func(c context.Context) error {
-					b, er := network.GetResponseBody(reqID).Do(c)
-					if er != nil {
-						return er
-					}
-					body = b
-					return nil
-				}))
-				if errB != nil || len(body) == 0 {
-					return
-				}
-				applyEnter(parseRoomEnterPayload(body))
-			}()
+			select {
+			case capCh <- capJob{hasEnter: true, enter: e.RequestID}:
+			case <-ctx.Done():
+			default:
+			}
 		case *network.EventWebSocketCreated:
 			if strings.Contains(e.URL, "/push/v2/") {
 				mu.Lock()
@@ -957,16 +1071,12 @@ func runBrowserCapture(ctx context.Context, p Params, jsHook bool) error {
 			if err != nil || len(raw) == 0 {
 				raw = []byte(e.Response.PayloadData)
 			}
-			if p.OnFrame != nil && len(raw) > 0 {
-				p.OnFrame(raw)
+			if len(raw) == 0 {
+				return
 			}
-			if ok, msgs := TryParseFrame(raw); ok {
-				for _, m := range msgs {
-					if t, _ := m["type"].(string); t == "control" && ControlEnded(m["status"]) {
-						endLive("control")
-						break
-					}
-				}
+			select {
+			case capCh <- capJob{frame: raw}:
+			default:
 			}
 		case *network.EventWebSocketClosed:
 			mu.Lock()

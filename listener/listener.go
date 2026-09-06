@@ -163,6 +163,10 @@ func (m *Manager) Start(route, liveID string, forceSystem bool) error {
 		if err := PrepareR4(m.root); err != nil {
 			return err
 		}
+		// Hub owns Shell; register a cancel so Manager.Stop is aligned.
+		ctx, cancel := context.WithCancel(context.Background())
+		m.setStop(cancel)
+		go func() { <-ctx.Done() }()
 		m.logf("route ready", "route", string(id))
 		return nil
 	}

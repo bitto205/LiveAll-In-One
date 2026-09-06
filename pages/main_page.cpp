@@ -52,6 +52,23 @@ public:
             restoreWindowChrome();
             return;
         }
+        // 托盘经 Core 广播；Pages 在独立进程里，不能再走 Go LoadLibrary 调导出。
+        if (op == QStringLiteral("ui.overlay")) {
+            const QString tool = packet.value(QStringLiteral("tool")).toString().trimmed();
+            const QString action = packet.value(QStringLiteral("action")).toString().trimmed();
+            if (!tool.isEmpty() && !action.isEmpty()) {
+                QString error;
+                ToolsPlugin::instance().overlayCommand(tool, action, &error);
+                if (core_) {
+                    core_->send(QJsonObject{
+                        {QStringLiteral("op"), QStringLiteral("ui.overlay_state")},
+                        {QStringLiteral("tool"), tool},
+                        {QStringLiteral("state"), ToolsPlugin::instance().overlayState(tool)},
+                    });
+                }
+            }
+            return;
+        }
         if (op == QStringLiteral("config.value")) {
             const QJsonObject values = packet.value(QStringLiteral("values")).toObject();
             if (values.contains(QStringLiteral("minimize_to_tray"))) {
@@ -91,9 +108,12 @@ protected:
             if (core_) core_->uiCommand(QStringLiteral("quit.detach_ui"));
             return;
         }
+        // 未开托盘：主窗退出须连锁关掉工具设置窗/悬浮窗（它们 WA_QuitOnClose=false）。
+        ToolsPlugin::instance().shutdown();
         event->accept();
         if (core_) core_->requestFullShutdown();
-        qApp->quit();
+        else qApp->quit();
+        // quit 由 requestFullShutdown 在 bye/超时后触发，避免 closeEvent 嵌套等 bye。
     }
 
     void showEvent(QShowEvent* event) override {
@@ -111,6 +131,8 @@ private:
         applyTheme();
     }
     void buildUi() {
+        // 全窗按钮统一走容器代理判定悬停，含懒加载的页面与弹层。
+        liveaio::util::installHoverAutoWiring(this);
         auto* rootLay = new QVBoxLayout(this);
         rootLay->setContentsMargins(0, 0, 0, 0);
 

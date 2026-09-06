@@ -24,8 +24,10 @@ const (
 	OpConfigValue   = "config.value" // response to config.get
 	OpConfigOk      = "config.ok"    // ack after successful config.set (hub)
 	OpCapabilities  = "capabilities"
-	OpFocusUI       = "ui.focus" // hub → Pages: raise the existing window
-	OpUICommand     = "ui.command"
+	OpFocusUI         = "ui.focus"          // hub → Pages: raise the existing window
+	OpUIOverlay       = "ui.overlay"        // hub → Pages: tray overlay command
+	OpUIOverlayState  = "ui.overlay_state"  // Pages → hub: overlay open/frame/lock bits
+	OpUICommand       = "ui.command"
 	OpLoginState    = "login.state"
 	OpRouteEnv      = "route.env"
 	OpTick          = "tick"
@@ -41,6 +43,7 @@ const (
 	OpToolLeafSim     = "tool.leaf.sim_gift"
 	OpToolDanmuSet    = "tool.danmu.set"
 	OpToolMemoSet     = "tool.memo.set"
+	OpToolDemand      = "tool.demand" // UI→Core: tool + active (consumer gate)
 )
 
 const (

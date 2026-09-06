@@ -21,12 +21,25 @@ type LeafSettings struct {
 
 type LeafEngine struct {
 	mu       sync.Mutex
+	active   bool
 	settings LeafSettings
 	onSpawn  func(gift string, leaves int, user string)
 }
 
 func NewLeaf(onSpawn func(gift string, leaves int, user string)) *LeafEngine {
 	return &LeafEngine{onSpawn: onSpawn}
+}
+
+func (e *LeafEngine) Active() bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.active
+}
+
+func (e *LeafEngine) SetActive(v bool) {
+	e.mu.Lock()
+	e.active = v
+	e.mu.Unlock()
 }
 
 func (e *LeafEngine) SetSettings(s LeafSettings) {
@@ -59,6 +72,10 @@ func ruleToLeaves(r LeafRule, count int) int {
 
 func (e *LeafEngine) HandleGift(user, userID, gift string, count int) {
 	e.mu.Lock()
+	if !e.active {
+		e.mu.Unlock()
+		return
+	}
 	var hit *LeafRule
 	for i := range e.settings.Rules {
 		r := &e.settings.Rules[i]

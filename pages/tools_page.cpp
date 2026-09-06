@@ -65,6 +65,7 @@ public:
             lib_->resolve("LiveAIO_ToolsOverlayState"));
         themeFn_ = reinterpret_cast<ThemeFn>(lib_->resolve("LiveAIO_ToolsApplyTheme"));
         warmFn_ = reinterpret_cast<WarmFn>(lib_->resolve("LiveAIO_ToolsWarm"));
+        shutdownFn_ = reinterpret_cast<ShutdownFn>(lib_->resolve("LiveAIO_ToolsShutdown"));
         if (!openFn_) {
             loadError_ = QStringLiteral("LiveAIOTools.dll 缺少 LiveAIO_ToolsOpen 导出");
             if (error) *error = loadError_;
@@ -106,6 +107,11 @@ public:
         if (themeFn_) themeFn_(name.toUtf8().constData());
     }
 
+    // 主窗全关（未开托盘）时调用；Tools 未加载则 no-op。
+    void shutdown() {
+        if (shutdownFn_) shutdownFn_();
+    }
+
     bool loaded() const { return openFn_ != nullptr; }
 
 private:
@@ -114,13 +120,35 @@ private:
     using OverlayStateFn = int (*)(const char*);
     using ThemeFn = void (*)(const char*);
     using WarmFn = void (*)();
+    using ShutdownFn = void (*)();
+
+    static QStringList artifactCandidates(const QString& root, const QString& name) {
+        QStringList out;
+        auto add = [&](const QString& p) {
+            if (p.isEmpty() || out.contains(p)) return;
+            out.append(p);
+        };
+        // 与 core/paths.go ArtifactCandidates 对齐：包目录 / exe 旁优先，再 build_work。
+        add(QDir(QCoreApplication::applicationDirPath()).filePath(name));
+        if (!root.isEmpty()) {
+            add(QDir(root).filePath(name));
+            add(QDir(root).filePath(QStringLiteral("build/build_work/custom/%1").arg(name)));
+            const QDir ver(QDir(root).filePath(QStringLiteral("build/build_work")));
+            if (ver.exists()) {
+                QStringList dirs = ver.entryList(QDir::Dirs | QDir::NoDotAndDotDot);
+                std::sort(dirs.begin(), dirs.end(),
+                          [](const QString& a, const QString& b) { return a > b; });
+                for (const QString& d : dirs) {
+                    if (d == QLatin1String("custom") || d.startsWith(QLatin1String("stage_"))) continue;
+                    add(ver.filePath(d + QLatin1Char('/') + name));
+                }
+            }
+        }
+        return out;
+    }
 
     static QString locateDll() {
-        const QStringList candidates = {
-            QDir(QCoreApplication::applicationDirPath()).filePath(QStringLiteral("LiveAIOTools.dll")),
-            QDir(g_appRoot).filePath(QStringLiteral("build/build_work/custom/LiveAIOTools.dll")),
-            QDir(g_appRoot).filePath(QStringLiteral("LiveAIOTools.dll")),
-        };
+        const QStringList candidates = artifactCandidates(g_appRoot, QStringLiteral("LiveAIOTools.dll"));
         for (const QString& path : candidates) {
             if (QFileInfo::exists(path)) return path;
         }
@@ -133,6 +161,7 @@ private:
     OverlayStateFn overlayStateFn_ = nullptr;
     ThemeFn themeFn_ = nullptr;
     WarmFn warmFn_ = nullptr;
+    ShutdownFn shutdownFn_ = nullptr;
     QString loadError_;
 };
 
@@ -147,8 +176,10 @@ public:
 
         auto* title = new QLabel(QStringLiteral("工具"), inner);
         title->setObjectName(QStringLiteral("PageTitle"));
+        title->setAttribute(Qt::WA_TransparentForMouseEvents);
         auto* sub = new QLabel(QStringLiteral("直播辅助工具集"), inner);
         sub->setObjectName(QStringLiteral("PageSubtitle"));
+        sub->setAttribute(Qt::WA_TransparentForMouseEvents);
         lay->addWidget(title);
         lay->addWidget(sub);
 
@@ -201,9 +232,12 @@ private:
 
         auto* row = new QHBoxLayout;
         auto* name = new QLabel(QStringLiteral("%1  %2").arg(meta.icon, meta.name), card);
+        // 名称/描述不抢鼠标，避免从上方划入「打开」时 :hover/hl 进不了态。
+        name->setAttribute(Qt::WA_TransparentForMouseEvents);
         auto* btn = new QPushButton(QStringLiteral("打开"), card);
         btn->setFixedHeight(34);
         btn->setCursor(Qt::PointingHandCursor);
+        liveaio::util::suppressButtonFocus(btn);
         QObject::connect(btn, &QPushButton::clicked, this, [this, id = meta.id]() { openTool(id); });
         row->addWidget(name);
         row->addStretch();
@@ -212,6 +246,7 @@ private:
 
         auto* desc = new QLabel(meta.desc, card);
         desc->setWordWrap(true);
+        desc->setAttribute(Qt::WA_TransparentForMouseEvents);
         lay->addWidget(desc);
 
         nameLabels_.append(name);
@@ -221,14 +256,41 @@ private:
     }
 
     void openTool(const QString& id) {
-        QString error;
-        if (ToolsPlugin::instance().open(id, &error)) {
-            error_->setVisible(false);
+        auto& plugin = ToolsPlugin::instance();
+        if (plugin.loaded()) {
+            QString error;
+            if (plugin.open(id, &error)) {
+                error_->setVisible(false);
+                return;
+            }
+            error_->setText(QStringLiteral("工具打开失败：%1").arg(error));
+            error_->setVisible(true);
+            toast_->showMsg(QStringLiteral("工具打开失败"), true);
             return;
         }
-        error_->setText(QStringLiteral("工具加载失败：%1").arg(error));
-        error_->setVisible(true);
-        toast_->showMsg(QStringLiteral("工具加载失败"), true);
+        if (loadingTools_) {
+            pendingOpenId_ = id;
+            return;
+        }
+        loadingTools_ = true;
+        pendingOpenId_ = id;
+        toast_->showMsg(QStringLiteral("正在加载工具…"), false, 4000);
+        // 拆到下一事件循环，先让 toast 上屏，避免同步 LoadLibrary 堵死首帧。
+        QTimer::singleShot(0, this, [this]() {
+            QString error;
+            const bool ok = ToolsPlugin::instance().ensureLoaded(&error);
+            loadingTools_ = false;
+            const QString id = pendingOpenId_;
+            pendingOpenId_.clear();
+            if (!ok) {
+                error_->setText(QStringLiteral("工具加载失败：%1").arg(error));
+                error_->setVisible(true);
+                toast_->showMsg(QStringLiteral("工具加载失败"), true);
+                return;
+            }
+            ToolsPlugin::instance().applyTheme(liveaio::util::currentThemeName());
+            if (!id.isEmpty()) openTool(id);
+        });
     }
 
     CoreClient* core_ = nullptr;
@@ -237,6 +299,8 @@ private:
     QVector<QLabel*> nameLabels_;
     QVector<QLabel*> descLabels_;
     QVector<QPushButton*> openBtns_;
+    bool loadingTools_ = false;
+    QString pendingOpenId_;
 };
 
 }  // namespace liveaio::pages

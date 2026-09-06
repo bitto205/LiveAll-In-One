@@ -135,8 +135,8 @@ public:
         clearBtn_->setStyleSheet(QStringLiteral(
             "QPushButton { background: transparent; color: %1; border: 1px solid %2;"
             " border-radius: 6px; font-size: 12px; padding: 0 12px; }"
-            "QPushButton:hover { color: %3; border-color: %3; }"
-        ).arg(C.textMuted, C.border, C.closeHover));
+            "QPushButton:hover { background: %4; color: %3; border-color: %3; }"
+        ).arg(C.textMuted, C.border, C.closeHover, C.hover));
     }
 
 private:

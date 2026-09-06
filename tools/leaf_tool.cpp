@@ -9,28 +9,29 @@ static const QString kMaxPercentKey = QStringLiteral("leaf_max_percent");
 static const QString kLeafScaleKey = QStringLiteral("leaf_scale_percent");
 static const QString kTrashScaleKey = QStringLiteral("leaf_trash_scale_percent");
 static const QString kViewportSizeKey = QStringLiteral("leaf_last_viewport_size");
-static const QString kLeafImage = QStringLiteral("resources/image/zaidoopro-painting-8032889.png");
-static const QString kTrashImage = QStringLiteral("resources/image/trash_can.png");
-static const QString kTrashOpenImage = QStringLiteral("resources/image/trash_can_open.png");
+// 旧资源路径：仅作皮肤文件缺失时的回退。
+static const QString kLegacyLeafImage = QStringLiteral("resources/image/zaidoopro-painting-8032889.png");
+static const QString kLegacyTrashImage = QStringLiteral("resources/image/trash_can.png");
+static const QString kLegacyTrashOpenImage = QStringLiteral("resources/image/trash_can_open.png");
 
-// 物理/绘制尺寸（cm）。刚体是沿贴图主轴延展的长条八边形。
-static constexpr qreal kLeafSideCm = 1.0;
-static constexpr qreal kRigidHalfLengthFrac = 0.45;
-static constexpr qreal kRigidHalfWidthFrac = 0.14;
-static constexpr qreal kRigidBevelFrac = 0.055;
-static constexpr qreal kSoftRadiusFrac = 0.24;
-static constexpr qreal kSoftHalfLenFrac = 0.34;
-static constexpr qreal kArtAngleRad = -0.7853981633974483;  // -45°
-static constexpr qreal kTrashWCm = 2.0;
-static constexpr qreal kTrashHCm = 2.67;
-static constexpr qreal kTrashHitPadCm = 0.12;
-static constexpr qreal kTrashNearPadCm = 0.45;
+// 默认物理/绘制尺寸（cm）；可被 resources/skin/leaf/<id>/skin.json 覆盖。
+static constexpr qreal kDefLeafSideCm = 1.0;
+static constexpr qreal kDefRigidHalfLengthFrac = 0.45;
+static constexpr qreal kDefRigidHalfWidthFrac = 0.14;
+static constexpr qreal kDefRigidBevelFrac = 0.055;
+static constexpr qreal kDefSoftRadiusFrac = 0.24;
+static constexpr qreal kDefSoftHalfLenFrac = 0.34;
+static constexpr qreal kDefArtAngleRad = -0.7853981633974483;  // -45°
+static constexpr qreal kDefTrashWCm = 2.0;
+static constexpr qreal kDefTrashHCm = 2.67;
+static constexpr qreal kDefTrashHitPadCm = 0.12;
+static constexpr qreal kDefTrashNearPadCm = 0.45;
 static constexpr qreal kLidAnimSec = 0.12;
-static constexpr qreal kHaloAnimSec = 0.10;
-static constexpr qreal kLeafHaloOuterCm = 0.22;
-static constexpr qreal kTrashHaloOuterCm = 0.28;
-static constexpr qreal kTrashHaloAmount = 0.72;
-static constexpr qreal kLeafHaloAmount = 0.90;
+static constexpr qreal kHaloAnimSec = 0.14;
+static constexpr qreal kDefLeafHaloOuterCm = 0.22;
+static constexpr qreal kDefTrashHaloOuterCm = 0.28;
+static constexpr qreal kDefTrashHaloAmount = 0.72;
+static constexpr qreal kDefLeafHaloAmount = 0.82;
 static constexpr qreal kWorldPadCm = 0.15;
 static constexpr int kMinLeaves = 0;
 static constexpr int kMaxLeavesHard = 240;
@@ -78,21 +79,96 @@ static qreal screenDpi() {
 static qreal cmToPxF(qreal cm) { return screenDpi() / 2.54 * cm; }
 static int cmToPx(qreal cm) { return std::max(1, static_cast<int>(std::lround(cmToPxF(cm)))); }
 
-static qreal leafVisualPx(qreal scale = 1.0) { return cmToPxF(kLeafSideCm) * scale; }
+// 皮肤驱动的叶子/垃圾桶形状、碰撞与光晕；缺字段时用编译期默认值。
+struct LeafSkinParams {
+    qreal leafSideCm = kDefLeafSideCm;
+    qreal rigidHalfLengthFrac = kDefRigidHalfLengthFrac;
+    qreal rigidHalfWidthFrac = kDefRigidHalfWidthFrac;
+    qreal rigidBevelFrac = kDefRigidBevelFrac;
+    qreal softRadiusFrac = kDefSoftRadiusFrac;
+    qreal softHalfLenFrac = kDefSoftHalfLenFrac;
+    qreal artAngleRad = kDefArtAngleRad;
+    qreal trashWCm = kDefTrashWCm;
+    qreal trashHCm = kDefTrashHCm;
+    qreal trashHitPadCm = kDefTrashHitPadCm;
+    qreal trashNearPadCm = kDefTrashNearPadCm;
+    qreal leafHaloOuterCm = kDefLeafHaloOuterCm;
+    qreal trashHaloOuterCm = kDefTrashHaloOuterCm;
+    qreal leafHaloAmount = kDefLeafHaloAmount;
+    qreal trashHaloAmount = kDefTrashHaloAmount;
+    bool leafHaloSoftInner = true;
+    QString rootPath;
+    QString leafFile = QStringLiteral("leaf.png");
+    QString trashFile = QStringLiteral("trash_can.png");
+    QString trashOpenFile = QStringLiteral("trash_can_open.png");
+
+    static LeafSkinParams fromToolSkin(const liveaio::resources::ToolSkin& skin) {
+        LeafSkinParams p;
+        p.rootPath = skin.rootPath;
+        const QJsonObject m = skin.meta.value(QStringLiteral("metrics")).toObject();
+        auto num = [&](const QString& key, qreal def) -> qreal {
+            const QJsonValue v = m.value(key);
+            return v.isUndefined() || v.isNull() ? def : v.toDouble(def);
+        };
+        p.leafSideCm = num(QStringLiteral("leaf_side_cm"), p.leafSideCm);
+        p.rigidHalfLengthFrac = num(QStringLiteral("rigid_half_length_frac"), p.rigidHalfLengthFrac);
+        p.rigidHalfWidthFrac = num(QStringLiteral("rigid_half_width_frac"), p.rigidHalfWidthFrac);
+        p.rigidBevelFrac = num(QStringLiteral("rigid_bevel_frac"), p.rigidBevelFrac);
+        p.softRadiusFrac = num(QStringLiteral("soft_radius_frac"), p.softRadiusFrac);
+        p.softHalfLenFrac = num(QStringLiteral("soft_half_len_frac"), p.softHalfLenFrac);
+        p.trashWCm = num(QStringLiteral("trash_w_cm"), p.trashWCm);
+        p.trashHCm = num(QStringLiteral("trash_h_cm"), p.trashHCm);
+        p.trashHitPadCm = num(QStringLiteral("trash_hit_pad_cm"), p.trashHitPadCm);
+        p.trashNearPadCm = num(QStringLiteral("trash_near_pad_cm"), p.trashNearPadCm);
+        p.leafHaloOuterCm = num(QStringLiteral("leaf_halo_outer_cm"), p.leafHaloOuterCm);
+        p.trashHaloOuterCm = num(QStringLiteral("trash_halo_outer_cm"), p.trashHaloOuterCm);
+        p.leafHaloAmount = num(QStringLiteral("leaf_halo_amount"), p.leafHaloAmount);
+        p.trashHaloAmount = num(QStringLiteral("trash_halo_amount"), p.trashHaloAmount);
+        if (m.contains(QStringLiteral("leaf_halo_soft_inner"))) {
+            p.leafHaloSoftInner = m.value(QStringLiteral("leaf_halo_soft_inner")).toBool(true);
+        }
+        if (m.contains(QStringLiteral("art_angle_deg"))) {
+            p.artAngleRad = num(QStringLiteral("art_angle_deg"), -45.0) * kPi / 180.0;
+        }
+        const QJsonObject assets = skin.meta.value(QStringLiteral("assets")).toObject();
+        auto fileOf = [&](const QString& key, const QString& def) {
+            const QString v = assets.value(key).toString();
+            return v.isEmpty() ? def : v;
+        };
+        p.leafFile = fileOf(QStringLiteral("leaf"), p.leafFile);
+        p.trashFile = fileOf(QStringLiteral("trash"), p.trashFile);
+        p.trashOpenFile = fileOf(QStringLiteral("trash_open"), p.trashOpenFile);
+        return p;
+    }
+};
+
+struct LeafSharedAssets;
+
+static liveaio::resources::ToolSkin activeLeafSkin() {
+    const QString id = configValue(liveaio::resources::skinConfigKey(QStringLiteral("leaf")),
+                                   QStringLiteral("default")).toString();
+    return liveaio::resources::ToolSkin::load(
+        g_appRoot, QStringLiteral("leaf"),
+        id.isEmpty() ? QStringLiteral("default") : id);
+}
+
+static const LeafSkinParams& leafParams();
+
+static qreal leafVisualPx(qreal scale = 1.0) { return cmToPxF(leafParams().leafSideCm) * scale; }
 static qreal rigidHalfLength(qreal scale = 1.0) {
-    return leafVisualPx(scale) * kRigidHalfLengthFrac;
+    return leafVisualPx(scale) * leafParams().rigidHalfLengthFrac;
 }
 static qreal rigidHalfWidth(qreal scale = 1.0) {
-    return leafVisualPx(scale) * kRigidHalfWidthFrac;
+    return leafVisualPx(scale) * leafParams().rigidHalfWidthFrac;
 }
 static qreal rigidBevel(qreal scale = 1.0) {
-    return leafVisualPx(scale) * kRigidBevelFrac;
+    return leafVisualPx(scale) * leafParams().rigidBevelFrac;
 }
 static qreal rigidRadius(qreal scale = 1.0) {
     return std::hypot(rigidHalfLength(scale), rigidHalfWidth(scale));
 }
-static qreal softR(qreal scale = 1.0) { return leafVisualPx(scale) * kSoftRadiusFrac; }
-static qreal softHalf(qreal scale = 1.0) { return leafVisualPx(scale) * kSoftHalfLenFrac; }
+static qreal softR(qreal scale = 1.0) { return leafVisualPx(scale) * leafParams().softRadiusFrac; }
+static qreal softHalf(qreal scale = 1.0) { return leafVisualPx(scale) * leafParams().softHalfLenFrac; }
 
 static qreal leafPackSide(qreal leafScale = 1.0) {
     // 最坏倾角下仍能包住八边形刚体的轴对齐正方形。
@@ -214,7 +290,8 @@ static QVector<int> boxBlurAlpha(const QVector<int>& src, int w, int h, int radi
     return out;
 }
 
-static QPixmap makeHaloPixmap(const QPixmap& src, qreal finalMinSidePx, qreal outerPx) {
+static QPixmap makeHaloPixmap(const QPixmap& src, qreal finalMinSidePx, qreal outerPx,
+                              bool softInnerRamp = false) {
     if (src.isNull() || finalMinSidePx <= 0.0 || outerPx <= 0.0) return {};
     const QImage input = src.toImage().convertToFormat(QImage::Format_ARGB32);
     const qreal sourceScale = std::min(input.width(), input.height()) / finalMinSidePx;
@@ -229,15 +306,25 @@ static QPixmap makeHaloPixmap(const QPixmap& src, qreal finalMinSidePx, qreal ou
             alpha[(y + pad) * w + x + pad] = qAlpha(line[x]);
         }
     }
-    // 两次方框模糊近似柔和高斯，资源加载时只计算一次。
+    // 两次方框模糊近似柔和高斯，资源加载时只计算一次。广度由 pad/blur 决定，勿改。
     alpha = boxBlurAlpha(alpha, w, h, blur);
     alpha = boxBlurAlpha(alpha, w, h, std::max(1, blur / 2));
     QImage halo(w, h, QImage::Format_ARGB32);
     halo.fill(Qt::transparent);
+    const qreal peak = softInnerRamp ? 0.68 : 0.82;
+    const int aMax = softInnerRamp ? 188 : 220;
     for (int y = 0; y < h; ++y) {
         auto* line = reinterpret_cast<QRgb*>(halo.scanLine(y));
         for (int x = 0; x < w; ++x) {
-            const int a = std::clamp(static_cast<int>(alpha[y * w + x] * 0.82), 0, 220);
+            qreal t = std::clamp(alpha[y * w + x] / 255.0, 0.0, 1.0);
+            if (softInnerRamp && t > 0.0) {
+                // 只柔化靠近叶子的高 alpha「第一段」：smoothstep 混线性，再略压高峰，
+                // 外圈低 alpha 几乎不动，视觉广度不变。
+                const qreal eased = t * t * (3.0 - 2.0 * t);
+                t = t * 0.38 + eased * 0.62;
+                t = std::pow(t, 1.12);
+            }
+            const int a = std::clamp(static_cast<int>(std::lround(t * peak * 255.0)), 0, aMax);
             line[x] = qRgba(255, 226, 166, a);
         }
     }
@@ -260,6 +347,7 @@ static void drawCenteredHalo(QPainter& p, const QRectF& dst, const QPixmap& halo
 }
 
 struct LeafSharedAssets {
+    LeafSkinParams params;
     QPixmap leafPm;
     QPixmap leafHaloPm;
     QPixmap trashPm;
@@ -278,6 +366,8 @@ struct LeafSharedAssets {
         return *g;
     }
 
+    static void reload() { instance().load(); }
+
     static QString resolvePath(const QString& rel) {
         const QString primary = QDir(g_appRoot).filePath(rel);
         if (QFile::exists(primary)) return primary;
@@ -287,22 +377,31 @@ struct LeafSharedAssets {
         return primary;
     }
 
+    QString assetPath(const QString& fileName, const QString& legacyRel) const {
+        if (!params.rootPath.isEmpty() && !fileName.isEmpty()) {
+            const QString skinPath = QDir(params.rootPath).filePath(fileName);
+            if (QFile::exists(skinPath)) return skinPath;
+        }
+        return resolvePath(legacyRel);
+    }
+
     void load() {
-        leafPm = QPixmap(resolvePath(kLeafImage));
-        trashPm = QPixmap(resolvePath(kTrashImage));
-        trashOpenPm = QPixmap(resolvePath(kTrashOpenImage));
+        params = LeafSkinParams::fromToolSkin(activeLeafSkin());
+        leafPm = QPixmap(assetPath(params.leafFile, kLegacyLeafImage));
+        trashPm = QPixmap(assetPath(params.trashFile, kLegacyTrashImage));
+        trashOpenPm = QPixmap(assetPath(params.trashOpenFile, kLegacyTrashOpenImage));
         if (leafPm.isNull()) {
             leafPm = QPixmap(64, 64);
             leafPm.fill(QColor(80, 160, 60));
         } else {
             leafPm = cropOpaque(leafPm);
-            const int side = std::max(64, static_cast<int>(std::lround(leafVisualPx() * 8.0)));
+            const int side = std::max(64, static_cast<int>(std::lround(cmToPxF(params.leafSideCm) * 8.0)));
             if (leafPm.width() > side || leafPm.height() > side) {
                 leafPm = leafPm.scaled(side, side, Qt::KeepAspectRatio, Qt::SmoothTransformation);
             }
         }
-        const int tw = std::max(64, static_cast<int>(std::lround(cmToPxF(kTrashWCm) * 4.0)));
-        const int th = std::max(80, static_cast<int>(std::lround(cmToPxF(kTrashHCm) * 4.0)));
+        const int tw = std::max(64, static_cast<int>(std::lround(cmToPxF(params.trashWCm) * 4.0)));
+        const int th = std::max(80, static_cast<int>(std::lround(cmToPxF(params.trashHCm) * 4.0)));
         auto scaleTrash = [tw, th](QPixmap& pm, const QColor& fallback) {
             if (pm.isNull()) {
                 pm = QPixmap(tw, th);
@@ -315,13 +414,19 @@ struct LeafSharedAssets {
         scaleTrash(trashOpenPm, QColor(210, 205, 195));
         trashPreviewPm = softCropTrashPreview(trashPm);
         if (trashPreviewPm.isNull()) trashPreviewPm = trashPm;
-        leafHaloPm = makeHaloPixmap(leafPm, leafVisualPx(), cmToPxF(kLeafHaloOuterCm));
+        leafHaloPm = makeHaloPixmap(leafPm, cmToPxF(params.leafSideCm),
+                                    cmToPxF(params.leafHaloOuterCm),
+                                    params.leafHaloSoftInner);
         trashHaloPm = makeHaloPixmap(
-            trashPm, cmToPxF(std::min(kTrashWCm, kTrashHCm)), cmToPxF(kTrashHaloOuterCm));
+            trashPm, cmToPxF(std::min(params.trashWCm, params.trashHCm)),
+            cmToPxF(params.trashHaloOuterCm));
         trashOpenHaloPm = makeHaloPixmap(
-            trashOpenPm, cmToPxF(std::min(kTrashWCm, kTrashHCm)), cmToPxF(kTrashHaloOuterCm));
+            trashOpenPm, cmToPxF(std::min(params.trashWCm, params.trashHCm)),
+            cmToPxF(params.trashHaloOuterCm));
     }
 };
+
+static const LeafSkinParams& leafParams() { return LeafSharedAssets::instance().params; }
 
 class LeafScalePreview final : public QWidget {
 public:
@@ -342,6 +447,11 @@ public:
     void setScales(int leafPercent, int trashPercent) {
         leafScale_ = std::clamp(leafPercent, 50, 200) / 100.0;
         trashScale_ = std::clamp(trashPercent, 50, 200) / 100.0;
+        update();
+    }
+
+    void reloadFromSkin() {
+        refreshFixedSize();
         update();
     }
 
@@ -378,7 +488,7 @@ protected:
                                cellW, cellH);
 
         // 最大比例时约占框 90%；更小则居中。
-        const qreal leafSide = cmToPxF(kLeafSideCm) * leafScale_ * kPreviewFill;
+        const qreal leafSide = cmToPxF(leafParams().leafSideCm) * leafScale_ * kPreviewFill;
         const QRectF leafRect(leafCell.center().x() - leafSide * 0.5,
                               leafCell.center().y() - leafSide * 0.5,
                               leafSide, leafSide);
@@ -400,21 +510,21 @@ protected:
         const qreal labelBottom = leafBox.bottom() - kLabelGap;
         p.drawText(QRectF(leafBox.left(), labelBottom - kLabelH, boxW, kLabelH),
                    Qt::AlignHCenter | Qt::AlignVCenter,
-                   QStringLiteral("%1mm").arg(qRound(kLeafSideCm * 10.0 * leafScale_)));
+                   QStringLiteral("%1mm").arg(qRound(leafParams().leafSideCm * 10.0 * leafScale_)));
         p.drawText(QRectF(trashBox.left(), labelBottom - kLabelH, boxW, kLabelH),
                    Qt::AlignHCenter | Qt::AlignVCenter,
                    QStringLiteral("%1×%2mm")
-                       .arg(qRound(kTrashWCm * 10.0 * trashScale_))
-                       .arg(qRound(kTrashHCm * 10.0 * trashScale_)));
+                       .arg(qRound(leafParams().trashWCm * 10.0 * trashScale_))
+                       .arg(qRound(leafParams().trashHCm * 10.0 * trashScale_)));
     }
 
 private:
     static QSizeF trashVisualSize(const LeafSharedAssets& assets, qreal scale) {
-        const qreal w = cmToPxF(kTrashWCm) * scale;
+        const qreal w = cmToPxF(leafParams().trashWCm) * scale;
         const QPixmap& pm =
             assets.trashPreviewPm.isNull() ? assets.trashPm : assets.trashPreviewPm;
         if (pm.isNull() || pm.width() <= 0) {
-            return QSizeF(w, cmToPxF(kTrashHCm) * scale);
+            return QSizeF(w, cmToPxF(leafParams().trashHCm) * scale);
         }
         return QSizeF(w, w * qreal(pm.height()) / qreal(pm.width()));
     }
@@ -624,6 +734,7 @@ private:
         pickBtn_ = new QPushButton(QStringLiteral("选择礼物"), this);
         pickBtn_->setFixedSize(96, 34);
         pickBtn_->setCursor(Qt::PointingHandCursor);
+        liveaio::util::suppressButtonFocus(pickBtn_);
         QObject::connect(pickBtn_, &QPushButton::clicked, this, [this]() {
             if (onPick_) onPick_(this);
         });
@@ -696,6 +807,7 @@ private:
         removeBtn_ = new QPushButton(QStringLiteral("删除"), this);
         removeBtn_->setFixedSize(72, 34);
         removeBtn_->setCursor(Qt::PointingHandCursor);
+        liveaio::util::suppressButtonFocus(removeBtn_);
         QObject::connect(removeBtn_, &QPushButton::clicked, this, [this]() {
             if (onRemove_) onRemove_(this);
         });
@@ -1010,6 +1122,11 @@ public:
         notifyGeometryChanged();
     }
 
+    void reloadSkin() {
+        notifyGeometryChanged();
+        update();
+    }
+
     void enqueueSpawn(int count = 1) {
         int left = std::max(1, count);
         const int cancel = std::min(left, pendingRemovals_);
@@ -1228,8 +1345,8 @@ private:
         const qreal drawSide = side * scale;
         const QRectF dst(-drawSide * 0.5, -drawSide * 0.5, drawSide, drawSide);
         if (halo > 0.01) {
-            drawCenteredHalo(p, dst, haloPm, halo * kLeafHaloAmount * L.alpha,
-                             cmToPxF(kLeafHaloOuterCm) * side / leafVisualPx());
+            drawCenteredHalo(p, dst, haloPm, halo * leafParams().leafHaloAmount * L.alpha,
+                             cmToPxF(leafParams().leafHaloOuterCm) * side / leafVisualPx());
         }
         p.setOpacity(L.alpha);
         p.drawPixmap(dst.toRect(), pm);
@@ -1240,8 +1357,8 @@ private:
         const QRectF trash = trashDrawRect();
         const QRect dst = trash.toRect();
         if (trashHalo_ > 0.01) {
-            const qreal expand = cmToPxF(kTrashHaloOuterCm) * trashScale_;
-            const qreal amt = trashHalo_ * kTrashHaloAmount;
+            const qreal expand = cmToPxF(leafParams().trashHaloOuterCm) * trashScale_;
+            const qreal amt = trashHalo_ * leafParams().trashHaloAmount;
             if (lidOpen_ < 0.999) {
                 drawCenteredHalo(p, trash, assets.trashHaloPm, amt * (1.0 - lidOpen_),
                                  expand);
@@ -1272,8 +1389,8 @@ private:
     }
 
     QSizeF trashSize() const {
-        return QSizeF(cmToPxF(kTrashWCm) * trashScale_,
-                      cmToPxF(kTrashHCm) * trashScale_);
+        return QSizeF(cmToPxF(leafParams().trashWCm) * trashScale_,
+                      cmToPxF(leafParams().trashHCm) * trashScale_);
     }
 
     QPointF trashCenter() const {
@@ -1328,12 +1445,12 @@ private:
     }
 
     QRectF trashHitRect() const {
-        const qreal pad = cmToPxF(kTrashHitPadCm);
+        const qreal pad = cmToPxF(leafParams().trashHitPadCm);
         return trashGrabRect().adjusted(-pad, -pad, pad, pad);
     }
 
     QRectF trashNearRect() const {
-        const qreal pad = cmToPxF(kTrashNearPadCm);
+        const qreal pad = cmToPxF(leafParams().trashNearPadCm);
         return trashDrawRect().adjusted(-pad, -pad, pad, pad);
     }
 
@@ -1401,7 +1518,7 @@ private:
         });
     }
 
-    qreal worldAngle(const LeafBody& L) const { return kArtAngleRad + L.angle; }
+    qreal worldAngle(const LeafBody& L) const { return leafParams().artAngleRad + L.angle; }
 
     void softSegmentEnds(const LeafBody& L, QPointF* a, QPointF* b) const {
         const qreal ang = worldAngle(L);
@@ -2086,6 +2203,11 @@ public:
         if (auto* c = canvas()) c->applySettings(maxPercent, leafPercent, trashPercent);
     }
 
+    void refreshOverlaySkin() {
+        LeafSharedAssets::reload();
+        if (auto* c = canvas()) c->reloadSkin();
+    }
+
     void applyGiftRules(const QVector<LeafGiftRule>& rules) {
         if (overlayCtrl_) overlayCtrl_->setGiftRules(rules);
     }
@@ -2186,6 +2308,7 @@ private:
 
         auto* title = new QLabel(QStringLiteral("捡叶子"), page);
         title->setObjectName(QStringLiteral("ToolPageTitle"));
+        title->setAttribute(Qt::WA_TransparentForMouseEvents);
         {
             QFont f = title->font();
             f.setPixelSize(20);
@@ -2200,6 +2323,7 @@ private:
         hint_->setWordWrap(true);
         hint_->setObjectName(QStringLiteral("ToolTip"));
         hint_->setContentsMargins(0, 0, 0, 0);
+        hint_->setAttribute(Qt::WA_TransparentForMouseEvents);
         {
             QFont f = hint_->font();
             f.setPixelSize(12);
@@ -2214,14 +2338,22 @@ private:
         cardLay->setContentsMargins(16, 12, 16, 12);
         cardLay->setSpacing(8);
 
-        stats_ = new QLabel(QStringLiteral("场上 0 / 上限 — · 队列 0"), card);
-        cardLay->addWidget(stats_);
-
+        // 与弹幕/加班机一致：打开钮与标题同行，避免上方标签挡悬停命中。
         auto* row = new QHBoxLayout;
         row->setSpacing(10);
+        auto* cardTitle = new QLabel(QStringLiteral("悬浮窗"), card);
+        cardTitle->setObjectName(QStringLiteral("CardTitle"));
+        cardTitle->setAttribute(Qt::WA_TransparentForMouseEvents);
+        {
+            QFont f = cardTitle->font();
+            f.setPixelSize(13);
+            f.setWeight(QFont::DemiBold);
+            cardTitle->setFont(f);
+        }
         spawnBtn_ = new QPushButton(QStringLiteral("投放测试"), card);
         spawnBtn_->setCursor(Qt::PointingHandCursor);
         spawnBtn_->setFixedHeight(34);
+        liveaio::util::suppressButtonFocus(spawnBtn_);
         QObject::connect(spawnBtn_, &QPushButton::clicked, this, [this]() {
             if (!runtime_) return;
             runtime_->spawnTest(1);
@@ -2231,12 +2363,50 @@ private:
         openBtn_ = new QPushButton(QStringLiteral("打开悬浮窗"), card);
         openBtn_->setCursor(Qt::PointingHandCursor);
         openBtn_->setFixedHeight(34);
+        liveaio::util::suppressButtonFocus(openBtn_);
         QObject::connect(openBtn_, &QPushButton::clicked, this, [this]() { toggleOverlay(); });
-        row->addWidget(spawnBtn_);
+        row->addWidget(cardTitle, 0, Qt::AlignVCenter);
         row->addStretch();
+        row->addWidget(spawnBtn_);
         row->addWidget(openBtn_);
         cardLay->addLayout(row);
+
+        stats_ = new QLabel(QStringLiteral("场上 0 / 上限 — · 队列 0"), card);
+        stats_->setAttribute(Qt::WA_TransparentForMouseEvents);
+        cardLay->addWidget(stats_);
         lay->addWidget(card);
+
+        auto* themeCard = new QFrame(page);
+        themeCard->setObjectName(QStringLiteral("Card"));
+        auto* themeLay = new QVBoxLayout(themeCard);
+        themeLay->setContentsMargins(16, 12, 16, 12);
+        themeLay->setSpacing(8);
+        auto* themeRow = new QHBoxLayout;
+        themeRow->setSpacing(12);
+        auto* themeLbl = new QLabel(QStringLiteral("叶子外观主题"), themeCard);
+        themeLbl->setStyleSheet(QStringLiteral("font-size: 14px; font-weight: 600;"));
+        themeRow->addWidget(themeLbl);
+        themeRow->addStretch();
+        skinCombo_ = new liveaio::util::ThemedComboBox(themeCard);
+        QStringList skinNames;
+        const auto skins = liveaio::resources::listSkins(g_appRoot, QStringLiteral("leaf"));
+        for (const auto& entry : skins) {
+            skinNameToId_.insert(entry.name, entry.id);
+            skinNames << entry.name;
+        }
+        skinCombo_->addItems(skinNames);
+        const QString activeId = configValue(
+            liveaio::resources::skinConfigKey(QStringLiteral("leaf")),
+            QStringLiteral("default")).toString();
+        for (const auto& entry : skins) {
+            if (entry.id == activeId) skinCombo_->setCurrentText(entry.name);
+        }
+        skinCombo_->setFixedHeight(34);
+        skinCombo_->setMinimumWidth(160);
+        skinCombo_->setOnChange([this](const QString& name) { onSkinChanged(name); });
+        themeRow->addWidget(skinCombo_);
+        themeLay->addLayout(themeRow);
+        lay->addWidget(themeCard);
 
         auto* settingsCard = new QFrame(page);
         settingsCard->setObjectName(QStringLiteral("Card"));
@@ -2379,6 +2549,7 @@ private:
         addRuleBtn_ = new QPushButton(QStringLiteral("添加规则"), giftCard);
         addRuleBtn_->setCursor(Qt::PointingHandCursor);
         addRuleBtn_->setFixedHeight(34);
+        liveaio::util::suppressButtonFocus(addRuleBtn_);
         QObject::connect(addRuleBtn_, &QPushButton::clicked, this, [this]() { addGiftRule(); });
         giftLay->addWidget(addRuleBtn_, 0, Qt::AlignLeft);
         outer->addWidget(giftCard, 1);
@@ -2507,6 +2678,9 @@ private:
 
     void toggleOverlay() {
         if (!runtime_) return;
+        if (!OverlayHostService::instance().isToolActive(OverlayToolId::Leaf)) {
+            publishToolDemand(QStringLiteral("leaf"), true);
+        }
         pushGiftRulesToCore();
         QPointer<LeafToolWindow> guard(this);
         runtime_->toggleOverlay([guard]() {
@@ -2573,6 +2747,15 @@ private:
         refreshStats();
     }
 
+    void onSkinChanged(const QString& name) {
+        const QString id = skinNameToId_.value(name, QStringLiteral("default"));
+        writeConfigValue(liveaio::resources::skinConfigKey(QStringLiteral("leaf")), id);
+        LeafSharedAssets::reload();
+        if (preview_) preview_->reloadFromSkin();
+        if (runtime_) runtime_->refreshOverlaySkin();
+        refreshStats();
+    }
+
     void refreshStats() {
         int alive = 0;
         int pending = 0;
@@ -2593,14 +2776,13 @@ private:
             }
         }
         if (stats_) {
-            stats_->setText(QStringLiteral("场上 %1 / 上限 %2 · 队列 %3")
-                                .arg(alive)
-                                .arg(maxN)
-                                .arg(pending));
+            const QString text = QStringLiteral("场上 %1 / 上限 %2 · 队列 %3")
+                                     .arg(alive)
+                                     .arg(maxN)
+                                     .arg(pending);
+            if (stats_->text() != text) stats_->setText(text);
         }
-        if (simWidget_) {
-            simWidget_->setPushEnabled(runtime_ && runtime_->isOverlayActive());
-        }
+        // setPushEnabled 只在开合状态变化时随 refreshOpenBtn 走，避免 200ms 空转。
     }
 
     LeafToolRuntime* runtime_ = nullptr;
@@ -2619,6 +2801,8 @@ private:
     QSpinBox* maxLeavesSpin_ = nullptr;
     QSpinBox* leafScaleSpin_ = nullptr;
     QSpinBox* trashScaleSpin_ = nullptr;
+    liveaio::util::ThemedComboBox* skinCombo_ = nullptr;
+    QMap<QString, QString> skinNameToId_;
     QTimer* statsTimer_ = nullptr;
     QVector<LeafGiftRule> giftRules_;
     QVector<LeafGiftRuleCard*> ruleCards_;

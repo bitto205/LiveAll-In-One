@@ -36,6 +36,7 @@
 #include <QVBoxLayout>
 #include <QWidget>
 
+#include <algorithm>
 #include <functional>
 
 #include "../util/widgets.cpp"
@@ -154,28 +155,24 @@ public:
         send(QJsonObject{{QStringLiteral("op"), QStringLiteral("shutdown")}});
     }
 
-    // 关主窗且不收进托盘：发 quit.shutdown_all 并等 Core 回 bye，避免 socket 未刷完就 quit。
+    // 关主窗且不收进托盘：发 quit.shutdown_all；bye/超时后再 quit，避免 closeEvent 嵌套 QEventLoop。
     void requestFullShutdown(int timeoutMs = 2500) {
-        if (socket_->state() != QAbstractSocket::ConnectedState) return;
+        if (socket_->state() != QAbstractSocket::ConnectedState) {
+            QTimer::singleShot(0, qApp, &QCoreApplication::quit);
+            return;
+        }
         uiCommand(QStringLiteral("quit.shutdown_all"));
         socket_->flush();
-        waitForBye(timeoutMs);
+        if (waitingBye_) return;
+        waitingBye_ = true;
+        QTimer::singleShot(timeoutMs, qApp, [this]() {
+            if (!waitingBye_) return;
+            waitingBye_ = false;
+            qApp->quit();
+        });
     }
 
 private:
-    void waitForBye(int timeoutMs) {
-        waitingBye_ = true;
-        QEventLoop loop;
-        byeLoop_ = &loop;
-        QTimer timer;
-        timer.setSingleShot(true);
-        QObject::connect(&timer, &QTimer::timeout, &loop, &QEventLoop::quit);
-        timer.start(timeoutMs);
-        loop.exec();
-        waitingBye_ = false;
-        byeLoop_ = nullptr;
-    }
-
     void onReadyRead() {
         buffer_.append(socket_->readAll());
         while (true) {
@@ -191,8 +188,9 @@ private:
             const QString op = packet.value(QStringLiteral("op")).toString();
             if (op == QStringLiteral("ready")) {
                 ready_ = true;
-                if (waitingBye_ && packet.value(QStringLiteral("bye")).toBool() && byeLoop_) {
-                    byeLoop_->quit();
+                if (waitingBye_ && packet.value(QStringLiteral("bye")).toBool()) {
+                    waitingBye_ = false;
+                    QTimer::singleShot(0, qApp, &QCoreApplication::quit);
                 }
             }
             if (packetCb_) packetCb_(packet);
@@ -203,7 +201,6 @@ private:
     QByteArray buffer_;
     bool ready_ = false;
     bool waitingBye_ = false;
-    QEventLoop* byeLoop_ = nullptr;
     std::function<void(const QJsonObject&)> packetCb_;
     std::function<void(bool)> statusCb_;
 };

@@ -4,6 +4,7 @@ import "sync"
 
 type Danmu struct {
 	mu      sync.Mutex
+	active  bool
 	s       DanmuSettings
 	likeAcc map[string]int
 }
@@ -18,6 +19,21 @@ func NewDanmu() *Danmu {
 	}
 }
 
+func (f *Danmu) Active() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.active
+}
+
+func (f *Danmu) SetActive(v bool) {
+	f.mu.Lock()
+	f.active = v
+	if !v {
+		f.likeAcc = map[string]int{}
+	}
+	f.mu.Unlock()
+}
+
 func (f *Danmu) Set(s DanmuSettings) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -28,6 +44,9 @@ func (f *Danmu) Set(s DanmuSettings) {
 func (f *Danmu) Accept(msg map[string]any, giftDiamonds int) map[string]any {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if !f.active {
+		return nil
+	}
 	t, _ := msg["type"].(string)
 	user, _ := msg["user"].(string)
 	switch t {

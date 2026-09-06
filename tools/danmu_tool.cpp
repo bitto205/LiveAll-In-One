@@ -41,12 +41,15 @@ static void pushSavedDanmuSettings() {
 }
 
 static void showTutorialDialog(QWidget* parent) {
-    const QDir imageDir(QDir(g_appRoot).filePath(QStringLiteral("image")));
+    QDir imageDir(QDir(g_appRoot).filePath(QStringLiteral("resources/image")));
+    if (!imageDir.exists()) {
+        imageDir.setPath(QDir(g_appRoot).filePath(QStringLiteral("image")));
+    }
     const QStringList files = imageDir.entryList(
         {QStringLiteral("*.png"), QStringLiteral("*.jpg")}, QDir::Files, QDir::Name);
     if (files.isEmpty()) {
         QMessageBox::warning(parent, QStringLiteral("教程"),
-                             QStringLiteral("未找到 image 文件夹中的教程图片。"));
+                             QStringLiteral("未找到 resources/image 中的教程图片。"));
         return;
     }
     const QString path = imageDir.filePath(files.first());
@@ -154,6 +157,7 @@ public:
         phase_ = -1;
         if (fade_) fade_->stop();
         stopGiftAnim();
+        stopChromeAnim();
         giftPm_ = QPixmap();
         giftW_ = 0;
         giftH_ = 0;
@@ -162,6 +166,7 @@ public:
 
     void refreshSkin(const ToolSkin& skin) {
         skin_ = skin;
+        chromeReady_ = false;
         loadGiftIcon();
         relayout();
     }
@@ -181,30 +186,103 @@ public:
                                    bfm.horizontalAdvance(QString(chars, QChar(0x4E2D))))
                           + bodySt.slackPx;
         const int contentW = textW + (giftPm_.isNull() ? 0 : (giftW_ + m.giftIconGap));
-        const int w = contentW + m.padH * 2 + m.fadeW;
-        const int h = std::max(bfm.height() + ufm.height() + 4, giftH_) + m.padV * 2;
-        setFixedSize(w, h);
+        int innerW = contentW + m.padH * 2 + m.fadeW;
+        int innerH = std::max(bfm.height() + ufm.height() + 4, giftH_) + m.padV * 2;
+
+        if (!skin_.usesPixelChrome()) {
+            stopChromeAnim();
+            contentRect_ = QRect(0, 0, innerW, innerH);
+            setFixedSize(innerW, innerH);
+            update();
+            return;
+        }
+
+        ensureChromeMedia();
+        const auto ch = skin_.chromeMeta();
+        const auto deco = ch.value(QStringLiteral("deco")).toObject();
+        const int outW = std::max(0, ch.value(QStringLiteral("out_w")).toInt(2));
+        const int depth = std::max(0, ch.value(QStringLiteral("depth")).toInt(2));
+        const int edge = outW + 2;
+        const int busyOverX = std::max(1, int(std::lround(deco.value(QStringLiteral("busy_over_x")).toDouble(10))));
+        const int logoOverY = deco.value(QStringLiteral("logo_over_y")).toInt(2);
+        const int winGap = deco.value(QStringLiteral("win_gap")).toInt(2);
+        const int busyW = std::max(1, busyAnim_.logicalW);
+        const int busyH = std::max(1, busyAnim_.logicalH);
+        const int logoW = std::max(1, logoStill_.logicalW);
+        const int logoH = std::max(1, logoStill_.logicalH);
+        const int cornerW = std::max(1, cornerAnim_.logicalW);
+        const int cornerH = std::max(1, cornerAnim_.logicalH);
+        const int winH = std::max({winMin_.logicalH, winMax_.logicalH, winClose_.logicalH, 18});
+        const int winTotalW = winMin_.logicalW + winMax_.logicalW + winClose_.logicalW
+            + winGap * 2;
+        innerW = std::max(innerW, busyW + logoW + winTotalW);
+        const int topPad = std::max({edge, logoH - logoOverY, winH});
+        const int leftExtra = std::max(edge, busyOverX);
+        const int rightExtra = std::max(cornerW / 2, outW + depth);
+        const int botExtra = std::max(cornerH / 2, outW + depth);
+        const int totalW = leftExtra + innerW + rightExtra;
+        const int totalH = topPad + innerH + botExtra;
+        contentRect_ = QRect(leftExtra, topPad, innerW, innerH);
+        busyRect_ = QRect(leftExtra - busyOverX, std::max(0, topPad + logoOverY - logoH),
+                          busyW, busyH);
+        logoRect_ = QRect(busyRect_.right() + 1, busyRect_.y(), logoW, logoH);
+        winRects_[0] = QRect(contentRect_.right() - winTotalW + 1,
+                             topPad - winH + (winH - winMin_.logicalH),
+                             winMin_.logicalW, winMin_.logicalH);
+        winRects_[1] = QRect(winRects_[0].right() + 1 + winGap,
+                             topPad - winH + (winH - winMax_.logicalH),
+                             winMax_.logicalW, winMax_.logicalH);
+        winRects_[2] = QRect(winRects_[1].right() + 1 + winGap,
+                             topPad - winH + (winH - winClose_.logicalH),
+                             winClose_.logicalW, winClose_.logicalH);
+        cornerRect_ = QRect(contentRect_.right() - cornerW / 2,
+                            contentRect_.bottom() - cornerH / 2,
+                            cornerW, cornerH);
+        setFixedSize(totalW, totalH);
+        startChromeAnim();
         update();
     }
 
 protected:
     void paintEvent(QPaintEvent*) override {
         QPainter p(this);
-        p.setRenderHint(QPainter::Antialiasing, true);
         p.setOpacity(opacity_);
         const auto m = skin_.metrics();
-        QLinearGradient g(0, 0, width(), 0);
-        const QColor mid = skin_.color(QStringLiteral("gradient_mid"), QColor(0, 0, 0, 128));
-        const QColor edge = skin_.color(QStringLiteral("gradient_edge"), QColor(0, 0, 0, 0));
-        g.setColorAt(0.0, edge);
-        g.setColorAt(0.5, mid);
-        g.setColorAt(1.0, edge);
-        p.fillRect(rect(), g);
 
-        int x = m.padH + m.fadeW / 2;
-        int y = m.padV;
+        if (skin_.usesPixelChrome()) {
+            p.setRenderHint(QPainter::Antialiasing, false);
+            skin_.paintPixelChrome(&p, contentRect_, 1.0);
+            auto blit = [&](const QPixmap& pm, const QRect& r) {
+                if (pm.isNull() || r.isEmpty()) return;
+                p.drawPixmap(r, pm);
+            };
+            if (!busyAnim_.frames.isEmpty()) {
+                blit(busyAnim_.frames.value(busyFrame_ % busyAnim_.frames.size()), busyRect_);
+            }
+            blit(logoStill_.pixmap, logoRect_);
+            blit(winMin_.pixmap, winRects_[0]);
+            blit(winMax_.pixmap, winRects_[1]);
+            blit(winClose_.pixmap, winRects_[2]);
+            if (!cornerAnim_.frames.isEmpty()) {
+                blit(cornerAnim_.frames.value(cornerFrame_ % cornerAnim_.frames.size()), cornerRect_);
+            }
+        } else {
+            p.setRenderHint(QPainter::Antialiasing, true);
+            QLinearGradient g(0, 0, width(), 0);
+            const QColor mid = skin_.color(QStringLiteral("gradient_mid"), QColor(0, 0, 0, 128));
+            const QColor edge = skin_.color(QStringLiteral("gradient_edge"), QColor(0, 0, 0, 0));
+            g.setColorAt(0.0, edge);
+            g.setColorAt(0.5, mid);
+            g.setColorAt(1.0, edge);
+            p.fillRect(rect(), g);
+            contentRect_ = rect();
+        }
+
+        int x = contentRect_.x() + m.padH + m.fadeW / 2;
+        int y = contentRect_.y() + m.padV;
         if (!giftPm_.isNull()) {
-            p.drawPixmap(QRect(x, y + (height() - m.padV * 2 - giftH_) / 2, giftW_, giftH_), giftPm_);
+            p.drawPixmap(QRect(x, y + (contentRect_.height() - m.padV * 2 - giftH_) / 2,
+                               giftW_, giftH_), giftPm_);
             x += giftW_ + m.giftIconGap;
         }
         const auto userSt = skin_.roleStyle(QStringLiteral("bubble"), QStringLiteral("user"));
@@ -218,6 +296,52 @@ protected:
         p.setFont(bodySt.font());
         p.setPen(skin_.color(QStringLiteral("body"), QColor(255, 255, 255)));
         p.drawText(x, y + QFontMetrics(bodySt.font()).ascent(), text_);
+    }
+
+    void ensureChromeMedia() {
+        if (chromeReady_ && chromeSkinKey_ == skin_.skinId) return;
+        stopChromeAnim();
+        chromeSkinKey_ = skin_.skinId;
+        busyAnim_ = skin_.loadNamedAnim(QStringLiteral("busy"));
+        cornerAnim_ = skin_.loadNamedAnim(QStringLiteral("corner"));
+        logoStill_ = skin_.loadNamedStill(QStringLiteral("logo"));
+        winMin_ = skin_.loadNamedStill(QStringLiteral("win_min"));
+        winMax_ = skin_.loadNamedStill(QStringLiteral("win_max"));
+        winClose_ = skin_.loadNamedStill(QStringLiteral("win_close"));
+        busyFrame_ = 0;
+        cornerFrame_ = 0;
+        chromeReady_ = true;
+    }
+
+    void startChromeAnim() {
+        stopChromeAnim();
+        if (!skin_.usesPixelChrome()) return;
+        if (busyAnim_.frames.size() > 1 || cornerAnim_.frames.size() > 1) {
+            chromeAnimTimer_ = new QTimer(this);
+            chromeAnimTimer_->setTimerType(Qt::PreciseTimer);
+            QObject::connect(chromeAnimTimer_, &QTimer::timeout, this, [this]() {
+                bool dirty = false;
+                if (busyAnim_.frames.size() > 1) {
+                    busyFrame_ = (busyFrame_ + 1) % busyAnim_.frames.size();
+                    dirty = true;
+                }
+                if (cornerAnim_.frames.size() > 1) {
+                    cornerFrame_ = (cornerFrame_ + 1) % cornerAnim_.frames.size();
+                    dirty = true;
+                }
+                if (dirty) update();
+            });
+            const int delay = std::max(30, busyAnim_.delays.value(0, 100));
+            chromeAnimTimer_->start(delay);
+        }
+    }
+
+    void stopChromeAnim() {
+        if (chromeAnimTimer_) {
+            chromeAnimTimer_->stop();
+            chromeAnimTimer_->deleteLater();
+            chromeAnimTimer_ = nullptr;
+        }
     }
 
     void stopGiftAnim() {
@@ -335,6 +459,19 @@ protected:
     qreal opacity_ = 0.0;
     int phase_ = 0;
     std::function<void(DanmuBubble*)> onRelease_;
+
+    // Nemuru 等像素框装饰
+    bool chromeReady_ = false;
+    QString chromeSkinKey_;
+    QRect contentRect_;
+    QRect busyRect_, logoRect_, cornerRect_;
+    QRect winRects_[3];
+    liveaio::resources::LoadedAnim busyAnim_;
+    liveaio::resources::LoadedAnim cornerAnim_;
+    liveaio::resources::LoadedStill logoStill_, winMin_, winMax_, winClose_;
+    int busyFrame_ = 0;
+    int cornerFrame_ = 0;
+    QTimer* chromeAnimTimer_ = nullptr;
 };
 
 // 弹幕内容区：气泡随机落点，无额外绘制。
@@ -1045,6 +1182,9 @@ private:
 
     void toggleOverlay() {
         if (!runtime_) return;
+        if (!OverlayHostService::instance().isToolActive(OverlayToolId::Danmu)) {
+            publishToolDemand(QStringLiteral("danmu"), true);
+        }
         runtime_->toggleOverlay([this]() { refreshOpenBtn(); });
         refreshOpenBtn();
     }

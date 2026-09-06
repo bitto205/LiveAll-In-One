@@ -1,0 +1,87 @@
+{
+  "id": "nemuru",
+  "name": "Nemuru",
+  "version": 1,
+  "tool": "overtime",
+  "surfaces": ["overlay"],
+  "chrome": {
+    "style": "pixel_frame",
+    "out_w": 2,
+    "depth": 2,
+    "border_w": 1,
+    "deco": {
+      "busy_over_x": 10,
+      "logo_over_y": 2,
+      "win_gap": 2
+    }
+  },
+  "metrics": {},
+  "images_default": {
+    "scale": "nearest"
+  },
+  "images": {
+    "busy": { "file": "assets/Busy.webp", "logical_h": 44, "animated": true },
+    "logo": { "file": "assets/Nemuru.webp", "logical_h": 18 },
+    "corner": { "file": "assets/Diagonal2.webp", "logical_h": 44, "animated": true },
+    "win_min": { "file": "assets/WinMin.webp", "logical_h": 18 },
+    "win_max": { "file": "assets/WinMax.webp", "logical_h": 18 },
+    "win_close": { "file": "assets/WinClose.webp", "logical_h": 18 }
+  },
+  "colors": {
+    "text_fill": [0, 51, 85, 255],
+    "text_shadow": [255, 255, 255, 255],
+    "chrome_bg": [162, 209, 236, 255],
+    "chrome_border": [104, 167, 210, 255],
+    "chrome_hi": [210, 235, 250, 255],
+    "chrome_white": [255, 255, 255, 255],
+    "chrome_black": [0, 0, 0, 255],
+    "block_bg": [0, 0, 0, 0]
+  },
+  "layouts": {
+    "overlay": {
+      "roles": {
+        "title": {
+          "pixel_size": 20,
+          "align": "center",
+          "v_align": "bottom",
+          "max_px": 32
+        },
+        "timer": {
+          "pixel_size": 76,
+          "align": "center",
+          "bold": true,
+          "max_px": 140
+        },
+        "gift_name": {
+          "pixel_size": 13,
+          "align": "left",
+          "max_px": 16,
+          "fit_ref": "中文字符占占"
+        },
+        "gift_time": {
+          "pixel_size": 13,
+          "align": "left",
+          "max_px": 16,
+          "fit_ref": "中文字符占占"
+        },
+        "custom": {
+          "pixel_size": 13,
+          "align": "center",
+          "word_wrap": true,
+          "max_px": 16,
+          "fit_ref": "中文字符占占"
+        },
+        "log_left": {
+          "pixel_size": 13,
+          "align": "left",
+          "max_px": 13
+        },
+        "log_right": {
+          "pixel_size": 13,
+          "align": "right",
+          "max_px": 13
+        }
+      }
+    }
+  }
+}

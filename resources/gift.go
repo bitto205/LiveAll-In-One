@@ -46,9 +46,25 @@ func LoadGifts(root string) error {
 	return nil
 }
 
+// ClearCatalog drops the in-memory gift price map (idle → 0%).
+func ClearCatalog() {
+	giftMu.Lock()
+	catalog = nil
+	giftMu.Unlock()
+}
+
+func CatalogLoaded() bool {
+	giftMu.RLock()
+	defer giftMu.RUnlock()
+	return catalog != nil
+}
+
 func lookup(name string) (Gift, bool) {
 	giftMu.RLock()
 	defer giftMu.RUnlock()
+	if catalog == nil {
+		return Gift{}, false
+	}
 	g, ok := catalog[name]
 	return g, ok
 }

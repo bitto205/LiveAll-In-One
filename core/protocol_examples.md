@@ -97,6 +97,8 @@ LiveAIO.exe (C++ LoadLibrary)
 {"op":"leaf.spawn","gift":"小心心","count":1,"user":"LiveAIO"}
 {"op":"tool.danmu.set","settings":{}}
 {"op":"tool.memo.set","settings":{}}
+{"op":"tool.demand","tool":"danmu","active":true}
+{"op":"tool.demand","tool":"danmu","active":false}
 ```
 
 ### ui.command
@@ -133,7 +135,7 @@ LiveAIO.exe (C++ LoadLibrary)
     "listener_owner":"listener_boundary",
     "supports_routes":["1","2","3","4"],
     "tool_events":["tick","ledger","danmu.show","memo.item"],
-    "tool_commands":["tool.overtime.set","tool.overtime.cmd","tool.overtime.sim_gift","tool.danmu.set","tool.memo.set","ui.command","config.set","config.get"]
+    "tool_commands":["tool.overtime.set","tool.overtime.cmd","tool.overtime.sim_gift","tool.danmu.set","tool.memo.set","tool.demand","ui.command","config.set","config.get"]
   },
   "features":{
     "themes":["dark","light"],

@@ -39,7 +39,7 @@ flowchart LR
   Listener -->|"frames or ingest"| Core
 ```
 
-**加载链（生产）：** `LiveAIO.exe` → `LiveAIOCore.dll` → `LiveAIOPages.dll`（`OpenPages`）→ 进入 Tools 页 `QLibrary::load` `LiveAIOTools.dll` 并 **`LiveAIO_ToolsWarm` 预连 Core** → 用户点「打开」才建工具设置窗。宿主 **不** 直接加载 Tools。
+**加载链（生产）：** `LiveAIO.exe` → Core Supervisor → 子进程 `LiveAIO.exe --pages` → `LiveAIOPages.dll` → Tools 页 `QLibrary::load` `LiveAIOTools.dll` 并 **`LiveAIO_ToolsWarm` 预连 Core** → 用户点「打开」才建工具设置窗。Core/Go **不** `LoadLibrary` Pages。
 
 **双 TCP：** Pages 与 Tools 各持一条 `127.0.0.1:19877` 连接（同进程内两条 socket）。工具事件由 Core **广播**；Pages 侧对 `tick`/`ledger`/`danmu.show` 等可空转。
 
@@ -108,7 +108,7 @@ flowchart LR
 ## 透明 overlay 双窗与生命周期（严丝合缝）
 
 **双窗：** `OverlayHostService` 按工具持有独立 `SharedOverlayShell` +
-每工具 `*OverlayController`。弹幕机与加班机可同时显示，但共享同一 QApplication、
+每工具 `*OverlayController`。弹幕机 / 加班机 / 捡叶子可同时显示，但共享同一 QApplication、
 ToolsSession、CoreClient、主题与配置桥。
 
 **拉起（show）：**
@@ -136,18 +136,29 @@ ToolsSession、CoreClient、主题与配置桥。
 
 `ToolsSession` 按 tool id 持 `ToolEntry { runtime, panel }`（memo 仅 panel）。
 
+**总原则：有消费者 100% 拉起；无消费者清到 0%。边界未退出禁止杀实例。**
+
 | 状态 | panel | overlay | 行为 |
 |------|-------|---------|------|
 | **12** | 存活 | 存活 | 互关不销毁对方 |
-| **1** | 存活 | 无 | `ToolRuntime` 存活 |
-| **2** | 无 | 存活 | runtime 继续收 `danmu.show`/`tick`/`ledger` |
-| **无** | 无 | 无 | `tryReleaseTool` 销毁 runtime、移除 entry |
+| **1** | 存活 | 无 | `ToolRuntime` 存活（预备态可无绘制） |
+| **2** | 无 | 存活 | runtime 继续收包；**不得**因关设置而 release |
+| **无** | 无 | 无 | **唯一**允许 `tryReleaseTool` + `tool.demand active=false` |
 
-**释放条件：** `!panel && !runtime->isOverlayActive()` → `deleteLater(runtime)`。
+**消费者边界：** `panel 存活 OR overlay 存活`（overlay 含最小化到后台）。三工具各自独立计数。
 
-**关设置窗：** `ToolWindowBase::closeEvent` → `onPanelClosing` → `hide` + `deleteLater(panel)`；**禁止**在 panel 析构里 `teardownFast`。
+**双入口 ensure（缺一不可）：**
+
+1. 打开设置页（`openTool`）→ 异步/立即 `ensureEntry`（runtime + 可复用壳，**不**提前 `show` overlay）
+2. 「打开悬浮窗」按钮与托盘 `OverlayCommand` → 同样先 `ensureEntry` 再 toggle/show
+
+**释放条件：** `!panel && !runtime->isOverlayActive()` → `deleteLater(runtime)` + 通知 Core `tool.demand` false。
+
+**关设置窗：** `ToolWindowBase::closeEvent` → `onPanelClosing` → `hide` + `deleteLater(panel)`；**禁止**在 panel 析构里 `teardownFast`；若 overlay 仍在则保持 Armed/Showing。
 
 **关 overlay：** `teardown()` → `closedCb_` 末尾 `tryReleaseTool`。
+
+**预备不渲染：** `ensure` 建 runtime / 订 Core / 壳可复用；`show` 才 mount Root 与物理/气泡。
 
 ---
 

@@ -9,11 +9,14 @@ import (
 
 type Engine struct {
 	mu        sync.Mutex
+	active    bool
+	tickerOn  bool
 	remaining int
 	running   bool
 	settings  OvertimeSettings
 	ledger    map[string]int // user_id -> seconds
 	stopTick  chan struct{}
+	tickWG    sync.WaitGroup
 	onTick    func(remaining int, running bool)
 	onLedger  func(entries []LedgerEntry)
 }
@@ -24,6 +27,35 @@ func NewOvertime(onTick func(int, bool), onLedger func([]LedgerEntry)) *Engine {
 		onTick:   onTick,
 		onLedger: onLedger,
 		stopTick: make(chan struct{}),
+	}
+}
+
+func (e *Engine) Active() bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.active
+}
+
+func (e *Engine) SetActive(v bool) {
+	if v {
+		e.mu.Lock()
+		e.active = true
+		e.mu.Unlock()
+		e.ensureTicker()
+		return
+	}
+	e.mu.Lock()
+	e.active = false
+	e.mu.Unlock()
+	e.stopTicker()
+	done := make(chan struct{})
+	go func() {
+		e.tickWG.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
 	}
 }
 
@@ -62,18 +94,21 @@ func ruleToSeconds(r Rule, count int) int {
 
 func (e *Engine) SetSettings(s OvertimeSettings) {
 	e.mu.Lock()
-	defer e.mu.Unlock()
 	e.settings = s
 	total := s.Hours*3600 + s.Minutes*60 + s.Seconds
 	if total > 0 {
 		e.remaining = total
 	}
-	e.emitTickLocked()
+	rem, run := e.remaining, e.running
+	cb := e.onTick
+	e.mu.Unlock()
+	if cb != nil {
+		cb(rem, run)
+	}
 }
 
 func (e *Engine) Cmd(cmd string) {
 	e.mu.Lock()
-	defer e.mu.Unlock()
 	switch cmd {
 	case "pause":
 		e.running = false
@@ -85,42 +120,106 @@ func (e *Engine) Cmd(cmd string) {
 		e.running = true
 	case "clear_ledger":
 		e.ledger = map[string]int{}
-		e.emitLedgerLocked()
+		entries := e.copyLedgerLocked()
+		cbL := e.onLedger
+		rem, run := e.remaining, e.running
+		cbT := e.onTick
+		e.mu.Unlock()
+		if cbL != nil {
+			cbL(entries)
+		}
+		if cbT != nil {
+			cbT(rem, run)
+		}
+		return
 	}
-	e.emitTickLocked()
+	rem, run := e.remaining, e.running
+	cb := e.onTick
+	e.mu.Unlock()
+	if cb != nil {
+		cb(rem, run)
+	}
 }
 
-func (e *Engine) StartTicker() {
+func (e *Engine) ensureTicker() {
+	e.mu.Lock()
+	if e.tickerOn {
+		e.mu.Unlock()
+		return
+	}
+	select {
+	case <-e.stopTick:
+		e.stopTick = make(chan struct{})
+	default:
+	}
+	e.tickerOn = true
+	stopCh := e.stopTick
+	e.mu.Unlock()
+	e.tickWG.Add(1)
 	go func() {
+		defer e.tickWG.Done()
+		defer func() {
+			e.mu.Lock()
+			e.tickerOn = false
+			e.mu.Unlock()
+		}()
 		t := time.NewTicker(time.Second)
 		defer t.Stop()
 		for {
 			select {
-			case <-e.stopTick:
+			case <-stopCh:
 				return
 			case <-t.C:
 				e.mu.Lock()
-				if e.running && e.remaining > 0 {
-					e.remaining--
-					e.emitTickLocked()
+				if !e.active || !e.running || e.remaining <= 0 {
+					e.mu.Unlock()
+					continue
 				}
+				e.remaining--
+				rem, run := e.remaining, e.running
+				cb := e.onTick
 				e.mu.Unlock()
+				if cb != nil {
+					cb(rem, run)
+				}
 			}
 		}
 	}()
 }
 
-func (e *Engine) Stop() {
+// StartTicker keeps the old name for callers; prefer SetActive(true).
+func (e *Engine) StartTicker() { e.ensureTicker() }
+
+func (e *Engine) stopTicker() {
+	e.mu.Lock()
 	select {
 	case <-e.stopTick:
 	default:
 		close(e.stopTick)
 	}
+	e.mu.Unlock()
+}
+
+func (e *Engine) Stop() {
+	e.SetActive(false)
+	e.stopTicker()
+	done := make(chan struct{})
+	go func() {
+		e.tickWG.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+	}
 }
 
 func (e *Engine) HandleGift(user, userID, gift string, count int) {
 	e.mu.Lock()
-	defer e.mu.Unlock()
+	if !e.active {
+		e.mu.Unlock()
+		return
+	}
 	var hit *Rule
 	for i := range e.settings.Rules {
 		r := &e.settings.Rules[i]
@@ -130,6 +229,7 @@ func (e *Engine) HandleGift(user, userID, gift string, count int) {
 		}
 	}
 	if hit == nil {
+		e.mu.Unlock()
 		return
 	}
 	delta := ruleToSeconds(*hit, count)
@@ -142,23 +242,22 @@ func (e *Engine) HandleGift(user, userID, gift string, count int) {
 	}
 	e.ledger[userID] += delta
 	e.running = true
-	e.emitTickLocked()
-	e.emitLedgerLocked()
-}
-
-func (e *Engine) emitTickLocked() {
-	if e.onTick != nil {
-		e.onTick(e.remaining, e.running)
+	rem, run := e.remaining, e.running
+	entries := e.copyLedgerLocked()
+	cbT, cbL := e.onTick, e.onLedger
+	e.mu.Unlock()
+	if cbT != nil {
+		cbT(rem, run)
+	}
+	if cbL != nil {
+		cbL(entries)
 	}
 }
 
-func (e *Engine) emitLedgerLocked() {
-	if e.onLedger == nil {
-		return
-	}
+func (e *Engine) copyLedgerLocked() []LedgerEntry {
 	out := make([]LedgerEntry, 0, len(e.ledger))
 	for uid, sec := range e.ledger {
 		out = append(out, LedgerEntry{User: uid, UserID: uid, Seconds: sec})
 	}
-	e.onLedger(out)
+	return out
 }

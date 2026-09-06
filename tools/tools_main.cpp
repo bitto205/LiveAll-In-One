@@ -62,18 +62,15 @@ using liveaio::util::prepareAppAlphaFormat;
 namespace liveaio::tools {
 
 static void warmToolCatalogs(QObject* context) {
-    if (g_appRoot.isEmpty()) return;
-    liveaio::resources::ensureGiftCatalogAsync(g_appRoot, context, []() {
-        liveaio::resources::giftNamesCached(g_appRoot);
-        liveaio::resources::listSkins(g_appRoot, QStringLiteral("danmu"));
-        liveaio::resources::listSkins(g_appRoot, QStringLiteral("overtime"));
-    });
+    Q_UNUSED(context);
+    // 礼物 catalog/icon 按展示需求异步拉；启动不再全量预热。
 }
 
 struct ToolEntry {
     QString id;
     ToolRuntimeBase* runtime = nullptr;
     ToolWindowBase* panel = nullptr;
+    bool demandOn = false;
 };
 
 // 同进程插件：工具 runtime + 设置窗生命周期由这里持有。
@@ -88,6 +85,8 @@ public:
         ensureCore();
         ToolEntry* entry = ensureEntry(id);
         if (!entry) return false;
+        publishDemand(id, true);
+        prepOverlayShell(id);
 
         if (entry->panel) {
             entry->panel->applyChromeStyle();
@@ -131,8 +130,12 @@ public:
             : OverlayToolId::None;
         if (tool == OverlayToolId::None) return false;
 
+        // 双入口 ensure：托盘/按钮路径与设置页一样先拉起实例。
         ToolEntry* entry = ensureEntry(id);
         if (!entry || !entry->runtime) return false;
+        publishDemand(id, true);
+        prepOverlayShell(id);
+
         auto& host = OverlayHostService::instance();
         const bool active = host.isToolActive(tool);
         if (action == QStringLiteral("open")) {
@@ -180,6 +183,35 @@ public:
         }
     }
 
+    // 主窗全关（未开托盘）时连锁关掉所有工具设置窗 + 悬浮窗。
+    void shutdownAll() {
+        OverlayHostService::instance().closeAll();
+        const QList<ToolWindowBase*> panels = [this]() {
+            QList<ToolWindowBase*> out;
+            for (auto it = entries_.begin(); it != entries_.end(); ++it) {
+                if (it->panel) out.append(it->panel);
+            }
+            return out;
+        }();
+        for (ToolWindowBase* panel : panels) {
+            if (panel) panel->close();
+        }
+        const QStringList ids = entries_.keys();
+        for (const QString& id : ids) {
+            ToolEntry& entry = entries_[id];
+            entry.panel = nullptr;
+            entry.demandOn = false;
+            publishToolDemand(id, false);
+            if (entry.runtime) {
+                entry.runtime->deleteLater();
+                entry.runtime = nullptr;
+            }
+        }
+        entries_.clear();
+        liveaio::util::hideSessionGiftPicker();
+        liveaio::resources::releaseGiftPixmapCaches();
+    }
+
 private:
     explicit ToolsSession(QObject* parent) : QObject(parent) {}
 
@@ -192,12 +224,37 @@ private:
         liveaio::util::setToolAppRoot(g_appRoot);
         prepareAppAlphaFormat();
         core_ = new CoreClient(this);
+        setToolDemandCore(core_);
         installConfigBridge();
         liveaio::util::setGiftPickerParent(this);
         core_->setPacketCallback([this](const QJsonObject& packet) { dispatchPacket(packet); });
         core_->setStatusCallback([this](bool connected) { dispatchStatus(connected); });
         core_->connectToCore();
         warmToolCatalogs(this);
+    }
+
+    static OverlayToolId overlayIdFor(const QString& id) {
+        if (id == QStringLiteral("danmu")) return OverlayToolId::Danmu;
+        if (id == QStringLiteral("overtime")) return OverlayToolId::Overtime;
+        if (id == QStringLiteral("leaf")) return OverlayToolId::Leaf;
+        return OverlayToolId::None;
+    }
+
+    void prepOverlayShell(const QString& id) {
+        const OverlayToolId tool = overlayIdFor(id);
+        if (tool == OverlayToolId::None) return;
+        OverlayHostService::instance().prepare(tool);
+    }
+
+    void publishDemand(const QString& id, bool active) {
+        if (entries_.contains(id)) {
+            ToolEntry& entry = entries_[id];
+            if (entry.demandOn == active) return;
+            entry.demandOn = active;
+        } else if (!active) {
+            return;
+        }
+        publishToolDemand(id, active);
     }
 
     ToolEntry* ensureEntry(const QString& id) {
@@ -210,6 +267,8 @@ private:
             entry.runtime = createOvertimeRuntime(this, [this, id]() { tryReleaseTool(id); });
         } else if (id == QStringLiteral("leaf")) {
             entry.runtime = leaf::createLeafRuntime(this, [this, id]() { tryReleaseTool(id); });
+        } else if (id != QStringLiteral("memo")) {
+            return nullptr;
         }
         entries_.insert(id, entry);
         return &entries_[id];
@@ -227,11 +286,17 @@ private:
         ToolEntry& entry = entries_[id];
         if (entry.panel) return;
         if (entry.runtime && entry.runtime->isOverlayActive()) return;
+        entry.demandOn = false;
+        publishToolDemand(id, false);
         if (entry.runtime) {
             entry.runtime->deleteLater();
             entry.runtime = nullptr;
         }
         entries_.remove(id);
+        if (entries_.isEmpty()) {
+            liveaio::resources::releaseGiftPixmapCaches();
+            liveaio::util::hideSessionGiftPicker();
+        }
     }
 
     void dispatchPacket(const QJsonObject& packet) {
@@ -297,4 +362,9 @@ extern "C" LIVEAIO_TOOLS_API void LiveAIO_ToolsApplyTheme(const char* theme_name
     // 只刷工具窗自身样式，禁止 qApp->setStyleSheet(toolQss) 盖掉主窗 shellQss。
     liveaio::tools::ToolsSession::instance().refreshOpenPanelsTheme();
     if (auto* picker = liveaio::util::sessionGiftPicker()) picker->refreshTheme();
+}
+
+extern "C" LIVEAIO_TOOLS_API void LiveAIO_ToolsShutdown(void) {
+    if (!QApplication::instance()) return;
+    liveaio::tools::ToolsSession::instance().shutdownAll();
 }

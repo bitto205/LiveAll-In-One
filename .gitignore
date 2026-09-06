@@ -10,6 +10,10 @@ Thumbs.db
 !.vscode/extensions.json
 !.vscode/settings.json
 .cursor/
+!.cursor/rules/
+!.cursor/rules/**
+!.cursor/skills/
+!.cursor/skills/**
 log/
 msg_log/
 config.json
@@ -32,14 +36,17 @@ build/tools/upx.exe
 _upx.zip
 main/*.exe
 main/requirements.txt
-go.work
-go.work.sum
+# go.work：禁止仓库根；模板在 main/go.work（可提交）。本地 sum 忽略。
+/go.work
+/go.work.sum
+main/go.work.sum
 main/__debug_bin.exe
 aqtinstall.log
 
 .audit_py_ui/
-scripts/
 
+# 构建产物仍在 build/；源脚本在 scripts/（需纳入版本库）
 build/
-build/compile_commands.json
+# clangd 用 .clangd → build/cmake/all；勿在仓库根落 compile_commands.json
 compile_commands.json
+test/

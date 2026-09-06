@@ -1,0 +1,30 @@
+{
+  "id": "default",
+  "name": "默认",
+  "version": 1,
+  "tool": "leaf",
+  "surfaces": ["overlay"],
+  "assets": {
+    "leaf": "leaf.png",
+    "trash": "trash_can.png",
+    "trash_open": "trash_can_open.png"
+  },
+  "metrics": {
+    "leaf_side_cm": 1.0,
+    "rigid_half_length_frac": 0.45,
+    "rigid_half_width_frac": 0.14,
+    "rigid_bevel_frac": 0.055,
+    "soft_radius_frac": 0.24,
+    "soft_half_len_frac": 0.34,
+    "art_angle_deg": -45,
+    "trash_w_cm": 2.0,
+    "trash_h_cm": 2.67,
+    "trash_hit_pad_cm": 0.12,
+    "trash_near_pad_cm": 0.45,
+    "leaf_halo_outer_cm": 0.22,
+    "trash_halo_outer_cm": 0.28,
+    "leaf_halo_amount": 0.82,
+    "trash_halo_amount": 0.72,
+    "leaf_halo_soft_inner": true
+  }
+}

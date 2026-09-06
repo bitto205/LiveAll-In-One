@@ -303,6 +303,80 @@ public:
     LoadedAnim presentAnimation(const QString& path, int boxH, qreal uiScale = 1.0) const {
         return loadAnimPath(path, boxH, screenDpr(), uiScale);
     }
+
+    QJsonObject chromeMeta() const {
+        return meta.value(QStringLiteral("chrome")).toObject();
+    }
+
+    // 像素立体框皮肤（Nemuru 等）：JSON chrome.style=pixel_frame。
+    bool usesPixelChrome() const {
+        return chromeMeta().value(QStringLiteral("style")).toString()
+            == QLatin1String("pixel_frame");
+    }
+
+    QJsonObject imageSpec(const QString& key) const {
+        return meta.value(QStringLiteral("images")).toObject().value(key).toObject();
+    }
+
+    QString namedImagePath(const QString& key) const {
+        const QString rel = imageSpec(key).value(QStringLiteral("file")).toString();
+        if (rel.isEmpty()) return {};
+        return QDir(rootPath).filePath(rel);
+    }
+
+    LoadedStill loadNamedStill(const QString& key, qreal uiScale = 1.0) const {
+        const auto spec = imageSpec(key);
+        const QString path = namedImagePath(key);
+        if (path.isEmpty()) return {};
+        const int lh = std::max(1, spec.value(QStringLiteral("logical_h")).toInt(16));
+        return presentImage(path, lh, uiScale);
+    }
+
+    LoadedAnim loadNamedAnim(const QString& key, qreal uiScale = 1.0) const {
+        const auto spec = imageSpec(key);
+        const QString path = namedImagePath(key);
+        if (path.isEmpty()) return {};
+        const int lh = std::max(1, spec.value(QStringLiteral("logical_h")).toInt(16));
+        return presentAnimation(path, lh, uiScale);
+    }
+
+    // 直角像素框：外黑阴影 + 高光/白边 + 描边 + 底色 + 内角线（对齐旧 util/nemuru_chrome）。
+    void paintPixelChrome(QPainter* p, const QRect& r, qreal opacity = 1.0) const {
+        if (!p || r.isEmpty()) return;
+        const auto ch = chromeMeta();
+        const int outW = std::max(0, ch.value(QStringLiteral("out_w")).toInt(2));
+        const int depth = std::max(0, ch.value(QStringLiteral("depth")).toInt(2));
+        const int bw = std::max(1, ch.value(QStringLiteral("border_w")).toInt(1));
+        const QColor bg = color(QStringLiteral("chrome_bg"), QColor(162, 209, 236));
+        const QColor border = color(QStringLiteral("chrome_border"), QColor(104, 167, 210));
+        const QColor hi = color(QStringLiteral("chrome_hi"), QColor(210, 235, 250));
+        const QColor white = color(QStringLiteral("chrome_white"), QColor(255, 255, 255));
+        const QColor black = color(QStringLiteral("chrome_black"), QColor(0, 0, 0));
+
+        p->save();
+        p->setOpacity(opacity);
+        p->setRenderHint(QPainter::Antialiasing, false);
+        p->setPen(Qt::NoPen);
+        const int x = r.x(), y = r.y(), w = r.width(), h = r.height();
+
+        p->setBrush(black);
+        p->drawRect(x - outW, y - outW, w + 2 * outW + depth, h + 2 * outW + depth);
+        p->setBrush(hi);
+        p->drawRect(x - 2, y - 2, w + 1, h + 1);
+        p->setBrush(white);
+        p->drawRect(x - 1, y - 1, w, h);
+        p->setBrush(border);
+        p->drawRect(x, y, w, h);
+        p->setBrush(bg);
+        p->drawRect(x + bw, y + bw, std::max(0, w - 2 * bw), std::max(0, h - 2 * bw));
+        p->setBrush(white);
+        p->drawRect(x + bw, y + bw, std::max(0, w - 2 * bw), 1);
+        p->drawRect(x + bw, y + bw, 1, std::max(0, h - 2 * bw));
+        p->setBrush(black);
+        p->drawRect(x + bw, y + h - bw - 1, std::max(0, w - 2 * bw), 1);
+        p->drawRect(x + w - bw - 1, y + bw, 1, std::max(0, h - 2 * bw));
+        p->restore();
+    }
 };
 
 struct SkinEntry {

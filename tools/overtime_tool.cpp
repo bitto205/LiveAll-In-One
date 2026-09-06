@@ -394,8 +394,8 @@ public:
         pickBtn_->setStyleSheet(QStringLiteral(
             "QPushButton { background: transparent; color: %1; border: 1px solid %2;"
             " border-radius: 3px; font-size: 10px; padding: 0 1px; }"
-            "QPushButton:hover { background: transparent; color: %2; }"
-        ).arg(C.text, C.activeLine));
+            "QPushButton:hover { background: %3; color: %2; }"
+        ).arg(C.text, C.activeLine, C.hover));
         iconLbl_->setStyleSheet(
             QStringLiteral("QLabel#OvertimeGiftIcon { background: transparent; border: none; }"));
         mode_->refreshTheme();
@@ -1526,6 +1526,7 @@ public:
         resultRow_ = new ResultRow(this);
         rootLay_->addWidget(resultRow_);
 
+        applyChromeMargins();
         applyScale(1.0, true);
     }
 
@@ -1565,7 +1566,59 @@ public:
         for (auto* slot : slots_) slot->refreshSkin();
         customLbl_->refreshSkin();
         resultRow_->refreshSkin();
+        applyChromeMargins();
         update();
+    }
+
+    void applyChromeMargins() {
+        if (!skin_.usesPixelChrome()) {
+            rootLay_->setContentsMargins(0, 0, 0, 0);
+            return;
+        }
+        const auto ch = skin_.chromeMeta();
+        const auto deco = ch.value(QStringLiteral("deco")).toObject();
+        const int outW = std::max(0, ch.value(QStringLiteral("out_w")).toInt(2));
+        const int depth = std::max(0, ch.value(QStringLiteral("depth")).toInt(2));
+        const int edge = outW + 2;
+        const int logoOverY = deco.value(QStringLiteral("logo_over_y")).toInt(2);
+        const auto logo = skin_.loadNamedStill(QStringLiteral("logo"));
+        const auto busy = skin_.loadNamedStill(QStringLiteral("busy"));
+        const auto corner = skin_.loadNamedStill(QStringLiteral("corner"));
+        const auto winMin = skin_.loadNamedStill(QStringLiteral("win_min"));
+        const int winH = std::max(18, winMin.logicalH);
+        const int top = std::max({edge, logo.logicalH - logoOverY, winH});
+        const int left = std::max(edge, int(std::lround(deco.value(QStringLiteral("busy_over_x")).toDouble(10))));
+        const int right = std::max(corner.logicalW / 2, outW + depth);
+        const int bot = std::max(corner.logicalH / 2, outW + depth);
+        rootLay_->setContentsMargins(left, top, right, bot);
+        // 缓存装饰贴图供 paintEvent 使用
+        otBusy_ = skin_.loadNamedAnim(QStringLiteral("busy"));
+        otCorner_ = skin_.loadNamedAnim(QStringLiteral("corner"));
+        otLogo_ = logo;
+        otWinMin_ = winMin;
+        otWinMax_ = skin_.loadNamedStill(QStringLiteral("win_max"));
+        otWinClose_ = skin_.loadNamedStill(QStringLiteral("win_close"));
+        if (!otChromeTimer_) {
+            otChromeTimer_ = new QTimer(this);
+            otChromeTimer_->setTimerType(Qt::PreciseTimer);
+            QObject::connect(otChromeTimer_, &QTimer::timeout, this, [this]() {
+                bool dirty = false;
+                if (otBusy_.frames.size() > 1) {
+                    otBusyFrame_ = (otBusyFrame_ + 1) % otBusy_.frames.size();
+                    dirty = true;
+                }
+                if (otCorner_.frames.size() > 1) {
+                    otCornerFrame_ = (otCornerFrame_ + 1) % otCorner_.frames.size();
+                    dirty = true;
+                }
+                if (dirty) update();
+            });
+        }
+        if (otBusy_.frames.size() > 1 || otCorner_.frames.size() > 1) {
+            otChromeTimer_->start(std::max(30, otBusy_.delays.value(0, 100)));
+        } else {
+            otChromeTimer_->stop();
+        }
     }
 
     void applyScale(qreal scale, bool heavy) {
@@ -1589,17 +1642,69 @@ public:
         customLbl_->fitToBox(customLbl_->text(), bw - pad, customH - pad, s);
         resultRow_->applyScale(s, heavy);
 
-        // 块高由各行实际高度相加得出，不再用参考表反过来卡住内容。
+        // 块高由各行实际高度相加得出，再叠加像素框装饰边距。
         const int gap = rootLay_->spacing();
-        setFixedSize(bw, titleTimer_->height() + gap + gridH + gap + customH
-                             + gap + resultRow_->height());
+        const QMargins cm = rootLay_->contentsMargins();
+        const int bodyH = titleTimer_->height() + gap + gridH + gap + customH
+            + gap + resultRow_->height();
+        setFixedSize(bw + cm.left() + cm.right(), bodyH + cm.top() + cm.bottom());
     }
 
 protected:
     void paintEvent(QPaintEvent*) override {
+        QPainter p(this);
+        if (skin_.usesPixelChrome()) {
+            p.setRenderHint(QPainter::Antialiasing, false);
+            const QRect inner = contentsRect();
+            skin_.paintPixelChrome(&p, inner, 1.0);
+            auto blit = [&](const QPixmap& pm, const QRect& r) {
+                if (pm.isNull() || r.isEmpty()) return;
+                p.drawPixmap(r, pm);
+            };
+            const auto ch = skin_.chromeMeta();
+            const auto deco = ch.value(QStringLiteral("deco")).toObject();
+            const int busyOverX = std::max(1, int(std::lround(
+                deco.value(QStringLiteral("busy_over_x")).toDouble(10))));
+            const int logoOverY = deco.value(QStringLiteral("logo_over_y")).toInt(2);
+            const int winGap = deco.value(QStringLiteral("win_gap")).toInt(2);
+            const int busyW = std::max(1, otBusy_.logicalW);
+            const int busyH = std::max(1, otBusy_.logicalH);
+            const int logoW = std::max(1, otLogo_.logicalW);
+            const int logoH = std::max(1, otLogo_.logicalH);
+            const int cornerW = std::max(1, otCorner_.logicalW);
+            const int cornerH = std::max(1, otCorner_.logicalH);
+            const int winH = std::max({otWinMin_.logicalH, otWinMax_.logicalH, otWinClose_.logicalH, 18});
+            const int winTotalW = otWinMin_.logicalW + otWinMax_.logicalW + otWinClose_.logicalW + winGap * 2;
+            const QRect busyR(inner.x() - busyOverX,
+                              std::max(0, inner.y() + logoOverY - logoH),
+                              busyW, busyH);
+            const QRect logoR(busyR.right() + 1, busyR.y(), logoW, logoH);
+            QRect win0(inner.right() - winTotalW + 1,
+                       inner.y() - winH + (winH - otWinMin_.logicalH),
+                       otWinMin_.logicalW, otWinMin_.logicalH);
+            QRect win1(win0.right() + 1 + winGap,
+                       inner.y() - winH + (winH - otWinMax_.logicalH),
+                       otWinMax_.logicalW, otWinMax_.logicalH);
+            QRect win2(win1.right() + 1 + winGap,
+                       inner.y() - winH + (winH - otWinClose_.logicalH),
+                       otWinClose_.logicalW, otWinClose_.logicalH);
+            const QRect cornerR(inner.right() - cornerW / 2,
+                                inner.bottom() - cornerH / 2,
+                                cornerW, cornerH);
+            if (!otBusy_.frames.isEmpty()) {
+                blit(otBusy_.frames.value(otBusyFrame_ % otBusy_.frames.size()), busyR);
+            }
+            blit(otLogo_.pixmap, logoR);
+            blit(otWinMin_.pixmap, win0);
+            blit(otWinMax_.pixmap, win1);
+            blit(otWinClose_.pixmap, win2);
+            if (!otCorner_.frames.isEmpty()) {
+                blit(otCorner_.frames.value(otCornerFrame_ % otCorner_.frames.size()), cornerR);
+            }
+            return;
+        }
         const QColor bg = skin_.color(QStringLiteral("block_bg"), QColor(0, 0, 0, 0));
         if (bg.alpha() == 0) return;
-        QPainter p(this);
         p.setRenderHint(QPainter::Antialiasing, true);
         p.setPen(Qt::NoPen);
         p.setBrush(bg);
@@ -1618,6 +1723,12 @@ private:
     SkinTextLabel* customLbl_ = nullptr;
     ResultRow* resultRow_ = nullptr;
     qreal scale_ = 1.0;
+    liveaio::resources::LoadedAnim otBusy_;
+    liveaio::resources::LoadedAnim otCorner_;
+    liveaio::resources::LoadedStill otLogo_, otWinMin_, otWinMax_, otWinClose_;
+    int otBusyFrame_ = 0;
+    int otCornerFrame_ = 0;
+    QTimer* otChromeTimer_ = nullptr;
 };
 
 class OvertimeRoot final : public RippleOverlayRoot {
@@ -2281,6 +2392,9 @@ private:
 
     void toggleOverlay() {
         if (!runtime_) return;
+        if (!OverlayHostService::instance().isToolActive(OverlayToolId::Overtime)) {
+            publishToolDemand(QStringLiteral("overtime"), true);
+        }
         const Settings s = loadSettings();
         runtime_->toggleOverlay(s, [this]() {
             refreshOpenBtn();

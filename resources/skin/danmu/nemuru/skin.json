@@ -1,0 +1,90 @@
+{
+  "id": "nemuru",
+  "name": "Nemuru",
+  "version": 1,
+  "tool": "danmu",
+  "surfaces": ["bubble", "gift_bubble"],
+  "chrome": {
+    "style": "pixel_frame",
+    "out_w": 2,
+    "depth": 2,
+    "border_w": 1,
+    "deco": {
+      "busy_over_x": 10,
+      "logo_over_y": 2,
+      "win_gap": 2
+    }
+  },
+  "metrics": {
+    "fade_w": 0,
+    "pad_h": 12,
+    "pad_v": 7,
+    "gift_icon_size": 32,
+    "gift_icon_gap": 8
+  },
+  "images_default": {
+    "scale": "nearest"
+  },
+  "images": {
+    "busy": { "file": "assets/Busy.webp", "logical_h": 44, "animated": true },
+    "logo": { "file": "assets/Nemuru.webp", "logical_h": 18 },
+    "corner": { "file": "assets/Diagonal2.webp", "logical_h": 44, "animated": true },
+    "win_min": { "file": "assets/WinMin.webp", "logical_h": 18 },
+    "win_max": { "file": "assets/WinMax.webp", "logical_h": 18 },
+    "win_close": { "file": "assets/WinClose.webp", "logical_h": 18 }
+  },
+  "colors": {
+    "user": [0, 51, 85, 255],
+    "body": [0, 51, 85, 255],
+    "chrome_bg": [162, 209, 236, 255],
+    "chrome_border": [104, 167, 210, 255],
+    "chrome_hi": [210, 235, 250, 255],
+    "chrome_white": [255, 255, 255, 255],
+    "chrome_black": [0, 0, 0, 255]
+  },
+  "styles": {
+    "user": "color: rgb(0,51,85); background: transparent;",
+    "body": "color: rgb(0,51,85); background: transparent;",
+    "suffix": "color: rgb(0,51,85); background: transparent;"
+  },
+  "layouts": {
+    "bubble": {
+      "spacing": 2,
+      "row_align": "left",
+      "roles": {
+        "user": {
+          "pixel_size": 11,
+          "align": "left",
+          "style_extra": "font-weight:600;"
+        },
+        "body": {
+          "pixel_size": 13,
+          "align": "left",
+          "word_wrap": true,
+          "min_chars": 4,
+          "max_chars": 16,
+          "slack_px": 2
+        }
+      }
+    },
+    "gift_bubble": {
+      "spacing": 2,
+      "text_slack": 4,
+      "roles": {
+        "user": {
+          "pixel_size": 11,
+          "align": "left",
+          "style_extra": "font-weight:600;"
+        },
+        "body": {
+          "pixel_size": 13,
+          "align": "left"
+        },
+        "suffix": {
+          "pixel_size": 11,
+          "align": "left"
+        }
+      }
+    }
+  }
+}

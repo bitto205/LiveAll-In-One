@@ -113,9 +113,9 @@ public:
             " border-radius: 6px; padding: 0 8px; font-size: 12px; }"
             "QPushButton { background: transparent; color: %3; border: 1px solid %4;"
             " border-radius: 4px; font-size: 12px; }"
-            "QPushButton:hover { border-color: %2; }"
+            "QPushButton:hover { background: %5; border-color: %2; }"
             "QLabel { background: transparent; border: none; color: %3; }"
-        ).arg(C.card, C.activeLine, C.text, C.border) + popupChromeQss());
+        ).arg(C.card, C.activeLine, C.text, C.border, C.hover) + popupChromeQss());
     }
 
 protected:
@@ -206,8 +206,8 @@ private:
         btn->setStyleSheet(QStringLiteral(
             "QPushButton { background: transparent; border: 1px solid transparent;"
             " border-radius: 4px; padding: 0; }"
-            "QPushButton:hover { background: transparent; border-color: %1; }"
-        ).arg(C.activeLine));
+            "QPushButton:hover { background: %2; border-color: %1; }"
+        ).arg(C.activeLine, C.hover));
 
         auto* lay = new QVBoxLayout(btn);
         lay->setContentsMargins(2, 2, 2, 2);
@@ -317,20 +317,22 @@ public:
 
     void refreshTheme() {
         const auto& C = theme();
+        // 悬停与其他按钮统一：底色变 hover、文字转正色，而不是只换文字颜色。
         pickBtn_->setStyleSheet(QStringLiteral(
             "QPushButton#OvertimeSimPickBtn { background: transparent; color: %1;"
             " border: 1.5px solid %1; border-radius: 6px; font-size: 12px; font-weight: 600;"
             " padding: 0 10px; min-height: %2px; max-height: %2px; }"
-            "QPushButton#OvertimeSimPickBtn:hover { background: transparent; color: %3; }"
-        ).arg(C.activeLine, QString::number(kSimBtnH), C.text));
+            "QPushButton#OvertimeSimPickBtn:hover { background: %3; color: %4; }"
+        ).arg(C.activeLine, QString::number(kSimBtnH), C.hover, C.text));
         iconLbl_->setStyleSheet(QStringLiteral(
             "QLabel#OvertimeSimGiftIcon { background: transparent; border: none; }"));
+        // 实心强调钮统一：悬停转 C.active，文字保持白色。
         pushBtn_->setStyleSheet(QStringLiteral(
             "QPushButton { background: %1; color: #fff; border: none; border-radius: 6px;"
             " font-size: 13px; font-weight: 600; }"
-            "QPushButton:hover { background: %2; color: %3; }"
-            "QPushButton:disabled { background: %4; color: %5; }"
-        ).arg(C.activeLine, C.hover, C.text, C.border, C.textMuted));
+            "QPushButton:hover { background: %2; }"
+            "QPushButton:disabled { background: %3; color: %4; }"
+        ).arg(C.activeLine, C.active, C.border, C.textMuted));
         if (auto* picker = sessionGiftPicker()) picker->refreshTheme();
     }
 
@@ -354,6 +356,7 @@ private:
         pickBtn_->setFlat(true);
         pickBtn_->setFixedSize(kSimPickW, kSimBtnH);
         pickBtn_->setCursor(Qt::PointingHandCursor);
+        suppressButtonFocus(pickBtn_);
         QObject::connect(pickBtn_, &QPushButton::clicked, this, [this]() {
             auto* picker = sessionGiftPicker();
             picker->setOnPicked([this](const QString& name) {

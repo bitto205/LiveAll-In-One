@@ -12,6 +12,12 @@ import (
 	"time"
 )
 
+const (
+	connWriteTimeout = 2 * time.Second
+	connReadTimeout  = 60 * time.Second
+	serverStopWait   = 3 * time.Second
+)
+
 type Handler func(conn *Conn, env Envelope)
 
 type Conn struct {
@@ -31,7 +37,12 @@ func (c *Conn) Send(env Envelope) error {
 		return err
 	}
 	b = append(b, '\n')
+	_ = c.raw.SetWriteDeadline(time.Now().Add(connWriteTimeout))
 	_, err = c.raw.Write(b)
+	if err != nil {
+		c.closed = true
+		_ = c.raw.Close()
+	}
 	return err
 }
 
@@ -53,6 +64,9 @@ type Server struct {
 	ln     net.Listener
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
+
+	cmu   sync.Mutex
+	conns map[*Conn]struct{}
 }
 
 func (s *Server) log() *slog.Logger {
@@ -60,6 +74,33 @@ func (s *Server) log() *slog.Logger {
 		return s.Log
 	}
 	return slog.Default()
+}
+
+func (s *Server) track(c *Conn) {
+	s.cmu.Lock()
+	if s.conns == nil {
+		s.conns = map[*Conn]struct{}{}
+	}
+	s.conns[c] = struct{}{}
+	s.cmu.Unlock()
+}
+
+func (s *Server) untrack(c *Conn) {
+	s.cmu.Lock()
+	delete(s.conns, c)
+	s.cmu.Unlock()
+}
+
+func (s *Server) closeAllConns() {
+	s.cmu.Lock()
+	list := make([]*Conn, 0, len(s.conns))
+	for c := range s.conns {
+		list = append(list, c)
+	}
+	s.cmu.Unlock()
+	for _, c := range list {
+		_ = c.Close()
+	}
 }
 
 func (s *Server) Listen() (net.Listener, string, error) {
@@ -94,6 +135,7 @@ func (s *Server) Serve(ctx context.Context) error {
 		defer s.wg.Done()
 		<-ctx.Done()
 		_ = ln.Close()
+		s.closeAllConns()
 	}()
 
 	for {
@@ -117,7 +159,11 @@ func (s *Server) Serve(ctx context.Context) error {
 
 func (s *Server) serveConn(ctx context.Context, raw net.Conn) {
 	c := &Conn{raw: raw}
-	defer c.Close()
+	s.track(c)
+	defer func() {
+		s.untrack(c)
+		_ = c.Close()
+	}()
 	if s.OnConnect != nil {
 		s.OnConnect(c)
 	}
@@ -135,6 +181,7 @@ func (s *Server) serveConn(ctx context.Context, raw net.Conn) {
 			return
 		default:
 		}
+		_ = raw.SetReadDeadline(time.Now().Add(connReadTimeout))
 		line, err := r.ReadBytes('\n')
 		if err != nil {
 			if err != io.EOF {
@@ -212,5 +259,15 @@ func (s *Server) Stop() {
 	if s.ln != nil {
 		_ = s.ln.Close()
 	}
-	s.wg.Wait()
+	s.closeAllConns()
+	done := make(chan struct{})
+	go func() {
+		s.wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(serverStopWait):
+		s.log().Warn("Server.Stop timed out waiting for connections")
+	}
 }
