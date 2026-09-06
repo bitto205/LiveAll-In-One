@@ -85,6 +85,8 @@ static int cmToPx(qreal cm) { return std::max(1, static_cast<int>(std::lround(cm
 
 // 皮肤驱动的叶子/垃圾桶形状、碰撞与光晕；缺字段时用编译期默认值。
 struct LeafSkinParams {
+    enum class RigidShape { Octagon, Hexagon };
+
     qreal leafSideCm = kDefLeafSideCm;
     qreal rigidHalfLengthFrac = kDefRigidHalfLengthFrac;
     qreal rigidHalfWidthFrac = kDefRigidHalfWidthFrac;
@@ -101,6 +103,15 @@ struct LeafSkinParams {
     qreal leafHaloAmount = kDefLeafHaloAmount;
     qreal trashHaloAmount = kDefTrashHaloAmount;
     bool leafHaloSoftInner = true;
+    RigidShape rigidShape = RigidShape::Octagon;
+    QString leafRender = QStringLiteral("image");
+    QString leafEmoji;
+    qreal trashHitLeftFrac = 0.0;
+    qreal trashHitTopFrac = 0.28;
+    qreal trashHitTopOpenFrac = 0.0;
+    qreal trashHitRightFrac = 1.0;
+    qreal trashHitBottomFrac = 1.0;
+    qreal trashGrabTopFrac = 0.28;
     QString rootPath;
     QString leafFile = QStringLiteral("leaf.png");
     QString trashFile = QStringLiteral("trash_can.png");
@@ -134,6 +145,21 @@ struct LeafSkinParams {
         if (m.contains(QStringLiteral("art_angle_deg"))) {
             p.artAngleRad = num(QStringLiteral("art_angle_deg"), -45.0) * kPi / 180.0;
         }
+        if (m.value(QStringLiteral("rigid_shape")).toString() == QLatin1String("hexagon")) {
+            p.rigidShape = RigidShape::Hexagon;
+        }
+        p.trashHitLeftFrac =
+            std::clamp(num(QStringLiteral("trash_hit_left_frac"), p.trashHitLeftFrac), 0.0, 1.0);
+        p.trashHitTopFrac =
+            std::clamp(num(QStringLiteral("trash_hit_top_frac"), p.trashHitTopFrac), 0.0, 1.0);
+        p.trashHitTopOpenFrac = std::clamp(
+            num(QStringLiteral("trash_hit_top_open_frac"), p.trashHitTopOpenFrac), 0.0, 1.0);
+        p.trashHitRightFrac =
+            std::clamp(num(QStringLiteral("trash_hit_right_frac"), p.trashHitRightFrac), 0.0, 1.0);
+        p.trashHitBottomFrac =
+            std::clamp(num(QStringLiteral("trash_hit_bottom_frac"), p.trashHitBottomFrac), 0.0, 1.0);
+        p.trashGrabTopFrac =
+            std::clamp(num(QStringLiteral("trash_grab_top_frac"), p.trashGrabTopFrac), 0.0, 1.0);
         const QJsonObject assets = skin.meta.value(QStringLiteral("assets")).toObject();
         auto fileOf = [&](const QString& key, const QString& def) {
             const QString v = assets.value(key).toString();
@@ -142,18 +168,54 @@ struct LeafSkinParams {
         p.leafFile = fileOf(QStringLiteral("leaf"), p.leafFile);
         p.trashFile = fileOf(QStringLiteral("trash"), p.trashFile);
         p.trashOpenFile = fileOf(QStringLiteral("trash_open"), p.trashOpenFile);
+        p.leafRender = skin.meta.value(QStringLiteral("leaf_render")).toString(p.leafRender);
+        p.leafEmoji = skin.meta.value(QStringLiteral("leaf_emoji")).toString();
         return p;
     }
 };
 
 struct LeafSharedAssets;
 
+static QString privateLeafSkinRoot(const QString& id) {
+    return QDir(g_appRoot).filePath(QStringLiteral("resources/private_skin/leaf/%1").arg(id));
+}
+
+static bool isPrivateLeafSkinId(const QString& id) {
+    return id == QLatin1String("nemuru1") || id == QLatin1String("nemuru2");
+}
+
 static liveaio::resources::ToolSkin activeLeafSkin() {
     const QString id = configValue(liveaio::resources::skinConfigKey(QStringLiteral("leaf")),
                                    QStringLiteral("default")).toString();
+    if (isPrivateLeafSkinId(id)) {
+        liveaio::resources::ToolSkin skin;
+        skin.toolId = QStringLiteral("leaf");
+        skin.skinId = id;
+        skin.rootPath = privateLeafSkinRoot(id);
+        QFile file(QDir(skin.rootPath).filePath(QStringLiteral("skin.json")));
+        if (file.open(QIODevice::ReadOnly)) {
+            const QJsonDocument doc = QJsonDocument::fromJson(file.readAll());
+            if (doc.isObject()) skin.meta = doc.object();
+        }
+        skin.name = skin.meta.value(QStringLiteral("name")).toString(id);
+        return skin;
+    }
     return liveaio::resources::ToolSkin::load(
         g_appRoot, QStringLiteral("leaf"),
         id.isEmpty() ? QStringLiteral("default") : id);
+}
+
+static QVector<liveaio::resources::SkinEntry> listLeafSkins() {
+    auto skins = liveaio::resources::listSkins(g_appRoot, QStringLiteral("leaf"));
+    for (const QString& id : {QStringLiteral("nemuru1"), QStringLiteral("nemuru2")}) {
+        QFile file(QDir(privateLeafSkinRoot(id)).filePath(QStringLiteral("skin.json")));
+        if (!file.open(QIODevice::ReadOnly)) continue;
+        const QJsonDocument doc = QJsonDocument::fromJson(file.readAll());
+        if (!doc.isObject()) continue;
+        const QString name = doc.object().value(QStringLiteral("name")).toString(id);
+        skins.append(liveaio::resources::SkinEntry{id, name});
+    }
+    return skins;
 }
 
 static const LeafSkinParams& leafParams();
@@ -359,6 +421,21 @@ static void drawCenteredHalo(QPainter& p, const QRectF& dst, const QPixmap& halo
     p.restore();
 }
 
+static QPixmap makeEmojiPixmap(const QString& emoji, int side) {
+    side = std::max(32, side);
+    QImage image(side, side, QImage::Format_ARGB32_Premultiplied);
+    image.fill(Qt::transparent);
+    QPainter p(&image);
+    p.setRenderHint(QPainter::Antialiasing, true);
+    p.setRenderHint(QPainter::TextAntialiasing, true);
+    QFont font(QStringLiteral("Segoe UI Emoji"));
+    font.setPixelSize(static_cast<int>(std::lround(side * 0.78)));
+    p.setFont(font);
+    p.drawText(image.rect(), Qt::AlignCenter, emoji);
+    p.end();
+    return cropOpaque(QPixmap::fromImage(image));
+}
+
 struct LeafSharedAssets {
     LeafSkinParams params;
     QPixmap leafPm;
@@ -400,7 +477,13 @@ struct LeafSharedAssets {
 
     void load() {
         params = LeafSkinParams::fromToolSkin(activeLeafSkin());
-        leafPm = QPixmap(assetPath(params.leafFile, kLegacyLeafImage));
+        if (params.leafRender == QLatin1String("emoji") && !params.leafEmoji.isEmpty()) {
+            const int side =
+                std::max(64, static_cast<int>(std::lround(cmToPxF(params.leafSideCm) * 8.0)));
+            leafPm = makeEmojiPixmap(params.leafEmoji, side);
+        } else {
+            leafPm = QPixmap(assetPath(params.leafFile, kLegacyLeafImage));
+        }
         trashPm = QPixmap(assetPath(params.trashFile, kLegacyTrashImage));
         trashOpenPm = QPixmap(assetPath(params.trashOpenFile, kLegacyTrashOpenImage));
         if (leafPm.isNull()) {
@@ -1525,13 +1608,24 @@ private:
 
     QRectF trashGrabRect() const {
         QRectF r = trashDrawRect();
-        if (lidOpen_ < 0.45) r.setTop(r.top() + r.height() * 0.28);
+        if (lidOpen_ < 0.45) {
+            r.setTop(r.top() + r.height() * leafParams().trashGrabTopFrac);
+        }
         return r;
     }
 
     QRectF trashHitRect() const {
+        const QRectF draw = trashDrawRect();
+        const auto& params = leafParams();
+        const qreal topFrac =
+            lidOpen_ < 0.45 ? params.trashHitTopFrac : params.trashHitTopOpenFrac;
+        QRectF r(QPointF(draw.left() + draw.width() * params.trashHitLeftFrac,
+                         draw.top() + draw.height() * topFrac),
+                 QPointF(draw.left() + draw.width() * params.trashHitRightFrac,
+                         draw.top() + draw.height() * params.trashHitBottomFrac));
+        r = r.normalized();
         const qreal pad = cmToPxF(leafParams().trashHitPadCm);
-        return trashGrabRect().adjusted(-pad, -pad, pad, pad);
+        return r.adjusted(-pad, -pad, pad, pad);
     }
 
     QRectF trashNearRect() const {
@@ -1973,25 +2067,41 @@ private:
         *b = L.pos + axis * softHalf(leafScale_);
     }
 
-    struct Octagon {
+    struct RigidPolygon {
+        int count = 0;
         QPointF v[8];
     };
 
-    Octagon rigidOctagon(const LeafBody& L) const {
+    RigidPolygon rigidPolygon(const LeafBody& L) const {
         const qreal hx = rigidHalfLength(leafScale_);
         const qreal hy = rigidHalfWidth(leafScale_);
-        const qreal bevel = std::min(rigidBevel(leafScale_), hy * 0.85);
-        const QPointF local[8] = {
-            {-hx + bevel, -hy}, {hx - bevel, -hy},
-            {hx, -hy + bevel},  {hx, hy - bevel},
-            {hx - bevel, hy},   {-hx + bevel, hy},
-            {-hx, hy - bevel},  {-hx, -hy + bevel},
-        };
+        QPointF local[8];
+        int count = 8;
+        if (leafParams().rigidShape == LeafSkinParams::RigidShape::Hexagon) {
+            // 💩 的轮廓：顶部略窄、腰部最宽、底部收一点，共六边。
+            count = 6;
+            local[0] = QPointF(-hx * 0.36, -hy);
+            local[1] = QPointF(hx * 0.36, -hy);
+            local[2] = QPointF(hx, -hy * 0.05);
+            local[3] = QPointF(hx * 0.66, hy);
+            local[4] = QPointF(-hx * 0.66, hy);
+            local[5] = QPointF(-hx, -hy * 0.05);
+        } else {
+            const qreal bevel = std::min(rigidBevel(leafScale_), hy * 0.85);
+            const QPointF oct[8] = {
+                {-hx + bevel, -hy}, {hx - bevel, -hy},
+                {hx, -hy + bevel},  {hx, hy - bevel},
+                {hx - bevel, hy},   {-hx + bevel, hy},
+                {-hx, hy - bevel},  {-hx, -hy + bevel},
+            };
+            std::copy(std::begin(oct), std::end(oct), std::begin(local));
+        }
         const qreal ang = worldAngle(L);
         const qreal c = std::cos(ang);
         const qreal s = std::sin(ang);
-        Octagon out;
-        for (int i = 0; i < 8; ++i) {
+        RigidPolygon out;
+        out.count = count;
+        for (int i = 0; i < count; ++i) {
             out.v[i] = L.pos + QPointF(local[i].x() * c - local[i].y() * s,
                                       local[i].x() * s + local[i].y() * c);
         }
@@ -1999,10 +2109,11 @@ private:
     }
 
     void rigidExtents(const LeafBody& L, qreal* extX, qreal* extY) const {
-        const Octagon poly = rigidOctagon(L);
+        const RigidPolygon poly = rigidPolygon(L);
         *extX = 0.0;
         *extY = 0.0;
-        for (const QPointF& p : poly.v) {
+        for (int i = 0; i < poly.count; ++i) {
+            const QPointF& p = poly.v[i];
             *extX = std::max(*extX, std::abs(p.x() - L.pos.x()));
             *extY = std::max(*extY, std::abs(p.y() - L.pos.y()));
         }
@@ -2016,14 +2127,14 @@ private:
             return false;
         }
 
-        const Octagon a = rigidOctagon(A);
-        const Octagon b = rigidOctagon(B);
+        const RigidPolygon a = rigidPolygon(A);
+        const RigidPolygon b = rigidPolygon(B);
         qreal best = 1.0e30;
         QPointF bestAxis;
-        auto testAxes = [&](const Octagon& source) {
-            // 对边平行，每个八边形只需测试前四条边的法线。
-            for (int edge = 0; edge < 4; ++edge) {
-                const QPointF d = source.v[(edge + 1) % 8] - source.v[edge];
+        auto testAxes = [&](const RigidPolygon& source) {
+            for (int edge = 0; edge < source.count; ++edge) {
+                const QPointF d =
+                    source.v[(edge + 1) % source.count] - source.v[edge];
                 const qreal len = std::hypot(d.x(), d.y());
                 if (len <= 1e-6) continue;
                 const QPointF axis(-d.y() / len, d.x() / len);
@@ -2031,11 +2142,13 @@ private:
                 qreal maxA = minA;
                 qreal minB = QPointF::dotProduct(b.v[0], axis);
                 qreal maxB = minB;
-                for (int i = 1; i < 8; ++i) {
+                for (int i = 1; i < a.count; ++i) {
                     const qreal pa = QPointF::dotProduct(a.v[i], axis);
-                    const qreal pb = QPointF::dotProduct(b.v[i], axis);
                     minA = std::min(minA, pa);
                     maxA = std::max(maxA, pa);
+                }
+                for (int i = 1; i < b.count; ++i) {
+                    const qreal pb = QPointF::dotProduct(b.v[i], axis);
                     minB = std::min(minB, pb);
                     maxB = std::max(maxB, pb);
                 }
@@ -3218,7 +3331,7 @@ private:
         themeRow->addStretch();
         skinCombo_ = new liveaio::util::ThemedComboBox(themeCard);
         QStringList skinNames;
-        const auto skins = liveaio::resources::listSkins(g_appRoot, QStringLiteral("leaf"));
+        const auto skins = listLeafSkins();
         for (const auto& entry : skins) {
             skinNameToId_.insert(entry.name, entry.id);
             skinNames << entry.name;

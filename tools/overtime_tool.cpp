@@ -2425,7 +2425,6 @@ private:
         const bool isOpen = OverlayHostService::instance().isToolActive(OverlayToolId::Overtime);
         if (simWidget_) simWidget_->setPushEnabled(isOpen);
         if (!openBtn_) return;
-        const auto& C = theme();
         openBtn_->setText(isOpen ? QStringLiteral("关闭加班机") : QStringLiteral("打开加班机"));
         openBtn_->setVariant(isOpen ? liveaio::util::ControlVariant::Danger
                                     : liveaio::util::ControlVariant::Outlined);
