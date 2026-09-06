@@ -440,12 +440,14 @@ public:
 
         frame_ = new FrameBoxButton(leftBox_);
         QObject::connect(frame_, &QPushButton::clicked, this, [this]() {
+            if (!frame_->interactionEnabled()) return;
             if (onFrameClicked_) onFrameClicked_();
         });
         leftLay->addWidget(frame_);
 
         lock_ = new LockBoxButton(leftBox_);
         QObject::connect(lock_, &QPushButton::clicked, this, [this]() {
+            if (!lock_->interactionEnabled()) return;
             if (onLockClicked_) onLockClicked_();
         });
         leftLay->addWidget(lock_);
@@ -503,6 +505,8 @@ public:
             lock_->setAccentProgress(borderShown ? 1.0 : 0.0);
             pin_->setAccentProgress(borderShown ? 1.0 : 0.0);
         }
+        onChromeVisualSync(borderShown, locked, transitioning);
+        onChromeAccentProgress(borderShown ? 1.0 : 0.0);
         refreshControlVisibility();
     }
 
@@ -510,9 +514,34 @@ public:
         pin_->setPinned(pinned, animate);
     }
 
+    // 编辑护脸区等：强制保持边框「显示」，禁止收起。
+    void setFrameForced(bool on) {
+        if (frameForced_ == on) return;
+        frameForced_ = on;
+        if (frameForced_ && !borderShown_) {
+            borderShown_ = true;
+            frame_->setProgress(1.0, false);
+            lock_->setAccentProgress(1.0);
+            pin_->setAccentProgress(1.0);
+        }
+        // 编辑护脸时禁用隐藏/锁定钮；退出后恢复。
+        setFrameLockInteractionEnabled(!frameForced_);
+        onChromeVisualSync(borderShown_ || frameForced_, locked_, transitioning_);
+        onChromeAccentProgress((borderShown_ || frameForced_) ? 1.0 : 0.0);
+        refreshControlVisibility();
+    }
+    bool frameForced() const { return frameForced_; }
+
+    // 编辑态等：灰掉并屏蔽 frame/lock 点击。
+    void setFrameLockInteractionEnabled(bool on) {
+        if (frame_) frame_->setInteractionEnabled(on);
+        if (lock_) lock_->setInteractionEnabled(on);
+    }
+
     bool resizeFrozen() const { return freeze_->frozen(); }
     QWidget* content() const { return content_; }
     qreal radius() const { return r_; }
+    QMainWindow* hostWindow() const { return win_; }
 
     // 空白处点穿到后面的窗口；只拦边框/按钮，以及子类声明的内容命中。
     bool wantsMouseAt(const QPoint& local) const {
@@ -523,10 +552,11 @@ public:
         if (leftBox_ && leftBox_->isVisible() && leftBox_->geometry().contains(local)) {
             return true;
         }
+        if (extraChromeContains(local)) return true;
         const QPoint center(static_cast<int>(centerX()), static_cast<int>(centerY()));
         if (QLineF(local, center).length() <= proximityRadiusPx()) return true;
         if (!locked_) {
-            if (borderShown_ && local.y() >= 0 && local.y() < kTopbarH) return true;
+            if ((borderShown_ || frameForced_) && local.y() >= 0 && local.y() < kTopbarH) return true;
             if (edgeAt(local) != Edge::None) return true;
             if (minBtnRect().contains(local) || closeBtnRect().contains(local)) return true;
         }
@@ -564,6 +594,7 @@ public:
         if (leftBox_ && leftBox_->isVisible() && leftBox_->geometry().contains(local)) {
             return true;
         }
+        if (extraChromeContains(local)) return true;
         if (!locked_ && borderActionsEnabled()) {
             if (minBtnRect().contains(local) || closeBtnRect().contains(local)) return true;
         }
@@ -593,6 +624,7 @@ public:
         }
         lock_->setAccentProgress(progress);
         pin_->setAccentProgress(progress);
+        onChromeAccentProgress(progress);
         updateLeftBoxMask();
         update();
     }
@@ -618,10 +650,102 @@ protected:
     virtual void onResizeResume() {}
     // 叶子等需要缩放同帧更新碰撞/绘制时返回 true，跳过节流。
     virtual bool wantsSyncResizeLayout() const { return false; }
+    // 编辑护脸等场景：缩放拖拽时仍开抗锯齿，半透明暗化/阴影跟框同帧高质量。
+    virtual bool wantsHighQualityResizePaint() const { return false; }
     virtual bool contentWantsMouse(const QPoint&) const { return false; }
 
-    QMainWindow* hostWindow() const { return win_; }
+    // 子类（捡叶子）在三钮右侧挂额外 chrome。
+    virtual int extraChromeWidth() const { return 0; }
+    virtual void layoutExtraChrome(const QRect& /*leftGeo*/) {}
+    virtual bool extraChromeContains(const QPoint& /*local*/) const { return false; }
+    virtual void setExtraChromeVisible(bool /*vis*/) {}
+    // 边框展开进度（0=隐藏光晕悬停，1=展开矩形悬停），额外 chrome 跟 lock/pin 同步。
+    virtual void onChromeAccentProgress(qreal /*progress*/) {}
+    virtual void onChromeVisualSync(bool /*borderShown*/, bool /*locked*/,
+                                    bool /*transitioning*/) {}
+
     bool resizing() const { return resizing_; }
+
+public:
+    // 供叶子等额外 chrome 方钮复用，与 frame/lock/pin 同绘制基线。
+    static void startHoverAnimation(QVariantAnimation* anim, qreal from, qreal to) {
+        anim->stop();
+        anim->setStartValue(from);
+        anim->setEndValue(to);
+        anim->start();
+    }
+
+    static void polishChromeButton(QPushButton* btn) {
+        liveaio::util::polishFlatChromeButton(btn);
+    }
+
+    static void paintChromeHover(QPainter& p, const QRect& rect,
+                                 qreal hover, qreal expanded) {
+        const qreal h = std::clamp(hover, 0.0, 1.0);
+        const qreal e = std::clamp(expanded, 0.0, 1.0);
+        if (h <= 0.001) return;
+
+        if (e > 0.001) {
+            QColor fill(theme().btnHover);
+            fill.setAlphaF(fill.alphaF() * h * e);
+            p.fillRect(rect, fill);
+        }
+        const qreal glowAmount = h * (1.0 - e);
+        if (glowAmount <= 0.001) return;
+
+        QColor center(196, 196, 196, static_cast<int>(120 * glowAmount));
+        QColor middle(196, 196, 196, static_cast<int>(52 * glowAmount));
+        QColor edge(196, 196, 196, 0);
+        QRadialGradient glow(rect.center(), std::min(rect.width(), rect.height()) * 0.52);
+        glow.setColorAt(0.0, center);
+        glow.setColorAt(0.48, middle);
+        glow.setColorAt(1.0, edge);
+        p.fillRect(rect, glow);
+    }
+
+    static QPen crispIconPen(const QColor& color) {
+        QPen pen(color, kIconStroke, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin);
+        pen.setCosmetic(false);
+        return pen;
+    }
+
+    static void beginCrispIconPaint(QPainter& p, const QWidget* w) {
+        p.setRenderHint(QPainter::Antialiasing, true);
+        p.setRenderHint(QPainter::TextAntialiasing, false);
+        p.setRenderHint(QPainter::SmoothPixmapTransform, false);
+        const qreal padX = (w->width() - kIconDraw) / 2.0;
+        const qreal padY = (w->height() - kIconDraw) / 2.0;
+        p.translate(padX, padY);
+    }
+
+    static QRectF iconBox() {
+        return QRectF(kIconBoxInset, kIconBoxInset,
+                      kIconDraw - kIconBoxInset * 2.0,
+                      kIconDraw - kIconBoxInset * 2.0);
+    }
+
+    static QColor accentIconColor(qreal accent) {
+        const QColor expanded(theme().text);
+        const QColor collapsed(148, 148, 148);
+        const qreal t = std::clamp(accent, 0.0, 1.0);
+        return QColor(
+            static_cast<int>(collapsed.red() + (expanded.red() - collapsed.red()) * t),
+            static_cast<int>(collapsed.green() + (expanded.green() - collapsed.green()) * t),
+            static_cast<int>(collapsed.blue() + (expanded.blue() - collapsed.blue()) * t));
+    }
+
+    static void drawCrispRoundBox(QPainter& p, const QRectF& box, qreal radius,
+                                  const QColor& color, qreal fillStrength = 0.0) {
+        p.setPen(crispIconPen(color));
+        if (fillStrength > 0.001) {
+            QColor fill = color;
+            fill.setAlphaF(std::clamp(fillStrength, 0.0, 1.0));
+            p.setBrush(fill);
+        } else {
+            p.setBrush(Qt::NoBrush);
+        }
+        p.drawRoundedRect(box, radius, radius);
+    }
 
     void paintEvent(QPaintEvent*) override {
         if (r_ <= 0) return;
@@ -631,25 +755,43 @@ protected:
         const qreal cy = centerY();
 
         QPainter p(this);
-        // 拖拽缩放时关抗锯齿，降低半透明窗圆形 clip 的重绘成本。
-        p.setRenderHint(QPainter::Antialiasing, !resizing_);
+        // 默认缩放时关 AA 降本；护脸编辑等要求同帧高质量时保持开启。
+        const bool hq = !resizing_ || wantsHighQualityResizePaint();
+        p.setRenderHint(QPainter::Antialiasing, hq);
         QPainterPath clip;
         clip.addEllipse(cx - r_, cy - r_, r_ * 2, r_ * 2);
         p.setClipPath(clip);
 
         // 阴影先画，边框后画：最内圈与边框重叠但不会盖掉细边框。
+        // 高质量模式下用抗锯齿圆角环，避免拖拽时阴影锯齿与暗化不同步。
         {
             const bool aa = p.renderHints().testFlag(QPainter::Antialiasing);
-            p.setRenderHint(QPainter::Antialiasing, false);
             p.setBrush(Qt::NoBrush);
-            for (int i = 0; i <= kShadowW; ++i) {
-                const qreal t = static_cast<qreal>(i + 1) / (kShadowW + 1);
-                const int alpha = static_cast<int>(std::lround(kShadowAlpha * t * t));
-                if (alpha <= 0) continue;
-                QPen shadowPen(QColor(0, 0, 0, alpha), 1);
-                shadowPen.setCapStyle(Qt::FlatCap);
-                p.setPen(shadowPen);
-                p.drawRect(QRect(i, i, width() - 1 - i * 2, height() - 1 - i * 2));
+            if (hq) {
+                p.setRenderHint(QPainter::Antialiasing, true);
+                for (int i = 0; i <= kShadowW; ++i) {
+                    const qreal t = static_cast<qreal>(i + 1) / (kShadowW + 1);
+                    const int alpha = static_cast<int>(std::lround(kShadowAlpha * t * t));
+                    if (alpha <= 0) continue;
+                    QPen shadowPen(QColor(0, 0, 0, alpha), 1.25);
+                    shadowPen.setCapStyle(Qt::RoundCap);
+                    shadowPen.setJoinStyle(Qt::RoundJoin);
+                    p.setPen(shadowPen);
+                    const QRectF r(i + 0.5, i + 0.5,
+                                   width() - 1.0 - i * 2, height() - 1.0 - i * 2);
+                    p.drawRoundedRect(r, 1.0, 1.0);
+                }
+            } else {
+                p.setRenderHint(QPainter::Antialiasing, false);
+                for (int i = 0; i <= kShadowW; ++i) {
+                    const qreal t = static_cast<qreal>(i + 1) / (kShadowW + 1);
+                    const int alpha = static_cast<int>(std::lround(kShadowAlpha * t * t));
+                    if (alpha <= 0) continue;
+                    QPen shadowPen(QColor(0, 0, 0, alpha), 1);
+                    shadowPen.setCapStyle(Qt::FlatCap);
+                    p.setPen(shadowPen);
+                    p.drawRect(QRect(i, i, width() - 1 - i * 2, height() - 1 - i * 2));
+                }
             }
             p.setRenderHint(QPainter::Antialiasing, aa);
         }
@@ -677,7 +819,9 @@ protected:
         QWidget::resizeEvent(event);
         const int leftTotal = kCircleOff + kBtnW * 3;
         // 顶栏内容整体让出外圈阴影。
-        leftBox_->setGeometry(kShadowW, kShadowW, leftTotal, kTopbarH - kShadowW);
+        const QRect leftGeo(kShadowW, kShadowW, leftTotal, kTopbarH - kShadowW);
+        leftBox_->setGeometry(leftGeo);
+        layoutExtraChrome(leftGeo);
         content_->setGeometry(0, kTopbarH, width(), height() - kTopbarH);
         // 边框已展开时半径跟随窗口，否则放大后圆形 clip 会裁掉新边框。
         if (freeze_->frozen() && r_ > kTopbarH * 0.5) r_ = maxRadius();
@@ -769,87 +913,6 @@ protected:
 
 private:
     enum class BorderAction { None, Minimize, Close };
-
-    static QPen crispIconPen(const QColor& color) {
-        QPen pen(color, kIconStroke, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin);
-        pen.setCosmetic(false);
-        return pen;
-    }
-
-    static void beginCrispIconPaint(QPainter& p, const QWidget* w) {
-        p.setRenderHint(QPainter::Antialiasing, true);
-        p.setRenderHint(QPainter::TextAntialiasing, false);
-        p.setRenderHint(QPainter::SmoothPixmapTransform, false);
-        const qreal padX = (w->width() - kIconDraw) / 2.0;
-        const qreal padY = (w->height() - kIconDraw) / 2.0;
-        p.translate(padX, padY);
-    }
-
-    static QRectF iconBox() {
-        return QRectF(kIconBoxInset, kIconBoxInset,
-                      kIconDraw - kIconBoxInset * 2.0,
-                      kIconDraw - kIconBoxInset * 2.0);
-    }
-
-    static QColor accentIconColor(qreal accent) {
-        const QColor expanded(theme().text);
-        const QColor collapsed(148, 148, 148);
-        const qreal t = std::clamp(accent, 0.0, 1.0);
-        return QColor(
-            static_cast<int>(collapsed.red() + (expanded.red() - collapsed.red()) * t),
-            static_cast<int>(collapsed.green() + (expanded.green() - collapsed.green()) * t),
-            static_cast<int>(collapsed.blue() + (expanded.blue() - collapsed.blue()) * t));
-    }
-
-    static void drawCrispRoundBox(QPainter& p, const QRectF& box, qreal radius,
-                                  const QColor& color, qreal fillStrength = 0.0) {
-        p.setPen(crispIconPen(color));
-        if (fillStrength > 0.001) {
-            QColor fill = color;
-            fill.setAlphaF(std::clamp(fillStrength, 0.0, 1.0));
-            p.setBrush(fill);
-        } else {
-            p.setBrush(Qt::NoBrush);
-        }
-        p.drawRoundedRect(box, radius, radius);
-    }
-
-    static void startHoverAnimation(QVariantAnimation* anim, qreal from, qreal to) {
-        anim->stop();
-        anim->setStartValue(from);
-        anim->setEndValue(to);
-        anim->start();
-    }
-
-    static void polishChromeButton(QPushButton* btn) {
-        liveaio::util::polishFlatChromeButton(btn);
-    }
-
-    // 展开框时沿用矩形 hover；隐藏框时只在图标周围画无硬边的径向光晕。
-    static void paintChromeHover(QPainter& p, const QRect& rect,
-                                 qreal hover, qreal expanded) {
-        const qreal h = std::clamp(hover, 0.0, 1.0);
-        const qreal e = std::clamp(expanded, 0.0, 1.0);
-        if (h <= 0.001) return;
-
-        if (e > 0.001) {
-            QColor fill(theme().btnHover);
-            fill.setAlphaF(fill.alphaF() * h * e);
-            p.fillRect(rect, fill);
-        }
-        const qreal glowAmount = h * (1.0 - e);
-        if (glowAmount <= 0.001) return;
-
-        // 隐藏态用淡灰径向光晕，避免纯白过跳、也避免主题强调色块。
-        QColor center(196, 196, 196, static_cast<int>(120 * glowAmount));
-        QColor middle(196, 196, 196, static_cast<int>(52 * glowAmount));
-        QColor edge(196, 196, 196, 0);
-        QRadialGradient glow(rect.center(), std::min(rect.width(), rect.height()) * 0.52);
-        glow.setColorAt(0.0, center);
-        glow.setColorAt(0.48, middle);
-        glow.setColorAt(1.0, edge);
-        p.fillRect(rect, glow);
-    }
 
     QRect minBtnRect() const {
         return QRect(width() - kShadowW - kBtnW * 2, kShadowW, kBtnW, kTopbarH - kShadowW);
@@ -957,8 +1020,22 @@ private:
             shapeAnim_.start();
         }
 
+        void setInteractionEnabled(bool on) {
+            if (interactionEnabled_ == on) return;
+            interactionEnabled_ = on;
+            setCursor(on ? Qt::PointingHandCursor : Qt::ArrowCursor);
+            if (!on) startHoverAnimation(hoverAnim_, hoverT_, 0.0);
+            update();
+        }
+        bool interactionEnabled() const { return interactionEnabled_; }
+
     protected:
         bool event(QEvent* e) override {
+            if (!interactionEnabled_ && (e->type() == QEvent::Enter || e->type() == QEvent::Leave
+                                         || e->type() == QEvent::MouseButtonPress
+                                         || e->type() == QEvent::MouseButtonRelease)) {
+                return true;
+            }
             if (e->type() == QEvent::Enter) {
                 startHoverAnimation(hoverAnim_, hoverT_, 1.0);
             } else if (e->type() == QEvent::Leave) {
@@ -972,11 +1049,16 @@ private:
             // 半透明分层窗按像素 alpha 命中：隐藏态只描两角线时，未绘制区域会点穿。
             // 先铺 1/255 不透明底，保证整块正方形（含未渲染部分）可点可悬停。
             p.fillRect(rect(), QColor(0, 0, 0, 1));
-            paintChromeHover(p, rect(), hoverT_, shapeT_);
+            if (interactionEnabled_) {
+                paintChromeHover(p, rect(), hoverT_, shapeT_);
+            }
 
             beginCrispIconPaint(p, this);
             // shapeT_=1 完整圆角方；shapeT_=0 同方框的右上/左下角短边（保持圆角，不裁剪以免闪）
-            const QColor color = accentIconColor(shapeT_);
+            QColor color = accentIconColor(shapeT_);
+            if (!interactionEnabled_) {
+                color = QColor(148, 148, 148, 120);
+            }
             const QRectF box = iconBox();
             const qreal hideT = 1.0 - shapeT_;
             static constexpr qreal kRemain = 0.382;
@@ -1020,6 +1102,7 @@ private:
         qreal shapeT_ = 1.0;
         qreal hoverT_ = 0.0;
         bool shapeConnected_ = false;
+        bool interactionEnabled_ = true;
     };
 
     class LockBoxButton final : public QPushButton {
@@ -1061,8 +1144,22 @@ private:
             update();
         }
 
+        void setInteractionEnabled(bool on) {
+            if (interactionEnabled_ == on) return;
+            interactionEnabled_ = on;
+            setCursor(on ? Qt::PointingHandCursor : Qt::ArrowCursor);
+            if (!on) startHoverAnimation(hoverAnim_, hoverT_, 0.0);
+            update();
+        }
+        bool interactionEnabled() const { return interactionEnabled_; }
+
     protected:
         bool event(QEvent* e) override {
+            if (!interactionEnabled_ && (e->type() == QEvent::Enter || e->type() == QEvent::Leave
+                                         || e->type() == QEvent::MouseButtonPress
+                                         || e->type() == QEvent::MouseButtonRelease)) {
+                return true;
+            }
             if (e->type() == QEvent::Enter) {
                 startHoverAnimation(hoverAnim_, hoverT_, 1.0);
             } else if (e->type() == QEvent::Leave) {
@@ -1074,10 +1171,15 @@ private:
         void paintEvent(QPaintEvent*) override {
             QPainter p(this);
             p.setRenderHint(QPainter::Antialiasing, false);
-            paintChromeHover(p, rect(), hoverT_, accentT_);
+            if (interactionEnabled_) {
+                paintChromeHover(p, rect(), hoverT_, accentT_);
+            }
 
             beginCrispIconPaint(p, this);
-            const QColor iconColor = accentIconColor(accentT_);
+            QColor iconColor = accentIconColor(accentT_);
+            if (!interactionEnabled_) {
+                iconColor = QColor(148, 148, 148, 120);
+            }
             drawCrispRoundBox(p, iconBox(), kIconBoxRadius, iconColor, lockT_);
         }
 
@@ -1088,6 +1190,7 @@ private:
         qreal hoverT_ = 0.0;
         QVariantAnimation* lockAnim_ = nullptr;
         QVariantAnimation* hoverAnim_ = nullptr;
+        bool interactionEnabled_ = true;
     };
 
     // 置顶按钮：默认单正方形；开启后沿对角线拆成两块（左上 / 右下错位）。
@@ -1252,13 +1355,14 @@ private:
     }
 
     void refreshControlVisibility() {
-        const bool showChrome = borderShown_ || controlsNear_ || transitioning_;
+        const bool showChrome = borderShown_ || frameForced_ || controlsNear_ || transitioning_;
         const QRect dirty = leftBox_ ? leftBox_->geometry()
                                      : QRect(0, 0, kCircleOff + kBtnW * 3, kTopbarH);
         leftBox_->setVisible(showChrome);
         frame_->setVisible(showChrome);
         lock_->setVisible(showChrome);
         pin_->setVisible(showChrome);
+        setExtraChromeVisible(showChrome);
         if (showChrome) {
             leftBox_->raise();
             frame_->raise();
@@ -1268,6 +1372,10 @@ private:
         }
         // 隐藏子控件后强制父级擦除原区域，半透明窗口不会留下上一帧菜单底。
         update(dirty.adjusted(-1, -1, 1, 1));
+        if (extraChromeWidth() > 0 && leftBox_) {
+            update(QRect(leftBox_->geometry().right(), leftBox_->y(),
+                         extraChromeWidth() + 8, leftBox_->height()).adjusted(-1, -1, 1, 1));
+        }
         update(QRect(width() - kBtnW * 2, 0, kBtnW * 2, kTopbarH));
     }
 
@@ -1395,10 +1503,11 @@ private:
 
     Edge edgeAt(const QPoint& pos) const {
         // 边框隐藏/过渡/锁定时不允许缩放；左上三钮与缩放热区重叠时也不抢命中。
-        if (!borderShown_ || transitioning_ || locked_) return Edge::None;
+        if ((!borderShown_ && !frameForced_) || transitioning_ || locked_) return Edge::None;
         if (leftBox_ && leftBox_->isVisible() && leftBox_->geometry().contains(pos)) {
             return Edge::None;
         }
+        if (extraChromeContains(pos)) return Edge::None;
         if (minBtnRect().contains(pos) || closeBtnRect().contains(pos)) {
             return Edge::None;
         }
@@ -1442,6 +1551,7 @@ private:
     std::function<void()> onClose_;
     qreal r_ = 0.0;
     bool borderShown_ = true;
+    bool frameForced_ = false;
     bool locked_ = false;
     bool transitioning_ = false;
     bool controlsNear_ = false;
@@ -1494,6 +1604,8 @@ public:
     void toggleFrame() {
         if (!root_) return;
         if (locked_ && !shown_) return;
+        // 护脸编辑等强制显示时禁止收起边框。
+        if (frameForced_ && shown_) return;
         shown_ = !shown_;
         anim_->stop();
         root_->setChromeState(shown_, locked_, true);
@@ -1503,11 +1615,41 @@ public:
     }
 
     void setFrameShown(bool shown) {
-        if (shown_ == shown || (shown && locked_)) return;
+        if (shown_ == shown || (shown && locked_ && !frameForced_)) return;
+        if (!shown && frameForced_) return;
         toggleFrame();
     }
 
+    void setFrameForced(bool on) {
+        if (frameForced_ == on) return;
+        frameForced_ = on;
+        if (root_) root_->setFrameForced(on);
+        if (on) {
+            if (locked_) {
+                // 强制显示优先于锁定收起：解锁边框视觉但仍可保持 locked_ 状态？
+                // 计划：编辑态强制展开；若当前锁定则先解锁以免无法 show。
+                locked_ = false;
+                if (root_) root_->setChromeState(true, false, false);
+            }
+            if (!shown_) {
+                shown_ = true;
+                anim_->stop();
+                if (root_) {
+                    root_->setChromeState(true, locked_, true);
+                    anim_->setStartValue(animR_);
+                    anim_->setEndValue(std::max(root_->maxRadius(), 1.0));
+                    anim_->start();
+                }
+            } else if (root_) {
+                root_->setChromeState(true, locked_, false);
+            }
+        }
+    }
+    bool frameForced() const { return frameForced_; }
+
     void setLocked(bool locked) {
+        // 护脸编辑强制显示期间不允许锁定。
+        if (frameForced_ && locked) return;
         if (locked_ == locked) return;
         const bool wasLocked = locked_;
         locked_ = locked;
@@ -1723,6 +1865,7 @@ private:
     QVariantAnimation* anim_ = nullptr;
     qreal animR_ = 0.0;
     bool shown_ = true;
+    bool frameForced_ = false;
     bool locked_ = false;
     bool pinned_ = false;
     bool firstShow_ = true;

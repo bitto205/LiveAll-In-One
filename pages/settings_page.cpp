@@ -73,7 +73,7 @@ public:
         combo_ = new ThemedComboBox(themeCard.card);
         combo_->addItems(liveaio::util::themeNames());
         combo_->setCurrentText(liveaio::util::currentThemeName());
-        combo_->setFixedHeight(34);
+        combo_->setFixedHeight(kControlH);
         combo_->setMinimumWidth(160);
         combo_->setOnChange([](const QString& name) { liveaio::util::setTheme(name); });
         row->addWidget(combo_);
@@ -87,7 +87,7 @@ public:
         lbl2->setStyleSheet(QStringLiteral("background: transparent; font-size: 14px;"));
         row2->addWidget(lbl2);
         row2->addStretch();
-        trayToggle_ = new ThemedToggle(QStringLiteral("minimize_to_tray"), true, behaviorCard.card);
+        trayToggle_ = new ThemedToggle(QStringLiteral("minimize_to_tray"), false, behaviorCard.card);
         g_minimizeToTray = trayToggle_->value();
         trayToggle_->setOnToggled([](bool on) { g_minimizeToTray = on; });
         row2->addWidget(trayToggle_);
@@ -107,14 +107,14 @@ public:
                 applyThemeFromCore(values.value(QStringLiteral("theme")).toString());
             }
             if (values.contains(QStringLiteral("minimize_to_tray"))) {
-                applyTrayFromCore(values.value(QStringLiteral("minimize_to_tray")).toBool(true));
+                applyTrayFromCore(values.value(QStringLiteral("minimize_to_tray")).toBool());
             }
         } else if (op == QStringLiteral("config.ok")) {
             const QString key = packet.value(QStringLiteral("key")).toString();
             if (key == QStringLiteral("theme")) {
                 applyThemeFromCore(packet.value(QStringLiteral("value")).toString());
             } else if (key == QStringLiteral("minimize_to_tray")) {
-                applyTrayFromCore(packet.value(QStringLiteral("value")).toBool(true));
+                applyTrayFromCore(packet.value(QStringLiteral("value")).toBool());
             }
         }
     }
@@ -164,7 +164,7 @@ public:
         card.body->addWidget(status_);
 
         btn_ = new QPushButton(QStringLiteral("重新登录"), card.card);
-        btn_->setFixedHeight(34);
+        btn_->setFixedHeight(kControlH);
         btn_->setCursor(Qt::PointingHandCursor);
         QObject::connect(btn_, &QPushButton::clicked, this, [this]() { startLogin(); });
         card.body->addWidget(btn_);

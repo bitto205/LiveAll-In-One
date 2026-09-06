@@ -72,11 +72,11 @@ public:
         if (op == QStringLiteral("config.value")) {
             const QJsonObject values = packet.value(QStringLiteral("values")).toObject();
             if (values.contains(QStringLiteral("minimize_to_tray"))) {
-                g_minimizeToTray = values.value(QStringLiteral("minimize_to_tray")).toBool(true);
+                g_minimizeToTray = values.value(QStringLiteral("minimize_to_tray")).toBool();
             }
         } else if (op == QStringLiteral("config.ok")) {
             if (packet.value(QStringLiteral("key")).toString() == QStringLiteral("minimize_to_tray")) {
-                g_minimizeToTray = packet.value(QStringLiteral("value")).toBool(true);
+                g_minimizeToTray = packet.value(QStringLiteral("value")).toBool();
             }
         }
         for (auto* page : pages_) {
@@ -102,6 +102,8 @@ protected:
     void closeEvent(QCloseEvent* event) override {
         // 托盘由 Go core 托管。收进托盘时只隐藏窗口：QApplication 必须活到进程结束，
         // 否则托盘再次显示界面就得重建 QApplication，Qt 不支持。
+        // 以 config.json 为准，避免内存标志与设置页不同步时误走「只隐藏」。
+        g_minimizeToTray = minimizeToTrayEnabled();
         if (g_minimizeToTray) {
             event->ignore();
             hide();

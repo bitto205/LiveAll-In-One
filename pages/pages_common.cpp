@@ -44,11 +44,14 @@
 namespace liveaio::pages {
 
 using liveaio::util::NavItem;
+using liveaio::util::OutlinedButton;
 using liveaio::util::Sidebar;
 using liveaio::util::StepCard;
 using liveaio::util::ThemedComboBox;
 using liveaio::util::ThemedToggle;
 using liveaio::util::TitleBar;
+using liveaio::util::applyOutlinedButton;
+using liveaio::util::kControlH;
 using liveaio::util::kWindowCornerRadius;
 using liveaio::util::kWindowShadowMargin;
 using liveaio::util::labelRow;
@@ -66,12 +69,15 @@ using liveaio::util::scrollPage;
 using liveaio::util::shellQss;
 using liveaio::util::stepCard;
 using liveaio::util::theme;
+using liveaio::util::wireHoverBatch;
+using liveaio::util::wireHoverProxy;
 
 static constexpr const char* kCoreHost = "127.0.0.1";
 static constexpr quint16 kCorePort = 19877;
 
 static QString g_appRoot;
-static bool g_minimizeToTray = true;
+// 仅作缓存；关窗前仍应读 config，避免启动默认 true 与设置页不同步。
+static bool g_minimizeToTray = false;
 static std::function<void(const QString&, const QVariant&)> g_configWriter;
 
 static QVariantMap readConfigMap() {
@@ -87,6 +93,14 @@ static QVariant configValue(const QString& key, const QVariant& fallback = {}) {
     const QVariantMap map = readConfigMap();
     const auto it = map.constFind(key);
     return it == map.constEnd() ? fallback : it.value();
+}
+
+// 关窗决策以磁盘配置为准，其次才用内存缓存（设置页划钮会写缓存）。
+static bool minimizeToTrayEnabled() {
+    const QVariantMap map = readConfigMap();
+    const auto it = map.constFind(QStringLiteral("minimize_to_tray"));
+    if (it != map.constEnd()) return it.value().toBool();
+    return g_minimizeToTray;
 }
 
 class CoreClient final : public QObject {

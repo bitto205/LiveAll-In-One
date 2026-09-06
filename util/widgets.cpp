@@ -45,6 +45,7 @@
 #include <QtGlobal>
 
 #include <algorithm>
+#include <cmath>
 #include <functional>
 #include <memory>
 
@@ -225,6 +226,13 @@ inline void configSet(const QString& key, const QVariant& value) {
 // 又会把固定高度外壳（如下拉框）的下边框顶出去裁掉。
 // 所以统一用本函数把「外形高」换算成内容高，组件要多高就是多高。
 inline constexpr int kControlH = 34;
+// 行内紧凑控件（开关钮、小数字框）唯一的第二档高度，别再另立新值。
+inline constexpr int kControlHSmall = 28;
+// 描边宽度必须是整数像素：1.5px 会被 Qt 按上取整/下取整拆成上 1px、下 2px，
+// 也就是「上边薄下边厚」的根因。所有厚描边控件统一走这个常量。
+inline constexpr int kControlBorderW = 2;
+inline constexpr int kControlRadius = 8;
+inline constexpr int kControlPadX = 16;
 
 inline QString qssBoxHeight(int outerH, qreal borderPx, int vPaddingPx = 0) {
     const int chrome = static_cast<int>(borderPx * 2.0 + 0.5) + vPaddingPx * 2;
@@ -232,18 +240,41 @@ inline QString qssBoxHeight(int outerH, qreal borderPx, int vPaddingPx = 0) {
     return QStringLiteral("height: %1px; min-height: %1px; max-height: %1px;").arg(content);
 }
 
-inline QString qssOutlined(int h = 36) {
+inline QString qssOutlined(int h = kControlH, int padX = kControlPadX) {
     const ThemePalette& C = theme();
     return QStringLiteral(
-        "QPushButton { background: %1; color: %2; border: 1.5px solid %2;"
-        " border-radius: 8px; font-size: 13px; font-weight: 600;"
-        " %3 padding: 0 16px; }"
-        "QPushButton:hover { background: %4; border: 1.5px solid %2; }"
-    ).arg(C.card, C.activeLine, qssBoxHeight(h, 1.5), C.hover);
+        "QPushButton { background: %1; color: %2; border: %5px solid %2;"
+        " border-radius: %6px; font-size: 13px; font-weight: 600;"
+        " %3 padding: 0 %7px; }"
+        "QPushButton:hover { background: %4; border: %5px solid %2; }"
+    ).arg(C.card, C.activeLine, qssBoxHeight(h, kControlBorderW), C.hover)
+        .arg(kControlBorderW).arg(kControlRadius).arg(padX);
+}
+
+// 次要操作（删除规则、手动掉落等）：灰边灰字，悬停提亮。
+inline QString qssNeutral(int h = kControlH, int padX = kControlPadX) {
+    const ThemePalette& C = theme();
+    return QStringLiteral(
+        "QPushButton { background: %1; color: %2; border: %6px solid %3;"
+        " border-radius: %7px; font-size: 13px; font-weight: 600;"
+        " %4 padding: 0 %8px; }"
+        "QPushButton:hover { background: %5; color: %9; border: %6px solid %3; }"
+    ).arg(C.card, C.textMuted, C.border, qssBoxHeight(h, kControlBorderW), C.hover)
+        .arg(kControlBorderW).arg(kControlRadius).arg(padX).arg(C.text);
+}
+
+// 描边钮的不可用态：保留同样的外形高与描边宽，只是全部降为边框灰。
+inline QString qssOutlinedDim(int h = kControlH, int padX = kControlPadX) {
+    const ThemePalette& C = theme();
+    return QStringLiteral(
+        "QPushButton { background: %1; color: %2; border: %4px solid %2;"
+        " border-radius: %5px; font-size: 13px; font-weight: 600; %3 padding: 0 %6px; }"
+    ).arg(C.card, C.border, qssBoxHeight(h, kControlBorderW))
+        .arg(kControlBorderW).arg(kControlRadius).arg(padX);
 }
 
 // 与 qssLineEdit 同高同边框：并排输入框+按钮时用这个。
-inline QString qssOutlinedBesideEdit(int h = 36) {
+inline QString qssOutlinedBesideEdit(int h = kControlH) {
     const ThemePalette& C = theme();
     return QStringLiteral(
         "QPushButton { background: %1; color: %2; border: 1px solid %2;"
@@ -253,30 +284,37 @@ inline QString qssOutlinedBesideEdit(int h = 36) {
     ).arg(C.card, C.activeLine, qssBoxHeight(h, 1.0), C.hover);
 }
 
-inline QString qssDisabled(int h = 36) {
+// 填充类按钮同样留出与描边按钮相同的外形高：无描边时用透明描边占位，
+// 这样一排里描边钮与填充钮的外形高、圆角完全一致。
+inline QString qssDisabled(int h = kControlH, int padX = kControlPadX) {
     const ThemePalette& C = theme();
     return QStringLiteral(
-        "QPushButton { background: %1; color: %2; border: none; border-radius: 8px;"
-        " font-size: 13px; %3 padding: 0 16px; }"
-    ).arg(C.border, C.textMuted, qssBoxHeight(h, 0.0));
+        "QPushButton { background: %1; color: %2; border: %4px solid transparent;"
+        " border-radius: %5px; font-size: 13px; %3 padding: 0 %6px; }"
+    ).arg(C.border, C.textMuted, qssBoxHeight(h, kControlBorderW))
+        .arg(kControlBorderW).arg(kControlRadius).arg(padX);
 }
 
-inline QString qssSuccess(int h = 36) {
+inline QString qssSuccess(int h = kControlH, int padX = kControlPadX) {
     const ThemePalette& C = theme();
     return QStringLiteral(
-        "QPushButton { background: %1; color: #ffffff; border: none; border-radius: 8px;"
-        " font-size: 13px; font-weight: 600; %2 padding: 0 16px; }"
+        "QPushButton { background: %1; color: #ffffff; border: %4px solid transparent;"
+        " border-radius: %5px; font-size: 13px; font-weight: 600; %2 padding: 0 %6px; }"
         "QPushButton:hover { background: %3; }"
-    ).arg(C.activeLine, qssBoxHeight(h, 0.0), C.active);
+        "QPushButton:disabled { background: %7; color: %8; }"
+    ).arg(C.activeLine, qssBoxHeight(h, kControlBorderW), C.active)
+        .arg(kControlBorderW).arg(kControlRadius).arg(padX).arg(C.border, C.textMuted);
 }
 
-inline QString qssDanger(int h = 36) {
+inline QString qssDanger(int h = kControlH, int padX = kControlPadX) {
     const ThemePalette& C = theme();
     return QStringLiteral(
-        "QPushButton { background: %1; color: #ffffff; border: none; border-radius: 8px;"
-        " font-size: 13px; font-weight: 600; %2 padding: 0 16px; }"
+        "QPushButton { background: %1; color: #ffffff; border: %4px solid transparent;"
+        " border-radius: %5px; font-size: 13px; font-weight: 600; %2 padding: 0 %6px; }"
         "QPushButton:hover { background: %3; }"
-    ).arg(C.closeHover, qssBoxHeight(h, 0.0), C.active);
+        "QPushButton:disabled { background: %7; color: %8; }"
+    ).arg(C.closeHover, qssBoxHeight(h, kControlBorderW), C.active)
+        .arg(kControlBorderW).arg(kControlRadius).arg(padX).arg(C.border, C.textMuted);
 }
 
 inline QString qssBack() {
@@ -303,13 +341,13 @@ inline QString qssAccentLabel(int size = 13) {
         .arg(QString::number(size), theme().activeLine);
 }
 
-inline QString qssLineEdit() {
+inline QString qssLineEdit(int h = kControlH) {
     const ThemePalette& C = theme();
     return QStringLiteral(
         "QLineEdit { background: %1; color: %2; border: 1px solid %3; border-radius: 6px;"
         " padding: 0 10px; font-size: 13px; %5 }"
         "QLineEdit:focus { border-color: %4; }"
-    ).arg(C.card, C.text, C.border, C.activeLine, qssBoxHeight(36, 1.0));
+    ).arg(C.card, C.text, C.border, C.activeLine, qssBoxHeight(h, 1.0));
 }
 
 // 原生 QToolTip 在透明/无边框窗上易渲染成黑块，各窗 QSS 应统一带上。
@@ -341,10 +379,254 @@ inline void suppressButtonFocus(QPushButton* btn) {
     btn->setDefault(false);
 }
 
-// QSS 的 :hover 认的是 WA_UnderMouse；直接改这个属性，全仓已有的 :hover 规则都能生效，
-// 不必给每个按钮再补一份属性选择器。
+// 控件外观档位：一排控件共用同一外形高与圆角，只有配色/描边不同。
+enum class ControlVariant {
+    Outlined,  // 描边 + 强调色文字（主操作按钮）
+    Field,     // 描边 + 正文色文字（下拉框、只读展示）
+    Neutral,   // 灰描边 + 次要文字（删除、教程等次要操作）
+    Accent,    // 强调色填充
+    Danger,    // 危险色填充
+    Muted,     // 灰底不可用观感
+};
+
+// 画一圈厚度绝对均匀的描边 + 底色。
+// 为什么不能直接 drawRoundedRect + QPen：屏幕缩放 125% 时逻辑 34px 高的控件是
+// 42.5 个设备像素，上下两条边落在不同的半像素位置，覆盖率不同，看起来就是
+// 「上边比下边淡」。这里先把坐标换算到设备像素、对齐到窗口像素网格，
+// 再用「外圈填描边色 + 内圈填底色」的方式画环，环宽恒等于整数设备像素。
+inline void paintChromeBox(QPainter& p, const QWidget* w,
+                          const QColor& border, const QColor& fill,
+                          int borderPx = kControlBorderW, int radiusPx = kControlRadius) {
+    if (!w || w->width() <= 0 || w->height() <= 0) return;
+    const qreal dpr = w->devicePixelRatioF();
+    const QPointF originDev = QPointF(w->mapTo(w->window(), QPoint(0, 0))) * dpr;
+    // 往控件内部取下一条网格线：向外取会让外圈落在控件之外被裁掉，
+    // 表现就是左边/上边的描边比另外两边薄。
+    const qreal shiftX = std::ceil(originDev.x()) - originDev.x();
+    const qreal shiftY = std::ceil(originDev.y()) - originDev.y();
+    const int bwDev = std::max(1, static_cast<int>(std::lround(borderPx * dpr)));
+    const int wDev = static_cast<int>(std::floor(w->width() * dpr - shiftX));
+    const int hDev = static_cast<int>(std::floor(w->height() * dpr - shiftY));
+    if (wDev <= bwDev * 2 || hDev <= bwDev * 2) return;
+    const qreal radiusDev = radiusPx * dpr;
+
+    p.save();
+    p.setRenderHint(QPainter::Antialiasing, true);
+    p.scale(1.0 / dpr, 1.0 / dpr);   // 之后 1 个单位 = 1 个设备像素
+    p.translate(shiftX, shiftY);     // 控件原点对齐到设备像素网格（向内）
+    p.setPen(Qt::NoPen);
+    p.setBrush(border);
+    p.drawRoundedRect(QRectF(0, 0, wDev, hDev), radiusDev, radiusDev);
+    if (fill != border) {
+        const qreal innerR = std::max(0.0, radiusDev - bwDev);
+        p.setBrush(fill);
+        p.drawRoundedRect(QRectF(bwDev, bwDev, wDev - bwDev * 2, hDev - bwDev * 2),
+                          innerR, innerR);
+    }
+    p.restore();
+}
+
+// 标准控件：边框、圆角、外形高、悬停全部自绘。
+// 自绘的三个原因：
+//   1. QSS 的小数描边会被拆成上 1px / 下 2px，厚度不均匀；
+//   2. QSS 固定高度算的是内容盒，描边会被外壳裁掉（下拉框「下底边没了」）；
+//   3. 屏幕缩放非整数时 QSS 描边四边覆盖率不同，会一边深一边淡。
+class ChromeButton : public QPushButton {
+public:
+    explicit ChromeButton(const QString& text, QWidget* parent = nullptr,
+                          int h = kControlH, ControlVariant variant = ControlVariant::Outlined)
+        : QPushButton(text, parent), outerH_(h), variant_(variant) {
+        suppressButtonFocus(this);
+        setCursor(Qt::PointingHandCursor);
+        setFlat(true);
+        setFixedHeight(outerH_);
+        setMouseTracking(true);
+        setAttribute(Qt::WA_Hover, true);
+        setAttribute(Qt::WA_StyledBackground, false);
+        setProperty("liveaioChromeButton", true);
+        // 自绘不走 QSS 盒模型；这份透明样式只为压掉父级/系统 QSS 的描边与背景。
+        setStyleSheet(QStringLiteral(
+            "QPushButton { background: transparent; border: none; outline: none;"
+            " padding: 0; margin: 0; min-height: 0; max-height: none; }"
+            "QPushButton:hover { background: transparent; border: none; }"
+            "QPushButton:pressed { background: transparent; border: none; }"
+            "QPushButton:disabled { background: transparent; border: none; }"));
+        onThemeChange(this, [this](const QString&) { update(); });
+    }
+
+    void setVariant(ControlVariant v) {
+        if (variant_ == v) return;
+        variant_ = v;
+        update();
+    }
+    ControlVariant variant() const { return variant_; }
+
+    void setHoverLit(bool on) {
+        if (hoverLit_ == on) return;
+        hoverLit_ = on;
+        update();
+    }
+    bool hoverLit() const { return hoverLit_; }
+
+    void setOuterHeight(int h) {
+        if (outerH_ == h) return;
+        outerH_ = h;
+        setFixedHeight(h);
+        updateGeometry();
+        update();
+    }
+
+    // 左对齐 + 尾部箭头：下拉框触发钮用。
+    void setTextAlignment(Qt::Alignment align) {
+        align_ = align;
+        update();
+    }
+    void setTrailingArrow(bool on) {
+        if (arrow_ == on) return;
+        arrow_ = on;
+        updateGeometry();
+        update();
+    }
+    void setPadX(int px) {
+        padX_ = std::max(0, px);
+        updateGeometry();
+        update();
+    }
+
+    QSize sizeHint() const override {
+        const int textW = fontMetrics().horizontalAdvance(text());
+        const int extra = arrow_ ? kArrowBox : 0;
+        return QSize(textW + padX_ * 2 + extra + kControlBorderW * 2, outerH_);
+    }
+    QSize minimumSizeHint() const override { return sizeHint(); }
+
+protected:
+    bool event(QEvent* e) override {
+        switch (e->type()) {
+        case QEvent::Enter:
+        case QEvent::HoverEnter:
+            setHoverLit(true);
+            break;
+        case QEvent::Leave:
+        case QEvent::HoverLeave:
+            setHoverLit(false);
+            break;
+        default:
+            break;
+        }
+        return QPushButton::event(e);
+    }
+
+    void paintEvent(QPaintEvent*) override {
+        const ThemePalette& C = theme();
+        const bool on = isEnabled();
+        const bool lit = on && (hoverLit_ || testAttribute(Qt::WA_UnderMouse));
+        const bool down = on && isDown();
+
+        QColor fill, border, ink;
+        switch (on ? variant_ : ControlVariant::Muted) {
+        case ControlVariant::Outlined:
+            fill = QColor(lit ? C.hover : C.card);
+            border = QColor(C.activeLine);
+            ink = QColor(C.activeLine);
+            break;
+        case ControlVariant::Field:
+            fill = QColor(lit ? C.hover : C.card);
+            border = QColor(C.activeLine);
+            ink = QColor(C.text);
+            break;
+        case ControlVariant::Neutral:
+            fill = QColor(lit ? C.hover : C.card);
+            border = QColor(C.border);
+            ink = QColor(lit ? C.text : C.textMuted);
+            break;
+        case ControlVariant::Accent:
+            fill = QColor(lit ? C.active : C.activeLine);
+            border = fill;
+            ink = QColor(Qt::white);
+            break;
+        case ControlVariant::Danger:
+            fill = QColor(lit ? C.active : C.closeHover);
+            border = fill;
+            ink = QColor(Qt::white);
+            break;
+        case ControlVariant::Muted:
+            fill = QColor(C.border);
+            border = fill;
+            ink = QColor(C.textMuted);
+            break;
+        }
+        if (down) fill = fill.darker(108);
+
+        QPainter p(this);
+        p.setRenderHint(QPainter::Antialiasing, true);
+        paintChromeBox(p, this, border, fill);
+
+        QFont f = font();
+        f.setPixelSize(13);
+        f.setWeight(variant_ == ControlVariant::Field ? QFont::Medium : QFont::DemiBold);
+        p.setFont(f);
+        p.setPen(ink);
+
+        QRect textRect = rect().adjusted(padX_, 0, -padX_, 0);
+        if (arrow_) {
+            const QRect arrowRect(textRect.right() - kArrowBox + 1, textRect.top(),
+                                  kArrowBox, textRect.height());
+            textRect.setRight(arrowRect.left() - 4);
+            drawArrow(p, arrowRect, ink);
+        }
+        const QString shown =
+            p.fontMetrics().elidedText(text(), Qt::ElideRight, textRect.width());
+        p.drawText(textRect, align_ | Qt::AlignVCenter, shown);
+    }
+
+private:
+    static constexpr int kArrowBox = 14;
+
+    static void drawArrow(QPainter& p, const QRect& box, const QColor& ink) {
+        const QPointF c(box.center().x() + 0.5, box.center().y() + 1.0);
+        QPolygonF tri;
+        tri << QPointF(c.x() - 4.0, c.y() - 2.5) << QPointF(c.x() + 4.0, c.y() - 2.5)
+            << QPointF(c.x(), c.y() + 2.5);
+        p.save();
+        p.setPen(Qt::NoPen);
+        QColor a = ink;
+        a.setAlpha(200);
+        p.setBrush(a);
+        p.drawPolygon(tri);
+        p.restore();
+    }
+
+    int outerH_ = kControlH;
+    ControlVariant variant_ = ControlVariant::Outlined;
+    Qt::Alignment align_ = Qt::AlignHCenter;
+    int padX_ = kControlPadX;
+    bool arrow_ = false;
+    bool hoverLit_ = false;
+};
+
+// 旧名保留：工具页「打开」等已按描边钮使用。
+using OutlinedButton = ChromeButton;
+
+// 给普通 QPushButton 套标准描边样式（外形高 = h，描边不裁切）。
+inline void applyOutlinedButton(QPushButton* btn, int h = kControlH) {
+    if (!btn) return;
+    suppressButtonFocus(btn);
+    btn->setCursor(Qt::PointingHandCursor);
+    btn->setFixedHeight(h);
+    btn->setStyleSheet(qssOutlined(h));
+}
+
+// QSS 的 :hover 认的是 WA_UnderMouse；直接改这个属性，全仓已有的 :hover 规则都能生效。
 inline void forceHoverState(QWidget* w, bool on) {
-    if (!w || w->underMouse() == on) return;
+    if (!w) return;
+    // ChromeButton 无 Q_OBJECT，qobject_cast 不可用；用属性标记。
+    if (w->property("liveaioChromeButton").toBool()) {
+        static_cast<ChromeButton*>(w)->setHoverLit(on);
+        return;
+    }
+    const bool cur = w->testAttribute(Qt::WA_UnderMouse);
+    if (cur == on) return;
     w->setAttribute(Qt::WA_UnderMouse, on);
     if (w->style()) {
         w->style()->unpolish(w);
@@ -355,10 +637,17 @@ inline void forceHoverState(QWidget* w, bool on) {
 
 // 由父容器代理判定：容器拿到 hover/move 后，按真实光标坐标决定按钮悬停态。
 // 按钮自身 Enter 被上方标签或兄弟控件截走时（「从上方划入」），这条路径仍然有效。
+// 同一 target 可挂多个 host（如 card + scroll viewport）。
 inline void wireHoverProxy(QWidget* host, QWidget* target) {
     if (!host || !target) return;
+    const QByteArray pairKey =
+        QByteArrayLiteral("liveaioHoverProxy_") + QByteArray::number(quintptr(host));
+    if (target->property(pairKey).toBool()) return;
+    target->setProperty(pairKey, true);
     host->setAttribute(Qt::WA_Hover, true);
     host->setMouseTracking(true);
+    target->setAttribute(Qt::WA_Hover, true);
+    target->setMouseTracking(true);
     class HoverProxyFilter final : public QObject {
     public:
         HoverProxyFilter(QWidget* host, QWidget* target)
@@ -380,19 +669,75 @@ inline void wireHoverProxy(QWidget* host, QWidget* target) {
             return false;
         }
     private:
-        // 一律按当前光标位置重算：容器 Leave 往往只是光标进了子控件，不能直接清掉。
+        // 一律按当前光标全局位置重算：scroll / 透明标签穿透时 mapTo(host) 易偏。
         void sync() {
             if (!host_ || !target_) return;
-            const QPoint global = QCursor::pos();
-            const QRect r(target_->mapTo(host_, QPoint(0, 0)), target_->size());
-            const bool hit = target_->isVisible() && target_->isEnabled()
-                && r.contains(host_->mapFromGlobal(global));
+            if (!target_->isVisible() || !target_->isEnabled()) {
+                forceHoverState(target_, false);
+                return;
+            }
+            const QRect globalRect(target_->mapToGlobal(QPoint(0, 0)), target_->size());
+            const bool hit = globalRect.contains(QCursor::pos());
             forceHoverState(target_, hit);
         }
         QPointer<QWidget> host_;
         QPointer<QWidget> target_;
     };
-    host->installEventFilter(new HoverProxyFilter(host, target));
+    auto* filter = new HoverProxyFilter(host, target);
+    host->installEventFilter(filter);
+    // 按钮自身 Enter/Leave 也同步，避免只靠父容器时从上方划入丢态。
+    target->installEventFilter(filter);
+}
+
+// 一个 host（通常是 scroll viewport）批量代理多个目标悬停。
+inline void wireHoverBatch(QWidget* host, const QVector<QWidget*>& targets) {
+    if (!host || targets.isEmpty()) return;
+    host->setAttribute(Qt::WA_Hover, true);
+    host->setMouseTracking(true);
+    class HoverBatchFilter final : public QObject {
+    public:
+        HoverBatchFilter(QWidget* host, QVector<QPointer<QWidget>> targets)
+            : QObject(host), targets_(std::move(targets)) {}
+    protected:
+        bool eventFilter(QObject*, QEvent* e) override {
+            switch (e->type()) {
+            case QEvent::HoverEnter:
+            case QEvent::HoverMove:
+            case QEvent::HoverLeave:
+            case QEvent::Enter:
+            case QEvent::Leave:
+            case QEvent::MouseMove:
+                sync();
+                break;
+            default:
+                break;
+            }
+            return false;
+        }
+    private:
+        void sync() {
+            const QPoint gp = QCursor::pos();
+            for (const QPointer<QWidget>& t : targets_) {
+                if (!t) continue;
+                if (!t->isVisible() || !t->isEnabled()) {
+                    forceHoverState(t, false);
+                    continue;
+                }
+                const QRect globalRect(t->mapToGlobal(QPoint(0, 0)), t->size());
+                forceHoverState(t, globalRect.contains(gp));
+            }
+        }
+        QVector<QPointer<QWidget>> targets_;
+    };
+    QVector<QPointer<QWidget>> ptrs;
+    ptrs.reserve(targets.size());
+    for (QWidget* t : targets) {
+        if (!t) continue;
+        t->setAttribute(Qt::WA_Hover, true);
+        t->setMouseTracking(true);
+        ptrs.append(t);
+    }
+    host->installEventFilter(new HoverBatchFilter(host, std::move(ptrs)));
 }
 
 // 给整棵子树里的按钮统一接上代理判定，并跟踪后续新建控件（懒加载 Tab / 动态卡片）。
@@ -491,7 +836,8 @@ inline QString shellQss() {
 }
 
 // 紧凑 QSpinBox：右侧窄条仅边框；箭头由 ThemedSpinBox 自绘置顶（QSS 三角在 Win 上常被 LineEdit 盖住）。
-inline QString spinBoxQss() {
+// h 必须等于数字框真实高度，否则 QSS 盒会比控件高、下边框被裁到窗外。
+inline QString spinBoxQss(int h = kControlH) {
     const ThemePalette& C = theme();
     return QStringLiteral(
         "QSpinBox { background: %1; color: %2; border: 1px solid %3; border-radius: 5px;"
@@ -507,7 +853,7 @@ inline QString spinBoxQss() {
         " border-bottom-right-radius: 4px; }"
         "QSpinBox::up-button:hover, QSpinBox::down-button:hover { background: transparent; }"
         "QSpinBox::up-arrow, QSpinBox::down-arrow { width: 0; height: 0; image: none; border: none; }"
-    ).arg(C.card, C.text, C.border, C.activeLine, qssBoxHeight(kControlH, 1.0));
+    ).arg(C.card, C.text, C.border, C.activeLine, qssBoxHeight(h, 1.0));
 }
 
 // 自绘上下三角并画在最上层，避免被内部 QLineEdit 空白盖住。
@@ -565,24 +911,25 @@ inline QString toolQss() {
         "#ToolPageTitle { font-size: 20px; font-weight: 600; color: %1; background: transparent; }"
         "#ToolTip { font-size: 12px; color: %5; background: transparent; }"
         "QLabel { background: transparent; }"
-        "QPushButton { background: %8; color: %1; border: 1.5px solid %7; border-radius: 8px;"
-        " font-size: 13px; font-weight: 600; min-height: 31px; padding: 0 12px; }"
+        "QPushButton { background: %8; color: %1; border: 2px solid %7; border-radius: 8px;"
+        " font-size: 13px; font-weight: 600; %9 padding: 0 12px; }"
         "QPushButton:hover { background: %6; }"
         "QPushButton:disabled { color: %5; border-color: %4; }"
         "#TabBtn { background: transparent; border: none; border-bottom: 2px solid transparent;"
         " border-radius: 0; padding: 0 16px; color: %5; font-size: 13px;"
-        " font-weight: 400; min-height: 0; }"
+        " font-weight: 400; min-height: 0; max-height: none; height: auto; }"
         "#TabBtn:hover { background: %6; border: none; border-bottom: 2px solid transparent; }"
         "#TabBtn[active=\"true\"] { color: %1; font-weight: 600;"
         " border: none; border-bottom: 2px solid %7; }"
         "QLineEdit { background: %8; color: %1; border: 1px solid %4; border-radius: 6px;"
-        " padding: 0 10px; font-size: 13px; }"
+        " padding: 0 10px; font-size: 13px; %10 }"
         "QLineEdit:focus { border-color: %7; }"
         "QScrollArea { background: transparent; border: none; }"
         "QScrollBar:vertical { background: transparent; width: 4px; }"
         "QScrollBar::handle:vertical { background: %4; border-radius: 2px; }"
         "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }"
     ).arg(C.text, C.bg, C.sidebar, C.border, C.textMuted, C.hover, C.activeLine, C.card)
+        .arg(qssBoxHeight(kControlH, kControlBorderW), qssBoxHeight(kControlH, 1.0))
         + spinBoxQss() + qssTooltip() + qssNativeButtonGuard();
 }
 
@@ -733,26 +1080,17 @@ protected:
         const ThemePalette& C = theme();
         QPainter p(this);
         p.setRenderHint(QPainter::Antialiasing);
-        p.setPen(Qt::NoPen);
-        p.setBrush(QColor(C.card));
-        p.drawRoundedRect(rect(), kRadius, kRadius);
-
-        const qreal inset = kBorder / 2.0;
-        QPen pen(QColor(C.activeLine));
-        pen.setWidthF(kBorder);
-        pen.setJoinStyle(Qt::RoundJoin);
-        p.setPen(pen);
-        p.setBrush(Qt::NoBrush);
-        p.drawRoundedRect(QRectF(inset, inset, width() - kBorder, height() - kBorder),
-                          kRadius, kRadius);
+        // 与按钮/下拉共用同一套画法：四边等厚，不受屏幕缩放影响。
+        paintChromeBox(p, this, QColor(C.activeLine), QColor(C.card), kBorder, kRadius);
     }
 
 private:
-    static constexpr int kRadius = 8;
-    static constexpr int kBorder = 2;
+    // 与按钮/下拉共用同一套圆角、描边宽、行高。
+    static constexpr int kRadius = kControlRadius;
+    static constexpr int kBorder = kControlBorderW;
     static constexpr int kPad = 4;
     static constexpr int kItemGap = 2;
-    static constexpr int kItemH = 34;  // 与普通按钮同高
+    static constexpr int kItemH = kControlH;
     QVBoxLayout* lay_ = nullptr;
     QScrollArea* scroll_ = nullptr;
     QWidget* host_ = nullptr;
@@ -762,16 +1100,18 @@ class ThemedComboBox final : public QWidget {
 public:
     explicit ThemedComboBox(QWidget* parent = nullptr) : QWidget(parent) {
         popup_ = new DropPopup;
-        btn_ = new QPushButton(this);
-        btn_->setCursor(Qt::PointingHandCursor);
+        // 触发钮走自绘 ChromeButton：外形高即控件高，四边描边同厚且不会被裁。
+        btn_ = new ChromeButton(QString(), this, kControlH, ControlVariant::Field);
+        btn_->setTextAlignment(Qt::AlignLeft);
+        btn_->setTrailingArrow(true);
+        btn_->setPadX(10);
         QObject::connect(btn_, &QPushButton::clicked, this, [this]() { togglePopup(); });
 
         auto* lay = new QHBoxLayout(this);
         lay->setContentsMargins(0, 0, 0, 0);
         lay->addWidget(btn_);
-        setFixedHeight(34);  // 默认与普通按钮同高，调用方可再覆盖
+        setFixedHeight(kControlH);  // 默认与普通按钮同高，调用方可再覆盖
 
-        refreshTheme();
         onThemeChange(this, [this](const QString&) { refreshTheme(); });
     }
 
@@ -792,7 +1132,7 @@ public:
         lazyLoaded_ = false;
         items_.clear();
         current_.clear();
-        btn_->setText(QStringLiteral("   ▾"));
+        btn_->setText(QString());
     }
 
     QString currentText() const { return current_; }
@@ -804,7 +1144,8 @@ public:
     void setOnChange(std::function<void(const QString&)> cb) { onChange_ = std::move(cb); }
 
     void setFixedHeight(int h) {
-        btn_->setFixedHeight(h);
+        outerH_ = h;
+        btn_->setOuterHeight(h);
         QWidget::setFixedHeight(h);
     }
 
@@ -814,48 +1155,31 @@ public:
     }
 
     void setFixedSize(int w, int h) {
-        btn_->setFixedSize(w, h);
+        outerH_ = h;
+        btn_->setOuterHeight(h);
+        btn_->setFixedWidth(w);
         QWidget::setFixedSize(w, h);
-        btn_->setMaximumHeight(h);
-        btn_->setMinimumHeight(h);
     }
 
-    // 工具窗厚描边：对齐选择礼物等 1.5px / 13px 按钮。
+    // 紧凑档：选择礼物那类小行内下拉。
     void setCompact(bool compact) {
         compact_ = compact;
-        refreshTheme();
+        btn_->setPadX(compact_ ? 6 : 10);
+        btn_->update();
     }
 
-    void refreshTheme() {
-        const ThemePalette& C = theme();
-        // min-height 必须显式清零：工具窗 QSS 的 QPushButton{min-height:34px}
-        // 会级联到这里，加上 1.5px 描边后按钮比外壳高 3px，下边框被裁掉。
-        if (compact_) {
-            btn_->setStyleSheet(QStringLiteral(
-                "QPushButton { background: %1; color: %2; border: 1px solid %3;"
-                " border-radius: 4px; text-align: left; padding: 0 6px; font-size: 11px;"
-                " min-height: 0px; }"
-                "QPushButton:hover { border-color: %3; background: %4; }"
-            ).arg(C.card, C.text, C.activeLine, C.hover));
-            return;
-        }
-        btn_->setStyleSheet(QStringLiteral(
-            "QPushButton { background: %1; color: %2; border: 1.5px solid %3;"
-            " border-radius: 8px; text-align: left; padding: 0 8px;"
-            " font-size: 13px; font-weight: 600; min-height: 0px; }"
-            "QPushButton:hover { border-color: %3; background: %4; }"
-        ).arg(C.card, C.text, C.activeLine, C.hover));
-    }
+    void refreshTheme() { btn_->update(); }
 
 private:
     static constexpr int kOvershoot = 2;
     static constexpr int kGap = 2;
     static constexpr int kMinPopupH = 120;
+    int outerH_ = kControlH;
 
     void setCurrent(const QString& text, bool emitChange) {
         const QString old = current_;
         current_ = text;
-        btn_->setText(text + QStringLiteral("   ▾"));
+        btn_->setText(text);
         if (emitChange && old != text && onChange_) onChange_(text);
     }
 
@@ -900,7 +1224,7 @@ private:
 
     QStringList items_;
     QString current_;
-    QPushButton* btn_ = nullptr;
+    ChromeButton* btn_ = nullptr;
     DropPopup* popup_ = nullptr;
     bool compact_ = false;
     bool lazyLoaded_ = true;

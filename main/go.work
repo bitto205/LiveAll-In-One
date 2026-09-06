@@ -1,0 +1,6 @@
+go 1.26
+
+use (
+	..
+	../listener/proxy_shell_go
+)

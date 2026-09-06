@@ -186,6 +186,7 @@ public:
         error_ = new QLabel(QString(), inner);
         error_->setWordWrap(true);
         error_->setVisible(false);
+        error_->setAttribute(Qt::WA_TransparentForMouseEvents);
         lay->addWidget(error_);
         lay->addSpacing(8);
 
@@ -194,7 +195,19 @@ public:
 
         auto* root = new QVBoxLayout(this);
         root->setContentsMargins(0, 0, 0, 0);
-        root->addWidget(scrollPage(inner));
+        auto* scroll = scrollPage(inner);
+        scroll->viewport()->setMouseTracking(true);
+        scroll->viewport()->setAttribute(Qt::WA_Hover, true);
+        inner->setMouseTracking(true);
+        inner->setAttribute(Qt::WA_Hover, true);
+        root->addWidget(scroll);
+
+        // 滚动视口级批量悬停：从卡片上方/缝隙划入「打开」也能亮。
+        QVector<QWidget*> hoverTargets;
+        hoverTargets.reserve(openBtns_.size());
+        for (auto* btn : openBtns_) hoverTargets.append(btn);
+        wireHoverBatch(scroll->viewport(), hoverTargets);
+        wireHoverBatch(inner, hoverTargets);
 
         toast_ = new Toast(this);
         refreshTheme();
@@ -208,7 +221,7 @@ public:
             "background: transparent; font-size: 12px; color: %1;").arg(C.textMuted);
         for (auto* lbl : nameLabels_) lbl->setStyleSheet(nameStyle);
         for (auto* lbl : descLabels_) lbl->setStyleSheet(descStyle);
-        for (auto* btn : openBtns_) btn->setStyleSheet(qssOutlined(34));
+        // OutlinedButton 自绘，主题变更靠 onThemeChange；无需再套 QSS。
         error_->setStyleSheet(qssErrorLabel(13));
         // 工具窗与主界面同主题：把主题名推进 Tools DLL。
         if (ToolsPlugin::instance().loaded()) {
@@ -232,12 +245,12 @@ private:
 
         auto* row = new QHBoxLayout;
         auto* name = new QLabel(QStringLiteral("%1  %2").arg(meta.icon, meta.name), card);
-        // 名称/描述不抢鼠标，避免从上方划入「打开」时 :hover/hl 进不了态。
+        // 名称/描述不抢鼠标，避免从上方划入「打开」时悬停进不了态。
         name->setAttribute(Qt::WA_TransparentForMouseEvents);
-        auto* btn = new QPushButton(QStringLiteral("打开"), card);
-        btn->setFixedHeight(34);
-        btn->setCursor(Qt::PointingHandCursor);
-        liveaio::util::suppressButtonFocus(btn);
+        auto* btn = new OutlinedButton(QStringLiteral("打开"), card, kControlH);
+        card->setMouseTracking(true);
+        card->setAttribute(Qt::WA_Hover, true);
+        wireHoverProxy(card, btn);
         QObject::connect(btn, &QPushButton::clicked, this, [this, id = meta.id]() { openTool(id); });
         row->addWidget(name);
         row->addStretch();
@@ -298,7 +311,7 @@ private:
     QLabel* error_ = nullptr;
     QVector<QLabel*> nameLabels_;
     QVector<QLabel*> descLabels_;
-    QVector<QPushButton*> openBtns_;
+    QVector<OutlinedButton*> openBtns_;
     bool loadingTools_ = false;
     QString pendingOpenId_;
 };

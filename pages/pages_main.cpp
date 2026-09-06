@@ -37,7 +37,7 @@ extern "C" LIVEAIO_PAGES_API int LiveAIO_PagesRun(int argc, char** argv) {
         liveaio::pages::configValue(QStringLiteral("theme"),
                                     liveaio::util::defaultThemeName()).toString());
     liveaio::pages::g_minimizeToTray =
-        liveaio::pages::configValue(QStringLiteral("minimize_to_tray"), true).toBool();
+        liveaio::pages::configValue(QStringLiteral("minimize_to_tray"), false).toBool();
 
     auto* win = new liveaio::pages::MainWindow(core);
     core->setPacketCallback([win](const QJsonObject& packet) { win->onCorePacket(packet); });

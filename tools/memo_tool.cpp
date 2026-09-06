@@ -233,12 +233,12 @@ private:
         cLay->addWidget(title);
         auto* row = new QHBoxLayout;
         customInput_ = new QLineEdit(customCard);
-        customInput_->setFixedHeight(34);
+        customInput_->setFixedHeight(liveaio::util::kControlH);
         customInput_->setPlaceholderText(QStringLiteral("输入备忘内容..."));
         QObject::connect(customInput_, &QLineEdit::returnPressed, this, [this]() { addCustom(); });
-        addBtn_ = new QPushButton(QStringLiteral("添加"), customCard);
-        addBtn_->setFixedHeight(34);
-        addBtn_->setCursor(Qt::PointingHandCursor);
+        addBtn_ = new liveaio::util::ChromeButton(
+            QStringLiteral("添加"), customCard, liveaio::util::kControlH);
+        addBtn_->setPadX(14);
         QObject::connect(addBtn_, &QPushButton::clicked, this, [this]() { addCustom(); });
         row->addWidget(customInput_);
         row->addWidget(addBtn_);
@@ -291,12 +291,7 @@ private:
 
     void applyAddBtnStyle() {
         if (!addBtn_) return;
-        const auto& C = theme();
-        addBtn_->setStyleSheet(QStringLiteral(
-            "QPushButton { background: transparent; color: %1; border: 1.5px solid %1;"
-            " border-radius: 6px; font-size: 13px; font-weight: 600; padding: 0 14px; }"
-            "QPushButton:hover { background: %2; }"
-        ).arg(C.activeLine, C.hover));
+        addBtn_->update();  // 自绘描边钮，跟随主题重画即可
         if (diamondHint_) diamondHint_->setStyleSheet(qssMutedLabel(11));
     }
 
@@ -336,7 +331,7 @@ private:
 
     MemoMainTab* mainTab_ = nullptr;
     QLineEdit* customInput_ = nullptr;
-    QPushButton* addBtn_ = nullptr;
+    liveaio::util::ChromeButton* addBtn_ = nullptr;
     QLineEdit* diamondInput_ = nullptr;
     QLabel* diamondHint_ = nullptr;
     QMap<QString, MemoItem*> stackItems_;

@@ -316,23 +316,11 @@ public:
     }
 
     void refreshTheme() {
-        const auto& C = theme();
-        // 悬停与其他按钮统一：底色变 hover、文字转正色，而不是只换文字颜色。
-        pickBtn_->setStyleSheet(QStringLiteral(
-            "QPushButton#OvertimeSimPickBtn { background: transparent; color: %1;"
-            " border: 1.5px solid %1; border-radius: 6px; font-size: 12px; font-weight: 600;"
-            " padding: 0 10px; min-height: %2px; max-height: %2px; }"
-            "QPushButton#OvertimeSimPickBtn:hover { background: %3; color: %4; }"
-        ).arg(C.activeLine, QString::number(kSimBtnH), C.hover, C.text));
+        // 描边钮/实心钮全部走 widgets 里的共享样式：描边宽、圆角、外形高一致。
+        pickBtn_->setStyleSheet(liveaio::util::qssOutlined(kSimBtnH, 10));
         iconLbl_->setStyleSheet(QStringLiteral(
             "QLabel#OvertimeSimGiftIcon { background: transparent; border: none; }"));
-        // 实心强调钮统一：悬停转 C.active，文字保持白色。
-        pushBtn_->setStyleSheet(QStringLiteral(
-            "QPushButton { background: %1; color: #fff; border: none; border-radius: 6px;"
-            " font-size: 13px; font-weight: 600; }"
-            "QPushButton:hover { background: %2; }"
-            "QPushButton:disabled { background: %3; color: %4; }"
-        ).arg(C.activeLine, C.active, C.border, C.textMuted));
+        pushBtn_->setStyleSheet(liveaio::util::qssSuccess(liveaio::util::kControlH, 10));
         if (auto* picker = sessionGiftPicker()) picker->refreshTheme();
     }
 

@@ -881,9 +881,9 @@ private:
         t->setObjectName(QStringLiteral("ToolTip"));
         left->addWidget(n);
         left->addWidget(t);
-        auto* btn = new QPushButton;
-        btn->setFixedHeight(28);
-        btn->setCursor(Qt::PointingHandCursor);
+        auto* btn = new liveaio::util::ChromeButton(QString(), nullptr,
+                                                    liveaio::util::kControlHSmall);
+        btn->setPadX(14);
         btn->setText(configValue(switchKeys_.value(key), true).toBool()
                          ? QStringLiteral("已开启") : QStringLiteral("已关闭"));
         QObject::connect(btn, &QPushButton::clicked, this, [this, key]() { toggleSwitch(key); });
@@ -913,9 +913,11 @@ private:
         auto* row = new QHBoxLayout;
         row->setContentsMargins(0, 8, 0, 0);
         row->addStretch(1);
-        auto* btn = new QPushButton(QStringLiteral("应用"));
-        btn->setFixedSize(72, 34);
-        btn->setCursor(Qt::PointingHandCursor);
+        auto* btn = new liveaio::util::ChromeButton(QStringLiteral("应用"), nullptr,
+                                                    liveaio::util::kControlH,
+                                                    liveaio::util::ControlVariant::Accent);
+        btn->setFixedWidth(72);
+        btn->setPadX(10);
         QObject::connect(btn, &QPushButton::clicked, this, [handler]() { handler(); });
         applyBtns_.append(btn);
         row->addWidget(btn);
@@ -932,17 +934,17 @@ private:
         lbl->setStyleSheet(QStringLiteral("font-size: 14px; font-weight: 600;"));
         row->addWidget(lbl);
         row->addStretch();
-        tutorialBtn_ = new QPushButton(QStringLiteral("教程"));
-        tutorialBtn_->setFixedHeight(34);
-        tutorialBtn_->setCursor(Qt::PointingHandCursor);
+        tutorialBtn_ = new liveaio::util::ChromeButton(
+            QStringLiteral("教程"), nullptr, liveaio::util::kControlH,
+            liveaio::util::ControlVariant::Neutral);
+        tutorialBtn_->setPadX(14);
         QObject::connect(tutorialBtn_, &QPushButton::clicked, this, [this]() {
             showTutorialDialog(this);
         });
         row->addWidget(tutorialBtn_);
         row->addSpacing(8);
-        openBtn_ = new QPushButton(QStringLiteral("打开弹幕窗"));
-        openBtn_->setFixedHeight(34);
-        openBtn_->setCursor(Qt::PointingHandCursor);
+        openBtn_ = new liveaio::util::ChromeButton(
+            QStringLiteral("打开弹幕窗"), nullptr, liveaio::util::kControlH);
         QObject::connect(openBtn_, &QPushButton::clicked, this, [this]() { toggleOverlay(); });
         row->addWidget(openBtn_);
         cl->addLayout(row);
@@ -978,7 +980,7 @@ private:
         for (const auto& entry : skins) {
             if (entry.id == activeId) skinCombo_->setCurrentText(entry.name);
         }
-        skinCombo_->setFixedHeight(34);
+        skinCombo_->setFixedHeight(liveaio::util::kControlH);
         skinCombo_->setMinimumWidth(160);
         skinCombo_->setOnChange([this](const QString& name) { onSkinChanged(name); });
         trow->addWidget(skinCombo_);
@@ -1062,9 +1064,9 @@ private:
         tip2->setObjectName(QStringLiteral("ToolTip"));
         left2->addWidget(lbl2);
         left2->addWidget(tip2);
-        likeAccumBtn_ = new QPushButton;
-        likeAccumBtn_->setFixedHeight(28);
-        likeAccumBtn_->setCursor(Qt::PointingHandCursor);
+        likeAccumBtn_ = new liveaio::util::ChromeButton(QString(), nullptr,
+                                                        liveaio::util::kControlHSmall);
+        likeAccumBtn_->setPadX(14);
         likeAccumBtn_->setText(configValue(QStringLiteral("danmu_like_accumulate"), false).toBool()
                                    ? QStringLiteral("累加：已开启") : QStringLiteral("累加：已关闭"));
         QObject::connect(likeAccumBtn_, &QPushButton::clicked, this, [this]() {
@@ -1095,14 +1097,10 @@ private:
 
     void refreshSwitchStyles(bool syncFromConfig) {
         const auto& C = theme();
-        const QString onStyle = QStringLiteral(
-            "QPushButton { background: %1; color: #fff; border: 1.5px solid transparent;"
-            " border-radius: 8px; font-size: 12px; font-weight: 600; padding: 0 14px; }"
-            "QPushButton:hover { background: %1; }").arg(C.activeLine);
-        const QString offStyle = QStringLiteral(
-            "QPushButton { background: transparent; color: %1; border: 1.5px solid %2;"
-            " border-radius: 8px; font-size: 12px; padding: 0 14px; }"
-            "QPushButton:hover { background: %3; }").arg(C.textMuted, C.border, C.hover);
+        const int smallH = liveaio::util::kControlHSmall;
+        // 开/关只切换外观档位，描边宽与外形高由 ChromeButton 统一保证。
+        const auto onVar = liveaio::util::ControlVariant::Accent;
+        const auto offVar = liveaio::util::ControlVariant::Neutral;
 
         for (auto it = switchBtns_.constBegin(); it != switchBtns_.constEnd(); ++it) {
             bool on;
@@ -1112,7 +1110,7 @@ private:
             } else {
                 on = it.value()->text() == QStringLiteral("已开启");
             }
-            it.value()->setStyleSheet(on ? onStyle : offStyle);
+            it.value()->setVariant(on ? onVar : offVar);
         }
         if (likeAccumBtn_) {
             if (syncFromConfig) {
@@ -1121,29 +1119,19 @@ private:
                                           : QStringLiteral("累加：已关闭"));
             }
             const bool on = likeAccumBtn_->text() == QStringLiteral("累加：已开启");
-            likeAccumBtn_->setStyleSheet(on ? onStyle : offStyle);
+            likeAccumBtn_->setVariant(on ? onVar : offVar);
         }
         for (auto* sep : seps_) {
             sep->setStyleSheet(QStringLiteral("background: %1; max-height: 1px;").arg(C.border));
         }
-        for (auto* btn : applyBtns_) {
-            btn->setStyleSheet(QStringLiteral(
-                "QPushButton { background: %1; color: #fff; border: none; border-radius: 6px;"
-                " font-size: 13px; font-weight: 600; }"
-                "QPushButton:hover { background: %2; color: %3; }"
-            ).arg(C.activeLine, C.hover, C.text));
-        }
+        for (auto* btn : applyBtns_) btn->update();
+        if (giftSpin_) giftSpin_->setStyleSheet(liveaio::util::spinBoxQss(smallH));
+        if (likeSpin_) likeSpin_->setStyleSheet(liveaio::util::spinBoxQss(smallH));
         if (skinCombo_) skinCombo_->refreshTheme();
     }
 
     void styleTutorialBtn() {
-        if (!tutorialBtn_) return;
-        const auto& C = theme();
-        tutorialBtn_->setStyleSheet(QStringLiteral(
-            "QPushButton { background: %1; color: %2; border: 1.5px solid %3;"
-            " border-radius: 8px; font-size: 13px; font-weight: 600; padding: 0 14px; }"
-            "QPushButton:hover { background: %4; color: %5; }"
-        ).arg(C.card, C.textMuted, C.border, C.hover, C.text));
+        if (tutorialBtn_) tutorialBtn_->update();
     }
 
     void applyKind(const QString& kind) {
@@ -1191,22 +1179,11 @@ private:
 
     void refreshOpenBtn() {
         if (!openBtn_) return;
-        const auto& C = theme();
         const bool open = OverlayHostService::instance().isToolActive(OverlayToolId::Danmu);
         openBtn_->setText(open ? QStringLiteral("关闭弹幕窗") : QStringLiteral("打开弹幕窗"));
-        if (open) {
-            openBtn_->setStyleSheet(QStringLiteral(
-                "QPushButton { background: %1; color: #fff; border: 1.5px solid transparent;"
-                " border-radius: 8px; font-size: 13px; font-weight: 600; padding: 0 16px; }"
-                "QPushButton:hover { background: %2; }"
-            ).arg(C.closeHover, C.active));
-        } else {
-            openBtn_->setStyleSheet(QStringLiteral(
-                "QPushButton { background: %1; color: %2; border: 1.5px solid %2;"
-                " border-radius: 8px; font-size: 13px; font-weight: 600; padding: 0 16px; }"
-                "QPushButton:hover { background: %3; }"
-            ).arg(C.card, C.activeLine, C.hover));
-        }
+        openBtn_->setVariant(open ? liveaio::util::ControlVariant::Danger
+                                  : liveaio::util::ControlVariant::Outlined);
+        openBtn_->update();
     }
 
     void pushSettings() {
@@ -1231,16 +1208,16 @@ private:
     QVector<QPushButton*> navBtns_;
     int curNav_ = 0;
     QMap<QString, QString> switchKeys_;
-    QMap<QString, QPushButton*> switchBtns_;
+    QMap<QString, liveaio::util::ChromeButton*> switchBtns_;
     QMap<QString, QLineEdit*> suffixEdits_;
     QMap<QString, QString> skinNameToId_;
     QVector<QFrame*> seps_;
-    QVector<QPushButton*> applyBtns_;
+    QVector<liveaio::util::ChromeButton*> applyBtns_;
     QSpinBox* giftSpin_ = nullptr;
     QSpinBox* likeSpin_ = nullptr;
-    QPushButton* likeAccumBtn_ = nullptr;
-    QPushButton* openBtn_ = nullptr;
-    QPushButton* tutorialBtn_ = nullptr;
+    liveaio::util::ChromeButton* likeAccumBtn_ = nullptr;
+    liveaio::util::ChromeButton* openBtn_ = nullptr;
+    liveaio::util::ChromeButton* tutorialBtn_ = nullptr;
     liveaio::util::ThemedComboBox* skinCombo_ = nullptr;
     DanmuToolRuntime* runtime_ = nullptr;
 };

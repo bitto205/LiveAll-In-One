@@ -3,12 +3,16 @@
 namespace liveaio::tools::leaf {
 
 static const QString kGeoKey = QStringLiteral("leaf_window_geometry");
-// v2：重置一次历史坐标，让垃圾桶回到右上角默认位。
-static const QString kTrashPosKey = QStringLiteral("leaf_trash_pos_v2");
+// v3：再次重置历史坐标，保证垃圾桶默认右上角（忽略 v2 左上坏档）。
+static const QString kTrashPosKey = QStringLiteral("leaf_trash_pos_v3");
 static const QString kMaxPercentKey = QStringLiteral("leaf_max_percent");
 static const QString kLeafScaleKey = QStringLiteral("leaf_scale_percent");
 static const QString kTrashScaleKey = QStringLiteral("leaf_trash_scale_percent");
 static const QString kViewportSizeKey = QStringLiteral("leaf_last_viewport_size");
+static const QString kFaceShieldEnabledKey = QStringLiteral("leaf_face_shield_enabled");
+static const QString kFaceShieldRectKey = QStringLiteral("leaf_face_shield_rect_v1");
+static constexpr qreal kShieldPeakFrac = 0.22;
+static constexpr qreal kShieldEjectAccel = 420.0;  // 框内缓慢向下挤出
 // 旧资源路径：仅作皮肤文件缺失时的回退。
 static const QString kLegacyLeafImage = QStringLiteral("resources/image/zaidoopro-painting-8032889.png");
 static const QString kLegacyTrashImage = QStringLiteral("resources/image/trash_can.png");
@@ -181,14 +185,23 @@ static qreal clampAxis(qreal v, qreal lo, qreal hi) {
     return std::clamp(v, lo, hi);
 }
 
-static int maxLeavesForSize(const QSize& contentSize, qreal leafScale = 1.0) {
+static int maxLeavesForSize(const QSize& contentSize, qreal leafScale = 1.0,
+                            const QRectF* shieldSquare = nullptr,
+                            qreal shieldPeakFrac = kShieldPeakFrac) {
     const qreal pad = cmToPxF(kWorldPadCm);
     const qreal w = std::max(0.0, contentSize.width() - 2.0 * pad);
     const qreal h = std::max(0.0, contentSize.height() - 2.0 * pad);
     const qreal cell = std::max(1.0, leafPackSide(leafScale));
     const int cols = static_cast<int>(std::floor(w / cell));
     const int rows = static_cast<int>(std::floor(h / cell));
-    return std::clamp(cols * rows, kMinLeaves, kMaxLeavesHard);
+    int base = cols * rows;
+    if (shieldSquare && shieldSquare->width() > 1.0 && shieldSquare->height() > 1.0) {
+        const qreal side = std::min(shieldSquare->width(), shieldSquare->height());
+        const qreal peak = side * std::clamp(shieldPeakFrac, 0.05, 0.6);
+        const qreal area = side * side + 0.5 * side * peak;
+        base -= static_cast<int>(std::floor(area / (cell * cell)));
+    }
+    return std::clamp(base, kMinLeaves, kMaxLeavesHard);
 }
 
 static int scalePercent(const QString& key) {
@@ -678,22 +691,12 @@ public:
 
     void refreshTheme() {
         // 固定宽按钮用更小左右 padding，避免「选择礼物」被挤扁。
-        const auto& C = theme();
-        pickBtn_->setStyleSheet(QStringLiteral(
-            "QPushButton { background: %1; color: %2; border: 1.5px solid %2;"
-            " border-radius: 8px; font-size: 13px; font-weight: 600;"
-            " padding: 0 8px; min-height: 34px; }"
-            "QPushButton:hover { background: %3; }"
-        ).arg(C.card, C.activeLine, C.hover));
-        removeBtn_->setStyleSheet(QStringLiteral(
-            "QPushButton { background: %1; color: %2; border: 1.5px solid %3;"
-            " border-radius: 8px; font-size: 13px; font-weight: 600;"
-            " padding: 0 10px; min-height: 34px; }"
-            "QPushButton:hover { background: %4; color: %5; }"
-        ).arg(C.card, C.textMuted, C.border, C.hover, C.text));
+        // 描边钮已自绘，主题变更只需重画。
+        if (pickBtn_) pickBtn_->update();
+        if (removeBtn_) removeBtn_->update();
         if (mode_) {
             mode_->setCompact(false);
-            mode_->setFixedSize(88, 34);
+            mode_->setFixedSize(88, liveaio::util::kControlH);
             mode_->refreshTheme();
         }
         if (normalizeLeafGiftName(rule_.gift).isEmpty()) showIcon({}, false);
@@ -725,93 +728,96 @@ public:
 
 private:
     void build() {
+        const int ctrlH = liveaio::util::kControlH;
         auto* root = new QHBoxLayout(this);
         // 边距略大于描边，避免圆角父级/本卡裁掉子按钮下边框。
         root->setContentsMargins(12, 12, 12, 12);
         root->setSpacing(8);
-        root->setAlignment(Qt::AlignTop);
+        // 行内一律按中线居中：礼物图标比控件高，靠顶对齐会显得一高一矮。
+        root->setAlignment(Qt::AlignVCenter);
 
-        pickBtn_ = new QPushButton(QStringLiteral("选择礼物"), this);
-        pickBtn_->setFixedSize(96, 34);
-        pickBtn_->setCursor(Qt::PointingHandCursor);
-        liveaio::util::suppressButtonFocus(pickBtn_);
+        pickBtn_ = new liveaio::util::ChromeButton(QStringLiteral("选择礼物"), this, ctrlH);
+        pickBtn_->setFixedWidth(96);
+        pickBtn_->setPadX(8);
         QObject::connect(pickBtn_, &QPushButton::clicked, this, [this]() {
             if (onPick_) onPick_(this);
         });
-        root->addWidget(pickBtn_, 0, Qt::AlignTop);
+        root->addWidget(pickBtn_, 0, Qt::AlignVCenter);
 
         iconLbl_ = new QLabel(this);
         iconLbl_->setFixedSize(52, 52);
         iconLbl_->setAlignment(Qt::AlignCenter);
         iconLbl_->setScaledContents(false);
-        root->addWidget(iconLbl_, 0, Qt::AlignTop);
+        root->addWidget(iconLbl_, 0, Qt::AlignVCenter);
 
         mode_ = new ThemedComboBox(this);
         mode_->setCompact(false);
         mode_->addItems(leafGiftModes());
-        mode_->setFixedSize(88, 34);
+        mode_->setFixedSize(88, ctrlH);
         mode_->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
         mode_->setOnChange([this](const QString&) {
             syncMode();
             emitChange();
         });
-        root->addWidget(mode_, 0, Qt::AlignTop);
+        root->addWidget(mode_, 0, Qt::AlignVCenter);
 
         valueHost_ = new QWidget(this);
+        valueHost_->setFixedHeight(ctrlH);
         auto* valueLay = new QHBoxLayout(valueHost_);
         valueLay->setContentsMargins(0, 0, 0, 0);
         valueLay->setSpacing(6);
-        valueLay->setAlignment(Qt::AlignTop);
+        valueLay->setAlignment(Qt::AlignVCenter);
         valueSpin_ = new liveaio::util::ThemedSpinBox(valueHost_);
         valueSpin_->setRange(0, 999);
-        valueSpin_->setFixedSize(78, 34);
+        valueSpin_->setFixedSize(78, ctrlH);
         QObject::connect(valueSpin_, qOverload<int>(&QSpinBox::valueChanged),
                          this, [this](int) { emitChange(); });
-        valueLay->addWidget(valueSpin_, 0, Qt::AlignTop);
+        valueLay->addWidget(valueSpin_, 0, Qt::AlignVCenter);
         valueUnit_ = new QLabel(QStringLiteral("片叶子"), valueHost_);
-        valueUnit_->setFixedHeight(34);
+        valueUnit_->setFixedHeight(ctrlH);
         valueUnit_->setMinimumWidth(48);
         valueUnit_->setAlignment(Qt::AlignVCenter | Qt::AlignLeft);
-        valueLay->addWidget(valueUnit_, 0, Qt::AlignTop);
-        root->addWidget(valueHost_, 0, Qt::AlignTop);
+        valueLay->addWidget(valueUnit_, 0, Qt::AlignVCenter);
+        root->addWidget(valueHost_, 0, Qt::AlignVCenter);
 
         randomHost_ = new QWidget(this);
+        randomHost_->setFixedHeight(ctrlH);
         auto* randomLay = new QHBoxLayout(randomHost_);
         randomLay->setContentsMargins(0, 0, 0, 0);
         randomLay->setSpacing(6);
-        randomLay->setAlignment(Qt::AlignTop);
+        randomLay->setAlignment(Qt::AlignVCenter);
         minSpin_ = new liveaio::util::ThemedSpinBox(randomHost_);
         maxSpin_ = new liveaio::util::ThemedSpinBox(randomHost_);
         minSpin_->setRange(0, 999);
         maxSpin_->setRange(0, 999);
-        minSpin_->setFixedSize(72, 34);
-        maxSpin_->setFixedSize(72, 34);
+        minSpin_->setFixedSize(72, ctrlH);
+        maxSpin_->setFixedSize(72, ctrlH);
         QObject::connect(minSpin_, qOverload<int>(&QSpinBox::valueChanged),
                          this, [this](int) { emitChange(); });
         QObject::connect(maxSpin_, qOverload<int>(&QSpinBox::valueChanged),
                          this, [this](int) { emitChange(); });
         auto* tilde = new QLabel(QStringLiteral("~"), randomHost_);
-        tilde->setFixedHeight(34);
+        tilde->setFixedHeight(ctrlH);
         tilde->setAlignment(Qt::AlignCenter);
         auto* randUnit = new QLabel(QStringLiteral("片叶子"), randomHost_);
-        randUnit->setFixedHeight(34);
+        randUnit->setFixedHeight(ctrlH);
         randUnit->setMinimumWidth(48);
         randUnit->setAlignment(Qt::AlignVCenter | Qt::AlignLeft);
-        randomLay->addWidget(minSpin_, 0, Qt::AlignTop);
-        randomLay->addWidget(tilde, 0, Qt::AlignTop);
-        randomLay->addWidget(maxSpin_, 0, Qt::AlignTop);
-        randomLay->addWidget(randUnit, 0, Qt::AlignTop);
-        root->addWidget(randomHost_, 0, Qt::AlignTop);
+        randomLay->addWidget(minSpin_, 0, Qt::AlignVCenter);
+        randomLay->addWidget(tilde, 0, Qt::AlignVCenter);
+        randomLay->addWidget(maxSpin_, 0, Qt::AlignVCenter);
+        randomLay->addWidget(randUnit, 0, Qt::AlignVCenter);
+        root->addWidget(randomHost_, 0, Qt::AlignVCenter);
 
         root->addStretch(1);
-        removeBtn_ = new QPushButton(QStringLiteral("删除"), this);
-        removeBtn_->setFixedSize(72, 34);
-        removeBtn_->setCursor(Qt::PointingHandCursor);
-        liveaio::util::suppressButtonFocus(removeBtn_);
+        removeBtn_ = new liveaio::util::ChromeButton(QStringLiteral("删除"), this, ctrlH,
+                                                     liveaio::util::ControlVariant::Neutral);
+        removeBtn_->setFixedWidth(72);
+        removeBtn_->setPadX(10);
         QObject::connect(removeBtn_, &QPushButton::clicked, this, [this]() {
             if (onRemove_) onRemove_(this);
         });
-        root->addWidget(removeBtn_, 0, Qt::AlignTop);
+        root->addWidget(removeBtn_, 0, Qt::AlignVCenter);
     }
 
     void loadRule(const LeafGiftRule& rule) {
@@ -874,7 +880,7 @@ private:
     LeafGiftRule rule_;
     bool loading_ = false;
     quint64 iconGen_ = 0;
-    QPushButton* pickBtn_ = nullptr;
+    liveaio::util::ChromeButton* pickBtn_ = nullptr;
     QLabel* iconLbl_ = nullptr;
     ThemedComboBox* mode_ = nullptr;
     QWidget* valueHost_ = nullptr;
@@ -883,7 +889,7 @@ private:
     QSpinBox* minSpin_ = nullptr;
     QSpinBox* maxSpin_ = nullptr;
     QLabel* valueUnit_ = nullptr;
-    QPushButton* removeBtn_ = nullptr;
+    liveaio::util::ChromeButton* removeBtn_ = nullptr;
     std::function<void()> onChanged_;
     std::function<void(LeafGiftRuleCard*)> onPick_;
     std::function<void(LeafGiftRuleCard*)> onRemove_;
@@ -1089,10 +1095,48 @@ public:
         setFocusPolicy(Qt::NoFocus);
         LeafSharedAssets::instance();
         loadTrashPos();
+        loadFaceShield();
         tick_ = new QTimer(this);
         tick_->setInterval(kTickMs);
         QObject::connect(tick_, &QTimer::timeout, this, [this]() { onTick(); });
         tick_->start();
+    }
+
+    bool faceShieldEnabled() const { return faceShieldEnabled_; }
+    bool faceShieldEditing() const { return faceShieldEditing_; }
+
+    void setFaceShieldEnabled(bool on) {
+        if (faceShieldEnabled_ == on) return;
+        faceShieldEnabled_ = on;
+        writeConfigValue(kFaceShieldEnabledKey, on);
+        if (!faceShieldEditing_) notifyGeometryChanged();
+        update();
+    }
+
+    void setFaceShieldEditing(bool on) {
+        if (faceShieldEditing_ == on) return;
+        faceShieldEditing_ = on;
+        if (on) {
+            ensureFaceShieldRect();
+            int reclaim = 0;
+            for (LeafBody& L : leaves_) {
+                if (!isAlive(L.state)) continue;
+                ++reclaim;
+                resetLeafBody(&L);
+            }
+            leaves_.clear();
+            pendingSpawns_ = std::min(kPendingQueueCap, pendingSpawns_ + reclaim);
+            pendingRemovals_ = 0;
+            dragId_ = 0;
+            dragTargetValid_ = false;
+            draggingTrash_ = false;
+            maxLeaves_ = 0;
+            emitStats();
+        } else {
+            saveFaceShield();
+            notifyGeometryChanged();
+        }
+        update();
     }
 
     int aliveCount() const {
@@ -1175,6 +1219,10 @@ public:
     bool resizePaused() const { return resizePaused_; }
 
     bool hitInteractive(const QPointF& pos) const {
+        if (faceShieldEditing_) {
+            if (shieldHitRect().adjusted(-6, -6, 6, 6).contains(pos)) return true;
+            return true;  // 编辑态整块 content 吃鼠标（暗化遮罩）
+        }
         if (draggingTrash_ || dragId_ != 0) return true;
         if (trashNearRect().contains(pos)) return true;
         for (int i = leaves_.size() - 1; i >= 0; --i) {
@@ -1204,7 +1252,15 @@ public:
 
     void notifyGeometryChanged() {
         ensureTrashPosition();
+        ensureFaceShieldRect();
+        clampFaceShieldToWorld();
         updateWorld();
+        if (faceShieldEditing_) {
+            maxLeaves_ = 0;
+            update();
+            emitStats();
+            return;
+        }
         cullOverflowImmediate();
         clampTrashToWorld();
         squeezeIntoBounds();
@@ -1222,6 +1278,18 @@ protected:
         QPainter p(this);
         p.setRenderHint(QPainter::Antialiasing, true);
         p.setRenderHint(QPainter::SmoothPixmapTransform, true);
+
+        if (faceShieldEditing_) {
+            // 暗化只盖边框内 content，不含外圈阴影带；与框同帧高质量绘制。
+            p.setRenderHint(QPainter::Antialiasing, true);
+            const int sw = RippleOverlayRoot::kShadowW;
+            p.fillRect(QRect(sw, 0, std::max(0, width() - 2 * sw),
+                             std::max(0, height() - sw)),
+                       QColor(0, 0, 0, 110));
+            drawFaceShieldEdit(p);
+            return;
+        }
+
         const auto& assets = LeafSharedAssets::instance();
         const qreal side = leafVisualPx(leafScale_);
 
@@ -1241,6 +1309,10 @@ protected:
     void mousePressEvent(QMouseEvent* event) override {
         if (event->button() != Qt::LeftButton) return;
         const QPointF pos = event->position();
+        if (faceShieldEditing_) {
+            beginFaceShieldDrag(pos);
+            return;
+        }
         // 垃圾桶图层在闲置叶子之上：先点垃圾桶。
         if (trashGrabRect().contains(pos)) {
             draggingTrash_ = true;
@@ -1268,6 +1340,14 @@ protected:
 
     void mouseMoveEvent(QMouseEvent* event) override {
         const QPointF pos = event->position();
+        if (faceShieldEditing_) {
+            if (event->buttons() & Qt::LeftButton) {
+                updateFaceShieldDrag(pos);
+            } else {
+                setCursor(faceShieldCursorAt(pos));
+            }
+            return;
+        }
         const bool hover = trashNearRect().contains(pos);
         if (hoverTrash_ != hover) {
             hoverTrash_ = hover;
@@ -1290,6 +1370,11 @@ protected:
 
     void mouseReleaseEvent(QMouseEvent* event) override {
         if (event->button() != Qt::LeftButton) return;
+        if (faceShieldEditing_) {
+            endFaceShieldDrag();
+            setCursor(faceShieldCursorAt(event->position()));
+            return;
+        }
         if (draggingTrash_) {
             draggingTrash_ = false;
             saveTrashPos();
@@ -1518,6 +1603,367 @@ private:
         });
     }
 
+    qreal faceShieldMinSide() const {
+        return std::max(24.0, leafPackSide(leafScale_) * 2.0);
+    }
+
+    QRectF shieldHitRect() const {
+        if (!faceShieldReady_) return {};
+        return QRectF(faceShieldOrigin_, QSizeF(faceShieldSide_, faceShieldSide_));
+    }
+
+    QPolygonF housePolygon(const QRectF& square) const {
+        const qreal side = square.width();
+        const qreal peak = side * faceShieldPeakFrac_;
+        QPolygonF poly;
+        poly << QPointF(square.center().x(), square.top() - peak)
+             << QPointF(square.right(), square.top())
+             << QPointF(square.right(), square.bottom())
+             << QPointF(square.left(), square.bottom())
+             << QPointF(square.left(), square.top());
+        return poly;
+    }
+
+    QPointF peakPoint() const {
+        const QRectF r = shieldHitRect();
+        return QPointF(r.center().x(), r.top() - r.width() * faceShieldPeakFrac_);
+    }
+
+    QPointF houseCentroid(const QRectF& square) const {
+        const QPolygonF poly = housePolygon(square);
+        QPointF sum;
+        for (const QPointF& p : poly) sum += p;
+        return sum / qreal(poly.size());
+    }
+
+    bool shieldActivePlay() const {
+        return faceShieldEnabled_ && faceShieldReady_ && !faceShieldEditing_;
+    }
+
+    // 圆 vs 屋脊多边形：返回指向外侧的法线与穿透深度。
+    bool queryHouseContact(const QPointF& c, qreal radius, const QRectF& square,
+                           QPointF* normal, qreal* penetration, bool* insideOut) const {
+        const QPolygonF poly = housePolygon(square);
+        const QPointF centroid = houseCentroid(square);
+        const bool inside = poly.containsPoint(c, Qt::OddEvenFill);
+        if (insideOut) *insideOut = inside;
+
+        qreal bestDist = 1.0e30;
+        QPointF bestClosest;
+        QPointF bestOutN;
+        const int n = poly.size();
+        for (int i = 0; i < n; ++i) {
+            const QPointF a = poly[i];
+            const QPointF b = poly[(i + 1) % n];
+            const QPointF closest = closestPointOnSegment(a, b, c);
+            QPointF edge = b - a;
+            const qreal elen = std::hypot(edge.x(), edge.y());
+            if (elen < 1e-6) continue;
+            edge /= elen;
+            QPointF outN(edge.y(), -edge.x());
+            if (QPointF::dotProduct(outN, centroid - a) > 0.0) outN = -outN;
+            const qreal d = QLineF(c, closest).length();
+            if (d < bestDist) {
+                bestDist = d;
+                bestClosest = closest;
+                bestOutN = outN;
+            }
+        }
+        if (bestDist >= 1.0e29) return false;
+
+        if (inside) {
+            if (normal) *normal = bestOutN;
+            if (penetration) *penetration = bestDist + radius;
+            return true;
+        }
+        if (bestDist >= radius) return false;
+        QPointF out = c - bestClosest;
+        const qreal nl = std::hypot(out.x(), out.y());
+        if (nl > 1e-6) out /= nl;
+        else out = bestOutN;
+        if (normal) *normal = out;
+        if (penetration) *penetration = radius - bestDist;
+        return true;
+    }
+
+    void loadFaceShield() {
+        faceShieldEnabled_ = configValue(kFaceShieldEnabledKey, false).toBool();
+        const QVariantMap m = configValue(kFaceShieldRectKey).toMap();
+        if (m.value(QStringLiteral("mode")).toString() == QStringLiteral("px")) {
+            faceShieldOrigin_ = QPointF(m.value(QStringLiteral("x")).toDouble(),
+                                        m.value(QStringLiteral("y")).toDouble());
+            faceShieldSide_ = m.value(QStringLiteral("side")).toDouble();
+            faceShieldPeakFrac_ = std::clamp(
+                m.value(QStringLiteral("peak"), kShieldPeakFrac).toDouble(), 0.05, 0.55);
+            faceShieldReady_ = faceShieldSide_ > 1.0;
+        }
+    }
+
+    void saveFaceShield() const {
+        if (!faceShieldReady_) return;
+        writeConfigValue(kFaceShieldRectKey, QVariantMap{
+            {QStringLiteral("mode"), QStringLiteral("px")},
+            {QStringLiteral("x"), faceShieldOrigin_.x()},
+            {QStringLiteral("y"), faceShieldOrigin_.y()},
+            {QStringLiteral("side"), faceShieldSide_},
+            {QStringLiteral("peak"), faceShieldPeakFrac_},
+        });
+    }
+
+    void ensureFaceShieldRect() {
+        const QRectF w = worldRect();
+        if (w.width() <= 1.0 || w.height() <= 1.0) return;
+        if (!faceShieldReady_) {
+            const qreal side = std::max(faceShieldMinSide(),
+                                        std::min(w.width(), w.height()) * 0.25);
+            faceShieldSide_ = side;
+            faceShieldOrigin_ = QPointF(w.center().x() - side * 0.5,
+                                        w.center().y() - side * 0.5);
+            faceShieldReady_ = true;
+        }
+        clampFaceShieldToWorld();
+    }
+
+    void clampFaceShieldToWorld() {
+        if (!faceShieldReady_) return;
+        const QRectF w = worldRect();
+        if (w.width() <= 1.0 || w.height() <= 1.0) return;
+        faceShieldPeakFrac_ = std::clamp(faceShieldPeakFrac_, 0.05, 0.55);
+        const qreal peak = faceShieldSide_ * faceShieldPeakFrac_;
+        const qreal minSide = std::min(faceShieldMinSide(),
+                                       std::min(w.width(), std::max(8.0, w.height() - peak)));
+        faceShieldSide_ = std::clamp(faceShieldSide_, minSide,
+                                     std::min(w.width(), std::max(minSide, w.height() - peak)));
+        const qreal maxX = w.right() - faceShieldSide_;
+        const qreal maxY = w.bottom() - faceShieldSide_;
+        const qreal minY = w.top() + faceShieldSide_ * faceShieldPeakFrac_;
+        faceShieldOrigin_.setX(clampAxis(faceShieldOrigin_.x(), w.left(), maxX));
+        faceShieldOrigin_.setY(clampAxis(faceShieldOrigin_.y(), minY, maxY));
+    }
+
+    void setFaceShieldSquare(const QRectF& square) {
+        faceShieldSide_ = std::max(faceShieldMinSide(),
+                                   std::min(square.width(), square.height()));
+        faceShieldOrigin_ = square.topLeft();
+        faceShieldReady_ = true;
+        clampFaceShieldToWorld();
+    }
+
+    enum class ShieldDragMode { None, Move, ResizeNW, ResizeNE, ResizeSW, ResizeSE,
+                                ResizeN, ResizeS, ResizeW, ResizeE, Peak };
+
+    ShieldDragMode hitFaceShieldHandle(const QPointF& pos) const {
+        const QRectF r = shieldHitRect();
+        if (r.isEmpty()) return ShieldDragMode::None;
+        const qreal hs = 8.0;
+        auto nearPt = [&](const QPointF& pt) {
+            return QLineF(pos, pt).length() <= hs;
+        };
+        // 尖顶优先于边/角，便于上下拖。
+        if (nearPt(peakPoint())) return ShieldDragMode::Peak;
+        if (nearPt(r.topLeft())) return ShieldDragMode::ResizeNW;
+        if (nearPt(r.topRight())) return ShieldDragMode::ResizeNE;
+        if (nearPt(r.bottomLeft())) return ShieldDragMode::ResizeSW;
+        if (nearPt(r.bottomRight())) return ShieldDragMode::ResizeSE;
+        if (std::abs(pos.y() - r.top()) <= hs && pos.x() >= r.left() && pos.x() <= r.right())
+            return ShieldDragMode::ResizeN;
+        if (std::abs(pos.y() - r.bottom()) <= hs && pos.x() >= r.left() && pos.x() <= r.right())
+            return ShieldDragMode::ResizeS;
+        if (std::abs(pos.x() - r.left()) <= hs && pos.y() >= r.top() && pos.y() <= r.bottom())
+            return ShieldDragMode::ResizeW;
+        if (std::abs(pos.x() - r.right()) <= hs && pos.y() >= r.top() && pos.y() <= r.bottom())
+            return ShieldDragMode::ResizeE;
+        if (r.contains(pos)) return ShieldDragMode::Move;
+        return ShieldDragMode::None;
+    }
+
+    Qt::CursorShape faceShieldCursorAt(const QPointF& pos) const {
+        switch (hitFaceShieldHandle(pos)) {
+        case ShieldDragMode::Peak:
+        case ShieldDragMode::ResizeN:
+        case ShieldDragMode::ResizeS:
+            return Qt::SizeVerCursor;
+        case ShieldDragMode::ResizeNW:
+        case ShieldDragMode::ResizeSE:
+            return Qt::SizeFDiagCursor;
+        case ShieldDragMode::ResizeNE:
+        case ShieldDragMode::ResizeSW:
+            return Qt::SizeBDiagCursor;
+        case ShieldDragMode::ResizeW:
+        case ShieldDragMode::ResizeE:
+            return Qt::SizeHorCursor;
+        case ShieldDragMode::Move:
+            return Qt::SizeAllCursor;
+        default:
+            return Qt::ArrowCursor;
+        }
+    }
+
+    void beginFaceShieldDrag(const QPointF& pos) {
+        ensureFaceShieldRect();
+        shieldDragMode_ = hitFaceShieldHandle(pos);
+        if (shieldDragMode_ == ShieldDragMode::None) {
+            // 点在框外：仍允许点空白（暗化遮罩吃鼠标），不开始拖。
+            return;
+        }
+        shieldDragStartPos_ = pos;
+        shieldDragStartOrigin_ = faceShieldOrigin_;
+        shieldDragStartSide_ = faceShieldSide_;
+        shieldDragStartPeak_ = faceShieldPeakFrac_;
+        setCursor(faceShieldCursorAt(pos));
+        update();
+    }
+
+    void updateFaceShieldDrag(const QPointF& pos) {
+        if (shieldDragMode_ == ShieldDragMode::None) return;
+        if (shieldDragMode_ == ShieldDragMode::Peak) {
+            const qreal side = std::max(1.0, faceShieldSide_);
+            const QRectF w = worldRect();
+            const qreal maxPeakByWorld =
+                std::max(0.05, (faceShieldOrigin_.y() - w.top()) / side);
+            const qreal peak = (faceShieldOrigin_.y() - pos.y()) / side;
+            faceShieldPeakFrac_ = std::clamp(peak, 0.05, std::min(0.55, maxPeakByWorld));
+            clampFaceShieldToWorld();
+            update();
+            return;
+        }
+        const QPointF delta = pos - shieldDragStartPos_;
+        QRectF r(shieldDragStartOrigin_, QSizeF(shieldDragStartSide_, shieldDragStartSide_));
+        const qreal minS = faceShieldMinSide();
+        switch (shieldDragMode_) {
+        case ShieldDragMode::Move:
+            r.translate(delta);
+            break;
+        case ShieldDragMode::ResizeSE: {
+            const qreal s = std::max(minS, shieldDragStartSide_ + std::max(delta.x(), delta.y()));
+            r.setWidth(s);
+            r.setHeight(s);
+            break;
+        }
+        case ShieldDragMode::ResizeSW: {
+            const qreal s = std::max(minS, shieldDragStartSide_ + std::max(-delta.x(), delta.y()));
+            r.setLeft(r.right() - s);
+            r.setHeight(s);
+            r.setWidth(s);
+            break;
+        }
+        case ShieldDragMode::ResizeNE: {
+            const qreal s = std::max(minS, shieldDragStartSide_ + std::max(delta.x(), -delta.y()));
+            r.setTop(r.bottom() - s);
+            r.setWidth(s);
+            r.setHeight(s);
+            break;
+        }
+        case ShieldDragMode::ResizeNW: {
+            const qreal s = std::max(minS, shieldDragStartSide_ + std::max(-delta.x(), -delta.y()));
+            r.setRight(r.left() + shieldDragStartSide_);
+            r.setBottom(r.top() + shieldDragStartSide_);
+            r.setLeft(r.right() - s);
+            r.setTop(r.bottom() - s);
+            break;
+        }
+        case ShieldDragMode::ResizeE: {
+            const qreal s = std::max(minS, shieldDragStartSide_ + delta.x());
+            r.setWidth(s);
+            r.setHeight(s);
+            break;
+        }
+        case ShieldDragMode::ResizeW: {
+            const qreal s = std::max(minS, shieldDragStartSide_ - delta.x());
+            r.setLeft(r.right() - s);
+            r.setWidth(s);
+            r.setHeight(s);
+            break;
+        }
+        case ShieldDragMode::ResizeS: {
+            const qreal s = std::max(minS, shieldDragStartSide_ + delta.y());
+            r.setWidth(s);
+            r.setHeight(s);
+            break;
+        }
+        case ShieldDragMode::ResizeN: {
+            const qreal s = std::max(minS, shieldDragStartSide_ - delta.y());
+            r.setTop(r.bottom() - s);
+            r.setWidth(s);
+            r.setHeight(s);
+            break;
+        }
+        default:
+            break;
+        }
+        // 保持正方形：取边长。
+        const qreal side = std::max(minS, std::min(r.width(), r.height()));
+        setFaceShieldSquare(QRectF(r.topLeft(), QSizeF(side, side)));
+        update();
+    }
+
+    void endFaceShieldDrag() {
+        shieldDragMode_ = ShieldDragMode::None;
+        update();
+    }
+
+    void drawFaceShieldEdit(QPainter& p) const {
+        if (!faceShieldReady_) return;
+        const QRectF r = shieldHitRect();
+        QPen pen(QColor(255, 255, 255, 220), 1.5, Qt::DashLine);
+        pen.setCosmetic(true);
+        p.setPen(pen);
+        p.setBrush(QColor(255, 255, 255, 28));
+        p.drawRect(r);
+        // 尖顶示意（浅虚线）
+        const QPolygonF roof = housePolygon(r);
+        QPen roofPen(QColor(255, 220, 160, 200), 1.2, Qt::DashLine);
+        roofPen.setCosmetic(true);
+        p.setPen(roofPen);
+        p.setBrush(Qt::NoBrush);
+        p.drawPolygon(roof);
+        // 角点 + 尖顶手柄
+        p.setPen(Qt::NoPen);
+        p.setBrush(QColor(255, 255, 255, 230));
+        const qreal hs = 5.0;
+        for (const QPointF& pt : {r.topLeft(), r.topRight(), r.bottomLeft(), r.bottomRight()}) {
+            p.drawRect(QRectF(pt.x() - hs * 0.5, pt.y() - hs * 0.5, hs, hs));
+        }
+        const QPointF peak = peakPoint();
+        p.setBrush(QColor(255, 210, 120, 240));
+        p.drawEllipse(peak, hs * 0.65, hs * 0.65);
+    }
+
+    void solveFaceShieldPositions() {
+        if (!shieldActivePlay()) return;
+        const QRectF square = shieldHitRect();
+        const qreal radius = softR(leafScale_);
+        for (LeafBody& L : leaves_) {
+            if (!isPhysical(L.state)) continue;
+            QPointF n;
+            qreal pen = 0.0;
+            bool inside = false;
+            if (!queryHouseContact(L.pos, radius, square, &n, &pen, &inside)) continue;
+            // 半导：只允许外向位置修正。
+            if (pen > kPositionSlopPx) {
+                L.pos += n * std::min(pen, rigidHalfWidth(leafScale_) * kPositionMaxCorrectionFrac);
+            }
+        }
+    }
+
+    void applyFaceShieldEject(qreal dt) {
+        if (!shieldActivePlay()) return;
+        const QRectF square = shieldHitRect();
+        const qreal radius = softR(leafScale_) * 0.35;
+        for (LeafBody& L : leaves_) {
+            if (L.state != LeafState::Idle && L.state != LeafState::Dragging) continue;
+            QPointF n;
+            qreal pen = 0.0;
+            bool inside = false;
+            if (!queryHouseContact(L.pos, radius, square, &n, &pen, &inside)) continue;
+            if (!inside) continue;
+            // 框内：缓慢向下 + 略偏外侧挤出。
+            L.vel.setY(L.vel.y() + kShieldEjectAccel * dt);
+            L.vel.setX(L.vel.x() + n.x() * 120.0 * dt);
+            if (L.state != LeafState::Dragging) clampSpeed(L);
+        }
+    }
+
     qreal worldAngle(const LeafBody& L) const { return leafParams().artAngleRad + L.angle; }
 
     void softSegmentEnds(const LeafBody& L, QPointF* a, QPointF* b) const {
@@ -1618,8 +2064,12 @@ private:
     }
 
     void updateWorld() {
-        theoreticalCapacity_ = maxLeavesForSize(size(), leafScale_);
+        const QRectF shield = (faceShieldEnabled_ && faceShieldReady_)
+            ? shieldHitRect() : QRectF{};
+        const QRectF* shieldPtr = (shield.width() > 1.0) ? &shield : nullptr;
+        theoreticalCapacity_ = maxLeavesForSize(size(), leafScale_, shieldPtr, faceShieldPeakFrac_);
         maxLeaves_ = leavesForPercent(theoreticalCapacity_, preferredPercent_);
+        if (faceShieldEditing_) maxLeaves_ = 0;
         writeConfigValue(kViewportSizeKey, QVariantMap{
             {QStringLiteral("w"), width()},
             {QStringLiteral("h"), height()},
@@ -1719,6 +2169,14 @@ private:
                                        * spawnHeight);
             cand.angle = (QRandomGenerator::global()->generateDouble() - 0.5) * 1.6;
             clampToWorld(cand);
+            if (shieldActivePlay()) {
+                bool inside = false;
+                if (queryHouseContact(cand.pos, softR(leafScale_), shieldHitRect(),
+                                      nullptr, nullptr, &inside)
+                    && inside) {
+                    continue;
+                }
+            }
             bool overlaps = false;
             for (const LeafBody& o : leaves_) {
                 if (o.state == LeafState::Free || o.state == LeafState::Removing) continue;
@@ -1772,28 +2230,25 @@ private:
                     if (!isPhysical(B.state)) continue;
                     const bool aDrag = A.state == LeafState::Dragging;
                     const bool bDrag = B.state == LeafState::Dragging;
-                    if (draggedContactsOnly && !aDrag && !bDrag) continue;
+                    // 拖叶无体积：任一端在拖就不做叶-叶接触。
+                    if (aDrag || bDrag) continue;
+                    if (draggedContactsOnly) continue;
                     QPointF n;
                     qreal overlap = 0.0;
                     if (!contactData(A, B, &n, &overlap)) continue;
                     const qreal corr = std::min(
                         std::max(0.0, overlap - kPositionSlopPx), maxCorrection);
-                    if (corr <= 0.0 || (aDrag && bDrag)) continue;
-                    if (aDrag) {
-                        B.pos += n * (corr * kDragPushRatio);
-                    } else if (bDrag) {
-                        A.pos -= n * (corr * kDragPushRatio);
-                    } else {
-                        A.pos -= n * (corr * 0.5);
-                        B.pos += n * (corr * 0.5);
-                        if (it == 0) {
-                            const qreal turn = corr * kCollisionTorque;
-                            A.angVel -= turn;
-                            B.angVel += turn;
-                        }
+                    if (corr <= 0.0) continue;
+                    A.pos -= n * (corr * 0.5);
+                    B.pos += n * (corr * 0.5);
+                    if (it == 0) {
+                        const qreal turn = corr * kCollisionTorque;
+                        A.angVel -= turn;
+                        B.angVel += turn;
                     }
                 }
             }
+            solveFaceShieldPositions();
             for (LeafBody& L : leaves_) {
                 if (isPhysical(L.state)) clampToWorld(L);
             }
@@ -1807,35 +2262,24 @@ private:
             for (int j = i + 1; j < leaves_.size(); ++j) {
                 LeafBody& B = leaves_[j];
                 if (!isPhysical(B.state)) continue;
+                // 拖叶无体积。
+                if (A.state == LeafState::Dragging || B.state == LeafState::Dragging) continue;
                 QPointF n;
                 qreal overlap = 0.0;
                 if (!contactData(A, B, &n, &overlap)) continue;
-                const bool aDrag = A.state == LeafState::Dragging;
-                const bool bDrag = B.state == LeafState::Dragging;
-                if (aDrag && bDrag) continue;
-                const QPointF aVel = aDrag ? dragVelocity_ : A.vel;
-                const QPointF bVel = bDrag ? dragVelocity_ : B.vel;
-                const QPointF rel = bVel - aVel;
+                const QPointF rel = B.vel - A.vel;
                 const qreal vn = QPointF::dotProduct(rel, n);
                 const QPointF vt = rel - n * vn;
-                if (!aDrag && !bDrag) {
-                    if (vn < 0.0) {
-                        // 轻微耗散法向速度，避免密集堆叠把冲量来回传递成颤动。
-                        const qreal impulse = -vn * (1.0 + kRestitution) * 0.42;
-                        A.vel -= n * impulse;
-                        B.vel += n * impulse;
-                    }
-                    A.vel += vt * (kFriction * 0.5);
-                    B.vel -= vt * (kFriction * 0.5);
-                } else if (aDrag) {
-                    if (vn < 0.0) B.vel += n * (-vn * 0.50);
-                    B.vel -= vt * kFriction;
-                } else {
-                    if (vn < 0.0) A.vel -= n * (-vn * 0.50);
-                    A.vel += vt * kFriction;
+                if (vn < 0.0) {
+                    // 轻微耗散法向速度，避免密集堆叠把冲量来回传递成颤动。
+                    const qreal impulse = -vn * (1.0 + kRestitution) * 0.42;
+                    A.vel -= n * impulse;
+                    B.vel += n * impulse;
                 }
-                if (!aDrag) clampSpeed(A);
-                if (!bDrag) clampSpeed(B);
+                A.vel += vt * (kFriction * 0.5);
+                B.vel -= vt * (kFriction * 0.5);
+                clampSpeed(A);
+                clampSpeed(B);
             }
         }
     }
@@ -1893,15 +2337,10 @@ private:
             if (distance > maxStep * steps) delta *= (maxStep * steps / distance);
             const QPointF step = delta / steps;
             for (int s = 0; s < steps; ++s) {
-                const QPointF before = L.pos;
                 L.pos += step;
                 clampToWorld(L);
-                solvePositions(kDragPositionIters,
-                               rigidHalfWidth(leafScale_) * kPositionMaxCorrectionFrac, true);
-                if (maxOverlapWith(L) > rigidHalfWidth(leafScale_) * 0.55) {
-                    L.pos = before;
-                    break;
-                }
+                // 拖叶不推挤他叶；仍与护脸区做外向分离。
+                solveFaceShieldPositions();
             }
             const QPointF actualVel = (L.pos - start) / std::max(0.001, dt);
             dragVelocity_ = dragVelocity_ * 0.65 + actualVel * 0.35;
@@ -1923,6 +2362,7 @@ private:
 
     void onTick() {
         if (resizePaused_) return;
+        if (faceShieldEditing_) return;
         const qreal dt = kTickMs / 1000.0;
         bool dirty = pendingSpawns_ > 0 || pendingRemovals_ > 0;
         bool statsDirty = false;
@@ -1936,6 +2376,7 @@ private:
         flushSpawns();
         flushRemovals();
         advanceDragged(dt);
+        applyFaceShieldEject(dt);
 
         for (LeafBody& L : leaves_) {
             if (L.state == LeafState::Free) continue;
@@ -2041,6 +2482,258 @@ private:
     bool resizePaused_ = false;
     bool suppressResizeCommit_ = false;
     std::function<void()> statsCb_;
+
+    bool faceShieldEnabled_ = false;
+    bool faceShieldEditing_ = false;
+    bool faceShieldReady_ = false;
+    QPointF faceShieldOrigin_;
+    qreal faceShieldSide_ = 0.0;
+    qreal faceShieldPeakFrac_ = kShieldPeakFrac;
+    ShieldDragMode shieldDragMode_ = ShieldDragMode::None;
+    QPointF shieldDragStartPos_;
+    QPointF shieldDragStartOrigin_;
+    qreal shieldDragStartSide_ = 0.0;
+    qreal shieldDragStartPeak_ = kShieldPeakFrac;
+};
+
+class FaceShieldEditButton final : public QPushButton {
+public:
+    explicit FaceShieldEditButton(QWidget* parent) : QPushButton(parent) {
+        setFixedSize(RippleOverlayRoot::kBtnW,
+                     RippleOverlayRoot::kTopbarH - RippleOverlayRoot::kShadowW);
+        setCursor(Qt::PointingHandCursor);
+        setCheckable(true);
+        setFlat(true);
+        RippleOverlayRoot::polishChromeButton(this);
+
+        hoverAnim_ = new QVariantAnimation(this);
+        hoverAnim_->setDuration(RippleOverlayRoot::kHoverAnimMs);
+        hoverAnim_->setEasingCurve(QEasingCurve::OutCubic);
+        QObject::connect(hoverAnim_, &QVariantAnimation::valueChanged, this,
+                         [this](const QVariant& v) {
+            hoverT_ = v.toReal();
+            update();
+        });
+
+        checkAnim_ = new QVariantAnimation(this);
+        checkAnim_->setDuration(RippleOverlayRoot::kLockAnimMs);
+        checkAnim_->setEasingCurve(QEasingCurve::OutCubic);
+        QObject::connect(checkAnim_, &QVariantAnimation::valueChanged, this,
+                         [this](const QVariant& v) {
+            checkT_ = v.toReal();
+            update();
+        });
+        QObject::connect(this, &QPushButton::toggled, this, [this](bool on) {
+            checkAnim_->stop();
+            checkAnim_->setStartValue(checkT_);
+            checkAnim_->setEndValue(on ? 1.0 : 0.0);
+            checkAnim_->start();
+        });
+    }
+
+    void setAccentProgress(qreal progress) {
+        accentT_ = std::clamp(progress, 0.0, 1.0);
+        update();
+    }
+
+    void setInteractionEnabled(bool on) {
+        if (interactionEnabled_ == on) return;
+        interactionEnabled_ = on;
+        setCursor(on ? Qt::PointingHandCursor : Qt::ArrowCursor);
+        if (!on) {
+            RippleOverlayRoot::startHoverAnimation(hoverAnim_, hoverT_, 0.0);
+        }
+        update();
+    }
+    bool interactionEnabled() const { return interactionEnabled_; }
+
+    void forceHover(bool on) {
+        RippleOverlayRoot::startHoverAnimation(hoverAnim_, hoverT_, on ? 1.0 : 0.0);
+    }
+
+protected:
+    bool event(QEvent* e) override {
+        if (!interactionEnabled_
+            && (e->type() == QEvent::Enter || e->type() == QEvent::Leave
+                || e->type() == QEvent::MouseButtonPress
+                || e->type() == QEvent::MouseButtonRelease)) {
+            return true;
+        }
+        if (e->type() == QEvent::Enter) {
+            RippleOverlayRoot::startHoverAnimation(hoverAnim_, hoverT_, 1.0);
+        } else if (e->type() == QEvent::Leave) {
+            RippleOverlayRoot::startHoverAnimation(hoverAnim_, hoverT_, 0.0);
+        }
+        return QPushButton::event(e);
+    }
+
+    void paintEvent(QPaintEvent*) override {
+        QPainter p(this);
+        p.fillRect(rect(), QColor(0, 0, 0, 1));
+        if (interactionEnabled_) {
+            RippleOverlayRoot::paintChromeHover(p, rect(), hoverT_, accentT_);
+        }
+
+        RippleOverlayRoot::beginCrispIconPaint(p, this);
+        QColor iconColor = RippleOverlayRoot::accentIconColor(accentT_);
+        if (!interactionEnabled_) {
+            iconColor = QColor(148, 148, 148, 120);
+        }
+        const QRectF box = RippleOverlayRoot::iconBox();
+        const qreal s = std::min(box.width(), box.height());
+        // 未选中：单空心方。选中：同心缩放（同中心、对角线重合），一大一小。
+        if (checkT_ < 0.02) {
+            RippleOverlayRoot::drawCrispRoundBox(p, box, RippleOverlayRoot::kIconBoxRadius,
+                                                 iconColor, 0.0);
+            return;
+        }
+        const qreal t = checkT_;
+        const qreal sBig = s * (1.0 + 0.18 * t);
+        const qreal sSmall = s * (1.0 - 0.28 * t);
+        const QPointF c = box.center();
+        const QRectF big(c.x() - sBig * 0.5, c.y() - sBig * 0.5, sBig, sBig);
+        const QRectF small(c.x() - sSmall * 0.5, c.y() - sSmall * 0.5, sSmall, sSmall);
+        QColor outerColor = iconColor;
+        outerColor.setAlphaF(iconColor.alphaF() * (0.55 + 0.45 * t));
+        RippleOverlayRoot::drawCrispRoundBox(p, big, RippleOverlayRoot::kIconBoxRadius,
+                                             outerColor, 0.0);
+        RippleOverlayRoot::drawCrispRoundBox(p, small, 1.5, iconColor, 0.0);
+    }
+
+private:
+    QVariantAnimation* hoverAnim_ = nullptr;
+    QVariantAnimation* checkAnim_ = nullptr;
+    qreal hoverT_ = 0.0;
+    qreal accentT_ = 1.0;
+    qreal checkT_ = 0.0;
+    bool interactionEnabled_ = true;
+};
+
+class FaceShieldSwitch final : public QWidget {
+public:
+    explicit FaceShieldSwitch(QWidget* parent) : QWidget(parent) {
+        setFixedSize(kSwitchW, RippleOverlayRoot::kTopbarH - RippleOverlayRoot::kShadowW);
+        setCursor(Qt::PointingHandCursor);
+        setMouseTracking(true);
+
+        slideAnim_ = new QVariantAnimation(this);
+        slideAnim_->setDuration(RippleOverlayRoot::kLockAnimMs);
+        slideAnim_->setEasingCurve(QEasingCurve::InOutCubic);
+        QObject::connect(slideAnim_, &QVariantAnimation::valueChanged, this,
+                         [this](const QVariant& v) {
+            posT_ = v.toReal();
+            update();
+        });
+
+        hoverAnim_ = new QVariantAnimation(this);
+        hoverAnim_->setDuration(RippleOverlayRoot::kHoverAnimMs);
+        hoverAnim_->setEasingCurve(QEasingCurve::OutCubic);
+        QObject::connect(hoverAnim_, &QVariantAnimation::valueChanged, this,
+                         [this](const QVariant& v) {
+            hoverT_ = v.toReal();
+            update();
+        });
+    }
+
+    static constexpr int kSwitchW = 40;
+
+    bool isOn() const { return on_; }
+    void setOn(bool on, bool notify = true, bool animate = true) {
+        if (on_ == on) {
+            if (!animate) {
+                slideAnim_->stop();
+                posT_ = on ? 1.0 : 0.0;
+                update();
+            }
+            return;
+        }
+        on_ = on;
+        if (!animate) {
+            slideAnim_->stop();
+            posT_ = on ? 1.0 : 0.0;
+            update();
+        } else {
+            slideAnim_->stop();
+            slideAnim_->setStartValue(posT_);
+            slideAnim_->setEndValue(on ? 1.0 : 0.0);
+            slideAnim_->start();
+        }
+        if (notify && onToggled_) onToggled_(on_);
+    }
+
+    void setAccentProgress(qreal progress) {
+        accentT_ = std::clamp(progress, 0.0, 1.0);
+        update();
+    }
+
+    void setOnToggled(std::function<void(bool)> cb) { onToggled_ = std::move(cb); }
+
+    // 刚显示时抑制悬停，避免点击方钮后悬停样式「跳」到划钮。
+    void resetHoverArming() {
+        hoverArmed_ = false;
+        hoverT_ = 0.0;
+        if (hoverAnim_) hoverAnim_->stop();
+        update();
+    }
+
+protected:
+    void showEvent(QShowEvent* event) override {
+        QWidget::showEvent(event);
+        resetHoverArming();
+    }
+
+    bool event(QEvent* e) override {
+        if (e->type() == QEvent::Enter) {
+            if (!hoverArmed_) return QWidget::event(e);
+            RippleOverlayRoot::startHoverAnimation(hoverAnim_, hoverT_, 1.0);
+        } else if (e->type() == QEvent::Leave) {
+            hoverArmed_ = true;
+            RippleOverlayRoot::startHoverAnimation(hoverAnim_, hoverT_, 0.0);
+        }
+        return QWidget::event(e);
+    }
+
+    void mousePressEvent(QMouseEvent* event) override {
+        if (event->button() == Qt::LeftButton) setOn(!on_);
+    }
+
+    void paintEvent(QPaintEvent*) override {
+        QPainter p(this);
+        p.setRenderHint(QPainter::Antialiasing, true);
+        p.fillRect(rect(), QColor(0, 0, 0, 1));
+        if (hoverArmed_) {
+            RippleOverlayRoot::paintChromeHover(p, rect(), hoverT_, accentT_);
+        }
+
+        const QRectF track(5, height() * 0.5 - 6.5, width() - 10, 13);
+        const QColor offC(theme().border);
+        const QColor onC(theme().activeLine);
+        const QColor trackC(
+            static_cast<int>(offC.red() + (onC.red() - offC.red()) * posT_),
+            static_cast<int>(offC.green() + (onC.green() - offC.green()) * posT_),
+            static_cast<int>(offC.blue() + (onC.blue() - offC.blue()) * posT_),
+            static_cast<int>(110 + 90 * posT_));
+        p.setPen(Qt::NoPen);
+        p.setBrush(trackC);
+        p.drawRoundedRect(track, 6.5, 6.5);
+
+        const qreal knobR = 5.0;
+        const qreal x0 = track.left() + knobR + 1.5;
+        const qreal x1 = track.right() - knobR - 1.5;
+        const qreal knobX = x0 + (x1 - x0) * posT_;
+        p.setBrush(QColor(255, 255, 255, 240));
+        p.drawEllipse(QPointF(knobX, track.center().y()), knobR, knobR);
+    }
+
+private:
+    bool on_ = false;
+    bool hoverArmed_ = false;
+    qreal posT_ = 0.0;
+    qreal hoverT_ = 0.0;
+    qreal accentT_ = 1.0;
+    QVariantAnimation* slideAnim_ = nullptr;
+    QVariantAnimation* hoverAnim_ = nullptr;
+    std::function<void(bool)> onToggled_;
 };
 
 class LeafRoot final : public RippleOverlayRoot {
@@ -2050,8 +2743,38 @@ public:
         canvas_ = new LeafCanvas(content());
         rulesStrip_ = new LeafRulesStrip(content());
         rulesStrip_->raise();
+
+        extraBox_ = new QWidget(this);
+        extraBox_->setStyleSheet(QStringLiteral("background: transparent;"));
+        auto* lay = new QHBoxLayout(extraBox_);
+        lay->setContentsMargins(0, 0, 0, 0);
+        lay->setSpacing(0);
+
+        editBtn_ = new FaceShieldEditButton(extraBox_);
+        lay->addWidget(editBtn_);
+        shieldSwitch_ = new FaceShieldSwitch(extraBox_);
+        lay->addWidget(shieldSwitch_);
+        shieldSwitch_->hide();
+        extraBox_->setFixedSize(extraChromeWidth(), kTopbarH - kShadowW);
+
+        QObject::connect(editBtn_, &QPushButton::toggled, this, [this](bool on) {
+            if (on && !canEnterFaceShieldEdit()) {
+                QSignalBlocker block(editBtn_);
+                editBtn_->setChecked(false);
+                return;
+            }
+            setFaceShieldEditMode(on);
+        });
+        shieldSwitch_->setOnToggled([this](bool on) {
+            if (canvas_) canvas_->setFaceShieldEnabled(on);
+        });
+        if (canvas_) {
+            shieldSwitch_->setOn(canvas_->faceShieldEnabled(), false, false);
+        }
+
         canvas_->commitViewport(content()->rect());
         setGiftRules(loadLeafGiftRules());
+        refreshEditMutex();
     }
 
     LeafCanvas* canvas() const { return canvas_; }
@@ -2069,7 +2792,48 @@ public:
     }
 
 protected:
-    bool wantsSyncResizeLayout() const override { return false; }
+    // 护脸编辑：暗化/框/阴影与窗口同帧；平时也跟手，避免缩放后碰撞延迟。
+    bool wantsSyncResizeLayout() const override { return true; }
+    bool wantsHighQualityResizePaint() const override {
+        return canvas_ && canvas_->faceShieldEditing();
+    }
+
+    int extraChromeWidth() const override {
+        // 划钮仅编辑态出现；平时只占编辑方钮宽度。
+        const bool showSwitch = canvas_ && canvas_->faceShieldEditing();
+        return kBtnW + (showSwitch ? FaceShieldSwitch::kSwitchW : 0);
+    }
+
+    void layoutExtraChrome(const QRect& leftGeo) override {
+        if (!extraBox_) return;
+        extraBox_->setFixedSize(extraChromeWidth(), leftGeo.height());
+        extraBox_->setGeometry(leftGeo.right(), leftGeo.y(),
+                               extraChromeWidth(), leftGeo.height());
+        extraBox_->raise();
+    }
+
+    bool extraChromeContains(const QPoint& local) const override {
+        return extraBox_ && extraBox_->isVisible() && extraBox_->geometry().contains(local);
+    }
+
+    void setExtraChromeVisible(bool vis) override {
+        if (extraBox_) {
+            extraBox_->setVisible(vis);
+            if (vis) extraBox_->raise();
+        }
+    }
+
+    void onChromeAccentProgress(qreal progress) override {
+        if (editBtn_) editBtn_->setAccentProgress(progress);
+        if (shieldSwitch_) shieldSwitch_->setAccentProgress(progress);
+    }
+
+    void onChromeVisualSync(bool borderShown, bool locked, bool /*transitioning*/) override {
+        chromeBorderShown_ = borderShown;
+        chromeLocked_ = locked;
+        onChromeAccentProgress(borderShown ? 1.0 : 0.0);
+        refreshEditMutex();
+    }
 
     bool contentWantsMouse(const QPoint& contentLocal) const override {
         if (!canvas_ || resizing() || canvas_->resizePaused()) return false;
@@ -2081,11 +2845,13 @@ protected:
     }
 
     void onContentGeometryChanged() override {
-        if (canvas_ && !resizing()) canvas_->commitViewport(content()->rect());
+        if (canvas_) canvas_->commitViewport(content()->rect());
         layoutRulesStrip();
     }
 
-    void onContentGeometryWhileResizing() override {}
+    void onContentGeometryWhileResizing() override {
+        if (canvas_) canvas_->commitViewport(content()->rect());
+    }
 
     void onResizeResume() override {
         if (canvas_) canvas_->endResizePause();
@@ -2093,8 +2859,68 @@ protected:
     }
 
 private:
+    bool canEnterFaceShieldEdit() const {
+        // 隐藏或锁定时不可进入编辑。
+        return chromeBorderShown_ && !chromeLocked_;
+    }
+
+    void refreshEditMutex() {
+        const bool editing = canvas_ && canvas_->faceShieldEditing();
+        if (editBtn_) {
+            // 编辑中可点退出；否则仅边框展开且未锁定时可进。
+            editBtn_->setInteractionEnabled(editing || canEnterFaceShieldEdit());
+        }
+        setFrameLockInteractionEnabled(!editing);
+    }
+
+    void setFaceShieldEditMode(bool on) {
+        if (on && !canEnterFaceShieldEdit()) {
+            if (editBtn_) {
+                QSignalBlocker block(editBtn_);
+                editBtn_->setChecked(false);
+            }
+            return;
+        }
+        if (canvas_) canvas_->setFaceShieldEditing(on);
+        if (shieldSwitch_) {
+            shieldSwitch_->setVisible(on);
+            if (on) {
+                shieldSwitch_->resetHoverArming();
+                shieldSwitch_->setOn(canvas_ && canvas_->faceShieldEnabled(), false, false);
+            }
+        }
+        // 编辑态出现划钮后重排热区宽度。
+        if (width() > 0) {
+            const QRect leftGeo(kShadowW, kShadowW, kCircleOff + kBtnW * 3, kTopbarH - kShadowW);
+            layoutExtraChrome(leftGeo);
+            update(QRect(leftGeo.right(), leftGeo.y(), kBtnW + FaceShieldSwitch::kSwitchW + 8,
+                         leftGeo.height()).adjusted(-1, -1, 1, 1));
+        }
+        if (auto* win = dynamic_cast<RippleOverlayWindow*>(hostWindow())) {
+            win->setFrameForced(on);
+        } else {
+            setFrameForced(on);
+        }
+        // 划钮弹出后：悬停仍留在方钮上（若光标还在方钮内），不要串到划钮。
+        QTimer::singleShot(0, this, [this]() {
+            if (!editBtn_) return;
+            const QPoint local = editBtn_->mapFromGlobal(QCursor::pos());
+            editBtn_->forceHover(editBtn_->rect().contains(local));
+            if (shieldSwitch_ && shieldSwitch_->isVisible()) {
+                shieldSwitch_->resetHoverArming();
+            }
+        });
+        refreshEditMutex();
+        layoutRulesStrip();
+        update();
+    }
+
     void layoutRulesStrip() {
         if (!rulesStrip_ || !content()) return;
+        if (canvas_ && canvas_->faceShieldEditing()) {
+            rulesStrip_->hide();
+            return;
+        }
         // 相对原先宽约缩 1/4。
         const int w = std::min(210, std::max(135, static_cast<int>(content()->width() * 0.375)));
         rulesStrip_->setFixedWidth(w);
@@ -2109,6 +2935,11 @@ private:
 
     LeafCanvas* canvas_ = nullptr;
     LeafRulesStrip* rulesStrip_ = nullptr;
+    QWidget* extraBox_ = nullptr;
+    FaceShieldEditButton* editBtn_ = nullptr;
+    FaceShieldSwitch* shieldSwitch_ = nullptr;
+    bool chromeBorderShown_ = true;
+    bool chromeLocked_ = false;
 };
 
 class LeafOverlayController final : public QObject {
@@ -2350,20 +3181,18 @@ private:
             f.setWeight(QFont::DemiBold);
             cardTitle->setFont(f);
         }
-        spawnBtn_ = new QPushButton(QStringLiteral("投放测试"), card);
-        spawnBtn_->setCursor(Qt::PointingHandCursor);
-        spawnBtn_->setFixedHeight(34);
-        liveaio::util::suppressButtonFocus(spawnBtn_);
+        spawnBtn_ = new liveaio::util::ChromeButton(QStringLiteral("投放测试"), card,
+                                                    liveaio::util::kControlH,
+                                                    liveaio::util::ControlVariant::Neutral);
+        spawnBtn_->setPadX(14);
         QObject::connect(spawnBtn_, &QPushButton::clicked, this, [this]() {
             if (!runtime_) return;
             runtime_->spawnTest(1);
             refreshOpenBtn();
             refreshStats();
         });
-        openBtn_ = new QPushButton(QStringLiteral("打开悬浮窗"), card);
-        openBtn_->setCursor(Qt::PointingHandCursor);
-        openBtn_->setFixedHeight(34);
-        liveaio::util::suppressButtonFocus(openBtn_);
+        openBtn_ = new liveaio::util::ChromeButton(QStringLiteral("打开悬浮窗"), card,
+                                                   liveaio::util::kControlH);
         QObject::connect(openBtn_, &QPushButton::clicked, this, [this]() { toggleOverlay(); });
         row->addWidget(cardTitle, 0, Qt::AlignVCenter);
         row->addStretch();
@@ -2401,7 +3230,7 @@ private:
         for (const auto& entry : skins) {
             if (entry.id == activeId) skinCombo_->setCurrentText(entry.name);
         }
-        skinCombo_->setFixedHeight(34);
+        skinCombo_->setFixedHeight(liveaio::util::kControlH);
         skinCombo_->setMinimumWidth(160);
         skinCombo_->setOnChange([this](const QString& name) { onSkinChanged(name); });
         themeRow->addWidget(skinCombo_);
@@ -2443,7 +3272,7 @@ private:
         leafScaleSpin_ = new liveaio::util::ThemedSpinBox(controls);
         trashScaleSpin_ = new liveaio::util::ThemedSpinBox(controls);
         for (QSpinBox* spin : {maxLeavesSpin_, leafScaleSpin_, trashScaleSpin_}) {
-            spin->setFixedHeight(34);
+            spin->setFixedHeight(liveaio::util::kControlH);
             spin->setMinimumWidth(100);
             spin->setAlignment(Qt::AlignCenter);
         }
@@ -2546,10 +3375,9 @@ private:
         scroll->setWidget(rulesHost_);
         giftLay->addWidget(scroll, 1);
 
-        addRuleBtn_ = new QPushButton(QStringLiteral("添加规则"), giftCard);
-        addRuleBtn_->setCursor(Qt::PointingHandCursor);
-        addRuleBtn_->setFixedHeight(34);
-        liveaio::util::suppressButtonFocus(addRuleBtn_);
+        addRuleBtn_ = new liveaio::util::ChromeButton(QStringLiteral("添加规则"), giftCard,
+                                                      liveaio::util::kControlH);
+        addRuleBtn_->setPadX(14);
         QObject::connect(addRuleBtn_, &QPushButton::clicked, this, [this]() { addGiftRule(); });
         giftLay->addWidget(addRuleBtn_, 0, Qt::AlignLeft);
         outer->addWidget(giftCard, 1);
@@ -2652,15 +3480,8 @@ private:
     }
 
     void styleAddRuleBtn() {
-        if (!addRuleBtn_) return;
-        addRuleBtn_->setStyleSheet(liveaio::util::qssOutlined(34));
-        if (!addRuleBtn_->isEnabled()) {
-            const auto& C = theme();
-            addRuleBtn_->setStyleSheet(QStringLiteral(
-                "QPushButton { background: %1; color: %2; border: 1.5px solid %2;"
-                " border-radius: 8px; font-size: 13px; font-weight: 600; padding: 0 14px; }"
-            ).arg(C.card, C.border));
-        }
+        // 不可用态由 ChromeButton 自己降色，这里只需重画。
+        if (addRuleBtn_) addRuleBtn_->update();
     }
 
     void pushSimGift(const QString& gift, int count) {
@@ -2697,29 +3518,13 @@ private:
         const bool open = runtime_ && runtime_->isOverlayActive();
         openBtn_->setText(open ? QStringLiteral("关闭悬浮窗") : QStringLiteral("打开悬浮窗"));
         if (simWidget_) simWidget_->setPushEnabled(open);
-        const auto& C = theme();
-        if (open) {
-            openBtn_->setStyleSheet(QStringLiteral(
-                "QPushButton { background: %1; color: #fff; border: 1.5px solid transparent;"
-                " border-radius: 8px; font-size: 13px; font-weight: 600; padding: 0 16px; }"
-                "QPushButton:hover { background: %2; }"
-            ).arg(C.closeHover, C.active));
-        } else {
-            openBtn_->setStyleSheet(QStringLiteral(
-                "QPushButton { background: %1; color: %2; border: 1.5px solid %2;"
-                " border-radius: 8px; font-size: 13px; font-weight: 600; padding: 0 16px; }"
-                "QPushButton:hover { background: %3; }"
-            ).arg(C.card, C.activeLine, C.hover));
-        }
+        openBtn_->setVariant(open ? liveaio::util::ControlVariant::Danger
+                                  : liveaio::util::ControlVariant::Outlined);
+        openBtn_->update();
     }
 
     void styleSpawnBtn() {
-        const auto& C = theme();
-        spawnBtn_->setStyleSheet(QStringLiteral(
-            "QPushButton { background: %1; color: %2; border: 1.5px solid %3;"
-            " border-radius: 8px; font-size: 13px; font-weight: 600; padding: 0 14px; }"
-            "QPushButton:hover { background: %4; color: %5; }"
-        ).arg(C.card, C.textMuted, C.border, C.hover, C.text));
+        if (spawnBtn_) spawnBtn_->update();
     }
 
     QSize capacityReferenceSize() const {
@@ -2795,9 +3600,9 @@ private:
     LeafScalePreview* preview_ = nullptr;
     QWidget* rulesHost_ = nullptr;
     QVBoxLayout* rulesLay_ = nullptr;
-    QPushButton* spawnBtn_ = nullptr;
-    QPushButton* openBtn_ = nullptr;
-    QPushButton* addRuleBtn_ = nullptr;
+    liveaio::util::ChromeButton* spawnBtn_ = nullptr;
+    liveaio::util::ChromeButton* openBtn_ = nullptr;
+    liveaio::util::ChromeButton* addRuleBtn_ = nullptr;
     QSpinBox* maxLeavesSpin_ = nullptr;
     QSpinBox* leafScaleSpin_ = nullptr;
     QSpinBox* trashScaleSpin_ = nullptr;

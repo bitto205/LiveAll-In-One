@@ -1,0 +1,11 @@
+# Cursor 内置 clangd：本仓库是 unity 编译（tools_main/pages_main #include 各 .cpp）。
+# 打开被 include 的子文件时，clangd 会当独立 TU 解析 → 数百条假报（含 unused-parameter）。
+# 真实编译库给主 TU；子文件诊断全部抑制。
+
+CompileFlags:
+  CompilationDatabase: build/cmake/all
+
+If:
+  PathMatch: .*/(tools_common|leaf_tool|memo_tool|danmu_tool|overtime_tool|gift_widgets|widgets|pages_common|home_page|tools_page|settings_page|main_page|gift|skin)\.cpp
+Diagnostics:
+  Suppress: "*"

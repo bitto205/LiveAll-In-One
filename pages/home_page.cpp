@@ -85,7 +85,7 @@ static void refreshCompanionPathBtn(QPushButton* btn, const RouteEnv& env) {
     }
     btn->show();
     btn->setText(env.companionInstalled ? QStringLiteral("更换路径") : QStringLiteral("指定路径"));
-    btn->setStyleSheet(qssOutlined(36));
+    btn->setStyleSheet(qssOutlined(kControlH));
 }
 
 // ─────────────────────────────────────────────
@@ -147,7 +147,7 @@ public:
             const bool selected = it.key() == last;
             const QString border = selected ? C.activeLine : C.border;
             it.value()->setStyleSheet(QStringLiteral(
-                "QFrame#Card { background: %1; border: 1.5px solid %2; border-radius: 10px; }"
+                "QFrame#Card { background: %1; border: 2px solid %2; border-radius: 10px; }"
                 "QFrame#Card:hover { background: %3; border-color: %4; }"
             ).arg(C.card, border, C.hover, C.activeLine));
         }
@@ -281,7 +281,7 @@ public:
         step1_.body->addWidget(loginDesc_);
         loginStatus_ = new QLabel(QStringLiteral("进入线路后检测登录状态"), step1_.card);
         loginBtn_ = new QPushButton(QStringLiteral("登录"), step1_.card);
-        loginBtn_->setFixedHeight(34);
+        loginBtn_->setFixedHeight(kControlH);
         loginBtn_->setCursor(Qt::PointingHandCursor);
         QObject::connect(loginBtn_, &QPushButton::clicked, this, [this]() { doLogin(); });
         auto* row1 = new QHBoxLayout;
@@ -295,10 +295,10 @@ public:
         roomInput_ = new QLineEdit(step2_.card);
         roomInput_->setPlaceholderText(
             QStringLiteral("请输入直播间 ID（抖音号，可在抖音「我」界面查看）"));
-        roomInput_->setFixedHeight(36);
+        roomInput_->setFixedHeight(kControlH);
         roomInput_->setText(configValue(QStringLiteral("live_id"), QString()).toString());
         saveBtn_ = new QPushButton(QStringLiteral("保存"), step2_.card);
-        saveBtn_->setFixedHeight(36);
+        saveBtn_->setFixedHeight(kControlH);
         saveBtn_->setMinimumWidth(80);
         saveBtn_->setCursor(Qt::PointingHandCursor);
         QObject::connect(saveBtn_, &QPushButton::clicked, this, [this]() { saveLiveId(); });
@@ -394,7 +394,7 @@ private:
 
     void applyLoginBtnStyle() {
         loginBtn_->setEnabled(loginEnabled_);
-        loginBtn_->setStyleSheet(loginEnabled_ ? qssOutlined(34) : qssDisabled(34));
+        loginBtn_->setStyleSheet(loginEnabled_ ? qssOutlined(kControlH) : qssDisabled(kControlH));
     }
 
     void doLogin() {
@@ -471,14 +471,14 @@ public:
         auto* btnRow = new QHBoxLayout;
         btnRow->setSpacing(12);
         actionBtn_ = new QPushButton(QStringLiteral("Unpatch"), card);
-        actionBtn_->setFixedHeight(36);
+        actionBtn_->setFixedHeight(kControlH);
         actionBtn_->setMinimumWidth(120);
         actionBtn_->setCursor(Qt::PointingHandCursor);
         QObject::connect(actionBtn_, &QPushButton::clicked, this, [this]() { doUnpatch(); });
         btnRow->addWidget(actionBtn_);
 
         pathBtn_ = new QPushButton(QStringLiteral("指定路径"), card);
-        pathBtn_->setFixedHeight(36);
+        pathBtn_->setFixedHeight(kControlH);
         pathBtn_->setCursor(Qt::PointingHandCursor);
         QObject::connect(pathBtn_, &QPushButton::clicked, this, [this]() { pickCompanionDir(); });
         btnRow->addWidget(pathBtn_);
@@ -596,7 +596,7 @@ private:
 
     void setActionEnabled(bool on) {
         actionBtn_->setEnabled(on);
-        actionBtn_->setStyleSheet(on ? qssOutlined(36) : qssDisabled(36));
+        actionBtn_->setStyleSheet(on ? qssOutlined(kControlH) : qssDisabled(kControlH));
     }
 
     void doUnpatch() {
@@ -694,14 +694,14 @@ public:
         auto* btnRow = new QHBoxLayout;
         btnRow->setSpacing(12);
         actionBtn_ = new QPushButton(QStringLiteral("Patch"), card);
-        actionBtn_->setFixedHeight(36);
+        actionBtn_->setFixedHeight(kControlH);
         actionBtn_->setMinimumWidth(120);
         actionBtn_->setCursor(Qt::PointingHandCursor);
         QObject::connect(actionBtn_, &QPushButton::clicked, this, [this]() { onActionClicked(); });
         btnRow->addWidget(actionBtn_);
 
         pathBtn_ = new QPushButton(QStringLiteral("指定路径"), card);
-        pathBtn_->setFixedHeight(36);
+        pathBtn_->setFixedHeight(kControlH);
         pathBtn_->setCursor(Qt::PointingHandCursor);
         QObject::connect(pathBtn_, &QPushButton::clicked, this, [this]() { pickCompanionDir(); });
         btnRow->addWidget(pathBtn_);
@@ -813,7 +813,7 @@ private:
 
     void setActionEnabled(bool on) {
         actionBtn_->setEnabled(on);
-        actionBtn_->setStyleSheet(on ? qssOutlined(36) : qssDisabled(36));
+        actionBtn_->setStyleSheet(on ? qssOutlined(kControlH) : qssDisabled(kControlH));
     }
 
     void onActionClicked() {

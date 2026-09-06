@@ -2232,17 +2232,17 @@ private:
         auto* row = new QHBoxLayout;
         row->addWidget(cardTitle(QStringLiteral("悬浮加班窗")));
         row->addStretch();
-        tutorialBtn_ = new QPushButton(QStringLiteral("教程"), card);
-        tutorialBtn_->setFixedHeight(34);
-        tutorialBtn_->setCursor(Qt::PointingHandCursor);
+        tutorialBtn_ = new liveaio::util::ChromeButton(
+            QStringLiteral("教程"), card, liveaio::util::kControlH,
+            liveaio::util::ControlVariant::Neutral);
+        tutorialBtn_->setPadX(14);
         QObject::connect(tutorialBtn_, &QPushButton::clicked, this, [this]() {
             showTutorialDialog(this);
         });
         row->addWidget(tutorialBtn_);
         row->addSpacing(8);
-        openBtn_ = new QPushButton(QStringLiteral("打开加班机"), card);
-        openBtn_->setFixedHeight(34);
-        openBtn_->setCursor(Qt::PointingHandCursor);
+        openBtn_ = new liveaio::util::ChromeButton(
+            QStringLiteral("打开加班机"), card, liveaio::util::kControlH);
         QObject::connect(openBtn_, &QPushButton::clicked, this, [this]() { toggleOverlay(); });
         row->addWidget(openBtn_);
         cl->addLayout(row);
@@ -2271,7 +2271,7 @@ private:
         for (const auto& entry : skins) {
             if (entry.id == activeId) skinCombo_->setCurrentText(entry.name);
         }
-        skinCombo_->setFixedHeight(34);
+        skinCombo_->setFixedHeight(liveaio::util::kControlH);
         skinCombo_->setMinimumWidth(160);
         skinCombo_->setOnChange([this](const QString& name) {
             writeConfigValue(liveaio::resources::skinConfigKey(QStringLiteral("overtime")),
@@ -2296,9 +2296,8 @@ private:
         auto* utl = qobject_cast<QVBoxLayout*>(utCard->layout());
         utl->addWidget(cardTitle(QStringLiteral("用户时长统计")));
         auto* utRow = new QHBoxLayout;
-        userTimeBtn_ = new QPushButton(QStringLiteral("查看用户时长统计"), utCard);
-        userTimeBtn_->setFixedHeight(34);
-        userTimeBtn_->setCursor(Qt::PointingHandCursor);
+        userTimeBtn_ = new liveaio::util::ChromeButton(
+            QStringLiteral("查看用户时长统计"), utCard, liveaio::util::kControlH);
         QObject::connect(userTimeBtn_, &QPushButton::clicked, this, [this]() {
             openUserTimeWindow();
         });
@@ -2428,40 +2427,18 @@ private:
         if (!openBtn_) return;
         const auto& C = theme();
         openBtn_->setText(isOpen ? QStringLiteral("关闭加班机") : QStringLiteral("打开加班机"));
-        if (isOpen) {
-            openBtn_->setStyleSheet(QStringLiteral(
-                "QPushButton { background: %1; color: #fff; border: 1.5px solid transparent;"
-                " border-radius: 8px; font-size: 13px; font-weight: 600; padding: 0 16px; }"
-                "QPushButton:hover { background: %2; }"
-            ).arg(C.closeHover, C.active));
-        } else {
-            openBtn_->setStyleSheet(QStringLiteral(
-                "QPushButton { background: %1; color: %2; border: 1.5px solid %2;"
-                " border-radius: 8px; font-size: 13px; font-weight: 600; padding: 0 16px; }"
-                "QPushButton:hover { background: %3; }"
-            ).arg(C.card, C.activeLine, C.hover));
-        }
+        openBtn_->setVariant(isOpen ? liveaio::util::ControlVariant::Danger
+                                    : liveaio::util::ControlVariant::Outlined);
+        openBtn_->update();
     }
 
     void styleUserTimeBtn() {
-        if (!userTimeBtn_) return;
-        const auto& C = theme();
-        userTimeBtn_->setStyleSheet(QStringLiteral(
-            "QPushButton { background: %1; color: %2; border: 1.5px solid %2;"
-            " border-radius: 8px; font-size: 13px; font-weight: 600; padding: 0 16px; }"
-            "QPushButton:hover { background: %3; }"
-        ).arg(C.card, C.activeLine, C.hover));
+        if (userTimeBtn_) userTimeBtn_->update();
     }
 
     void styleTutorialBtn() {
         const auto& C = theme();
-        if (tutorialBtn_) {
-            tutorialBtn_->setStyleSheet(QStringLiteral(
-                "QPushButton { background: %1; color: %2; border: 1.5px solid %3;"
-                " border-radius: 8px; font-size: 13px; font-weight: 600; padding: 0 14px; }"
-                "QPushButton:hover { background: %4; color: %5; }"
-            ).arg(C.card, C.textMuted, C.border, C.hover, C.text));
-        }
+        if (tutorialBtn_) tutorialBtn_->update();
         for (auto* lbl : descLabels_) {
             lbl->setStyleSheet(QStringLiteral("font-size: 12px; color: %1;").arg(C.textMuted));
         }
@@ -2473,9 +2450,9 @@ private:
     QVector<QPushButton*> navBtns_;
     QVector<QLabel*> descLabels_;
     int curNav_ = 0;
-    QPushButton* openBtn_ = nullptr;
-    QPushButton* tutorialBtn_ = nullptr;
-    QPushButton* userTimeBtn_ = nullptr;
+    liveaio::util::ChromeButton* openBtn_ = nullptr;
+    liveaio::util::ChromeButton* tutorialBtn_ = nullptr;
+    liveaio::util::ChromeButton* userTimeBtn_ = nullptr;
     ThemedComboBox* skinCombo_ = nullptr;
     QMap<QString, QString> skinNameToId_;
     SimGiftWidget* simWidget_ = nullptr;
