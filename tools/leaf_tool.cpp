@@ -213,6 +213,8 @@ static QVector<liveaio::resources::SkinEntry> listLeafSkins() {
         const QJsonDocument doc = QJsonDocument::fromJson(file.readAll());
         if (!doc.isObject()) continue;
         const QString name = doc.object().value(QStringLiteral("name")).toString(id);
+        const auto sameId = [&id](const liveaio::resources::SkinEntry& e) { return e.id == id; };
+        if (std::any_of(skins.cbegin(), skins.cend(), sameId)) continue;
         skins.append(liveaio::resources::SkinEntry{id, name});
     }
     return skins;
@@ -529,6 +531,9 @@ public:
     // 两格同尺寸：宽按 200% 设计宽；高按软裁贴图，并留适量呼吸边。
     static constexpr qreal kPreviewFrameScale = 2.0;
     static constexpr qreal kPreviewFill = 0.90;
+    // 预览格上限（按默认皮肤的垃圾桶尺寸），大贴图皮肤等比缩到框内而不是撑开设置页。
+    static constexpr qreal kPreviewMaxWCm = 2.0;
+    static constexpr qreal kPreviewMaxHCm = 2.7;
     static constexpr int kFramePad = 5;
     static constexpr int kLabelH = 14;
     static constexpr int kLabelGap = 3;  // 文字下沿到下边框
@@ -584,11 +589,12 @@ protected:
                                cellW, cellH);
 
         // 最大比例时约占框 90%；更小则居中。
-        const qreal leafSide = cmToPxF(leafParams().leafSideCm) * leafScale_ * kPreviewFill;
+        const qreal unit = previewUnitScale(assets);
+        const qreal leafSide = cmToPxF(leafParams().leafSideCm) * leafScale_ * kPreviewFill * unit;
         const QRectF leafRect(leafCell.center().x() - leafSide * 0.5,
                               leafCell.center().y() - leafSide * 0.5,
                               leafSide, leafSide);
-        const QSizeF trashVis = trashVisualSize(assets, trashScale_ * kPreviewFill);
+        const QSizeF trashVis = trashVisualSize(assets, trashScale_ * kPreviewFill * unit);
         const QRectF trashRect(trashCell.center().x() - trashVis.width() * 0.5,
                                trashCell.center().y() - trashVis.height() * 0.5,
                                trashVis.width(), trashVis.height());
@@ -625,9 +631,18 @@ private:
         return QSizeF(w, w * qreal(pm.height()) / qreal(pm.width()));
     }
 
+    // 叶子与垃圾桶共用同一个缩放系数，保证预览里两者的相对大小仍然可信。
+    static qreal previewUnitScale(const LeafSharedAssets& assets) {
+        const QSizeF natural = trashVisualSize(assets, kPreviewFrameScale);
+        if (natural.width() <= 0.0 || natural.height() <= 0.0) return 1.0;
+        const qreal maxW = cmToPxF(kPreviewMaxWCm) * kPreviewFrameScale;
+        const qreal maxH = cmToPxF(kPreviewMaxHCm) * kPreviewFrameScale;
+        return std::min({1.0, maxW / natural.width(), maxH / natural.height()});
+    }
+
     static QSizeF frameInnerSize(const LeafSharedAssets& assets) {
         // 框按满比例可视尺寸；绘制时再乘 kPreviewFill 留边。
-        return trashVisualSize(assets, kPreviewFrameScale);
+        return trashVisualSize(assets, kPreviewFrameScale * previewUnitScale(assets));
     }
 
     void refreshFixedSize() {

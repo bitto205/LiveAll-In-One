@@ -390,15 +390,12 @@ static QVector<SkinEntry> listSkins(const QString& appRoot, const QString& tool)
     const QDir toolDir(QDir(appRoot).filePath(QStringLiteral("resources/skin/%1").arg(tool)));
     const QStringList ids = toolDir.entryList(QDir::Dirs | QDir::NoDotAndDotDot, QDir::Name);
     for (const QString& id : ids) {
-        QString name = id;
+        // 没有 skin.json 的目录不是皮肤（例如残留的空目录），忽略以免出现幽灵条目。
         QFile f(toolDir.filePath(id + QStringLiteral("/skin.json")));
-        if (f.open(QIODevice::ReadOnly)) {
-            const auto doc = QJsonDocument::fromJson(f.readAll());
-            if (doc.isObject()) {
-                name = doc.object().value(QStringLiteral("name")).toString(id);
-            }
-        }
-        out.append(SkinEntry{id, name});
+        if (!f.open(QIODevice::ReadOnly)) continue;
+        const auto doc = QJsonDocument::fromJson(f.readAll());
+        if (!doc.isObject()) continue;
+        out.append(SkinEntry{id, doc.object().value(QStringLiteral("name")).toString(id)});
     }
     if (out.isEmpty()) out.append(SkinEntry{QStringLiteral("default"), QStringLiteral("默认")});
     return out;
