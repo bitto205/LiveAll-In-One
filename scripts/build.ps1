@@ -242,16 +242,44 @@ function Invoke-CmakeBuild([string]$OutDir, [string]$QtRoot) {
         $windeploy = Find-CommandPath "windeployqt.exe" @($qtBin)
     }
     if ($windeploy) {
-        foreach ($dll in @("LiveAIOPages.dll", "LiveAIOTools.dll")) {
-            $path = Join-Path $OutDir $dll
-            if (Test-Path $path) {
-                Write-Step "windeployqt $dll"
-                & $windeploy --release --no-translations --dir $OutDir $path
-                if ($LASTEXITCODE -ne 0) { Write-Warn "windeployqt $dll exit $LASTEXITCODE" }
+        # PowerShell $ErrorActionPreference=Stop 会把 stderr 警告当终止错误；
+        # windeployqt 缺 dxcompiler 时仍 exit 0，必须吞掉 stderr 只看退出码。
+        $prevEap = $ErrorActionPreference
+        $ErrorActionPreference = "Continue"
+        try {
+            foreach ($bin in @("LiveAIO.exe", "LiveAIOPages.dll", "LiveAIOTools.dll")) {
+                $path = Join-Path $OutDir $bin
+                if (-not (Test-Path $path)) { continue }
+                Write-Step "windeployqt $bin"
+                $null = & $windeploy --release --no-translations --dir $OutDir $path 2>&1
+                if ($LASTEXITCODE -ne 0) {
+                    Fail "windeployqt $bin exit $LASTEXITCODE"
+                    return
+                }
             }
+        } finally {
+            $ErrorActionPreference = $prevEap
         }
     } else {
         Write-Warn "windeployqt not found — Qt runtime DLLs may be missing beside the exe"
+    }
+
+    # MinGW 运行时不总被 windeployqt 带上，显式从 toolchain 拷贝。
+    $mingwBins = @(
+        "C:\Qt\Tools\mingw1310_64\bin",
+        "C:\Qt\Tools\mingw1120_64\bin",
+        (Join-Path $QtRoot "bin")
+    )
+    foreach ($runtime in @("libgcc_s_seh-1.dll", "libstdc++-6.dll", "libwinpthread-1.dll")) {
+        $dst = Join-Path $OutDir $runtime
+        if (Test-Path $dst) { continue }
+        foreach ($dir in $mingwBins) {
+            $src = Join-Path $dir $runtime
+            if (Test-Path $src) {
+                Copy-Item $src $dst -Force
+                break
+            }
+        }
     }
 
     $obsolete = Join-Path $OutDir "LiveAIOUI.exe"
@@ -262,7 +290,15 @@ function Invoke-CmakeBuild([string]$OutDir, [string]$QtRoot) {
             Fail "missing artifact: $name"
         }
     }
-    Write-Step "OK C++ artifacts"
+    foreach ($name in @(
+        "Qt6Core.dll", "Qt6Gui.dll", "Qt6Widgets.dll", "Qt6Network.dll",
+        "platforms\qwindows.dll"
+    )) {
+        if (-not (Test-Path (Join-Path $OutDir $name))) {
+            Fail "missing Qt runtime after windeployqt: $name"
+        }
+    }
+    Write-Step "OK C++ artifacts + Qt runtime"
 }
 
 function Invoke-StageRelease {
