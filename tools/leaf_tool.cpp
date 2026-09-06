@@ -56,9 +56,9 @@ static constexpr int kResizeSettleIters = 18;
 static constexpr int kDragPositionIters = 3;
 static constexpr int kMaxDragSubsteps = 8;
 static constexpr qreal kGravity = 1400.0;
-// 线性阻尼略弱，叶子滑得更远一点；角阻尼先不动。
-static constexpr qreal kDamping = 0.935;
-static constexpr qreal kAngDamping = 0.750;
+// 阻尼再低一档：叶子滑得更远、转得更久。
+static constexpr qreal kDamping = 0.960;
+static constexpr qreal kAngDamping = 0.820;
 static constexpr qreal kMaxAngVel = 0.9;
 static constexpr qreal kMaxSpeed = 165.0;
 static constexpr qreal kCollisionTorque = 0.001;
@@ -180,8 +180,17 @@ static QString privateLeafSkinRoot(const QString& id) {
     return QDir(g_appRoot).filePath(QStringLiteral("resources/private_skin/leaf/%1").arg(id));
 }
 
+// 私人皮肤放在 resources/private_skin/leaf/<id>/（不入库），按目录发现，不硬编码皮肤名。
 static bool isPrivateLeafSkinId(const QString& id) {
-    return id == QLatin1String("nemuru1") || id == QLatin1String("nemuru2");
+    if (id.isEmpty()) return false;
+    return QFile::exists(
+        QDir(privateLeafSkinRoot(id)).filePath(QStringLiteral("skin.json")));
+}
+
+static QStringList privateLeafSkinIds() {
+    const QDir root(QDir(g_appRoot).filePath(QStringLiteral("resources/private_skin/leaf")));
+    if (!root.exists()) return {};
+    return root.entryList(QDir::Dirs | QDir::NoDotAndDotDot, QDir::Name);
 }
 
 static liveaio::resources::ToolSkin activeLeafSkin() {
@@ -207,7 +216,7 @@ static liveaio::resources::ToolSkin activeLeafSkin() {
 
 static QVector<liveaio::resources::SkinEntry> listLeafSkins() {
     auto skins = liveaio::resources::listSkins(g_appRoot, QStringLiteral("leaf"));
-    for (const QString& id : {QStringLiteral("nemuru1"), QStringLiteral("nemuru2")}) {
+    for (const QString& id : privateLeafSkinIds()) {
         QFile file(QDir(privateLeafSkinRoot(id)).filePath(QStringLiteral("skin.json")));
         if (!file.open(QIODevice::ReadOnly)) continue;
         const QJsonDocument doc = QJsonDocument::fromJson(file.readAll());
@@ -293,6 +302,15 @@ static int configuredMaxPercent() {
     return clampCapPercent(configValue(kMaxPercentKey, kCapPercentDefault).toInt());
 }
 
+// 贴图已裁到内容外接矩形，按原始长宽比居中放进目标框，避免被拉成框的比例。
+static QRectF fitPixmap(const QRectF& box, const QPixmap& pm) {
+    if (pm.isNull() || pm.width() <= 0 || pm.height() <= 0) return box;
+    const qreal k = std::min(box.width() / pm.width(), box.height() / pm.height());
+    const QSizeF sz(pm.width() * k, pm.height() * k);
+    return QRectF(box.center().x() - sz.width() * 0.5,
+                  box.center().y() - sz.height() * 0.5, sz.width(), sz.height());
+}
+
 static QPixmap cropOpaque(const QPixmap& src) {
     if (src.isNull()) return src;
     const QImage img = src.toImage().convertToFormat(QImage::Format_ARGB32);
@@ -308,8 +326,8 @@ static QPixmap cropOpaque(const QPixmap& src) {
         }
     }
     if (maxx < minx) return src;
-    QRect r(minx, miny, maxx - minx + 1, maxy - miny + 1);
-    r.adjust(-4, -4, 4, 4);
+    // 紧贴内容裁切，不留呼吸边：绘制时按长宽比 fit，不会被裁死。
+    const QRect r(minx, miny, maxx - minx + 1, maxy - miny + 1);
     return QPixmap::fromImage(img.copy(r.intersected(img.rect())));
 }
 
@@ -599,7 +617,9 @@ protected:
                                trashCell.center().y() - trashVis.height() * 0.5,
                                trashVis.width(), trashVis.height());
 
-        if (!assets.leafPm.isNull()) p.drawPixmap(leafRect.toRect(), assets.leafPm);
+        if (!assets.leafPm.isNull()) {
+            p.drawPixmap(fitPixmap(leafRect, assets.leafPm).toRect(), assets.leafPm);
+        }
         const QPixmap& trashDraw =
             assets.trashPreviewPm.isNull() ? assets.trashPm : assets.trashPreviewPm;
         if (!trashDraw.isNull()) p.drawPixmap(trashRect.toRect(), trashDraw);
@@ -1532,13 +1552,12 @@ private:
                              cmToPxF(leafParams().leafHaloOuterCm) * side / leafVisualPx());
         }
         p.setOpacity(L.alpha);
-        p.drawPixmap(dst.toRect(), pm);
+        p.drawPixmap(fitPixmap(dst, pm).toRect(), pm);
         p.restore();
     }
 
     void drawTrash(QPainter& p, const LeafSharedAssets& assets) const {
         const QRectF trash = trashDrawRect();
-        const QRect dst = trash.toRect();
         if (trashHalo_ > 0.01) {
             const qreal expand = cmToPxF(leafParams().trashHaloOuterCm) * trashScale_;
             const qreal amt = trashHalo_ * leafParams().trashHaloAmount;
@@ -1553,11 +1572,11 @@ private:
         }
         if (lidOpen_ < 0.999 && !assets.trashPm.isNull()) {
             p.setOpacity(1.0 - lidOpen_);
-            p.drawPixmap(dst, assets.trashPm);
+            p.drawPixmap(fitPixmap(trash, assets.trashPm).toRect(), assets.trashPm);
         }
         if (lidOpen_ > 0.001 && !assets.trashOpenPm.isNull()) {
             p.setOpacity(lidOpen_);
-            p.drawPixmap(dst, assets.trashOpenPm);
+            p.drawPixmap(fitPixmap(trash, assets.trashOpenPm).toRect(), assets.trashOpenPm);
         }
         p.setOpacity(1.0);
     }
