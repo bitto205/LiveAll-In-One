@@ -104,7 +104,12 @@ func routeOrFromAction(action string) string {
 }
 
 func (h *hub) runLoginThenNotify() {
-	_ = listener.DoLogin(h.root)
+	if err := listener.DoLogin(h.root); err != nil {
+		h.log.Warn("login failed", "err", err)
+		h.send(Envelope{
+			"op": OpError, "code": "login", "msg": err.Error(),
+		})
+	}
 	text, can := LoginUIState(h.root)
 	h.send(Envelope{"op": OpLoginState, "text": text, "can_login": can})
 }

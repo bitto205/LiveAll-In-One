@@ -34,6 +34,7 @@ type BrowserOptions struct {
 	Root          string
 	ForceSystem   bool // 登录等场景强制系统浏览器
 	PreferBundled bool // 线路 1/2 采集：只用 browsers/ headless，禁止回退系统
+	RequireState  bool // 线路采集：启动浏览器前必须通过 state.json 登录预检
 	Headless      bool
 	TrimResources bool
 	UserDataDir   string
@@ -125,6 +126,11 @@ func findSystemBrowser() string {
 }
 
 func launchBrowser(parent context.Context, opt BrowserOptions) (*BrowserSession, error) {
+	if opt.RequireState {
+		if err := CheckSessionState(opt.Root); err != nil {
+			return nil, fmt.Errorf("state.json 预检查失败，请先登录：%w", err)
+		}
+	}
 	forceSystem := false
 	if !opt.PreferBundled {
 		forceSystem = opt.ForceSystem || preferSystemFromConfig(opt.Root) || os.Getenv(envUseSystem) == "1"
@@ -188,7 +194,10 @@ func launchBrowser(parent context.Context, opt BrowserOptions) (*BrowserSession,
 	if opt.TrimResources {
 		s.installBootstrapFilter()
 	}
-	_ = applyStorageState(ctx, statePath(opt.Root))
+	if err := applyStorageState(ctx, statePath(opt.Root)); err != nil && opt.RequireState {
+		s.Close()
+		return nil, fmt.Errorf("加载 state.json：%w", err)
+	}
 	_ = chromedp.Run(ctx, chromedp.Evaluate(`Object.defineProperty(navigator, 'webdriver', { get: () => undefined }); window.chrome = { runtime: {} };`, nil))
 	return s, nil
 }
@@ -734,14 +743,14 @@ const loginConfirmJS = `(() => {
 })();`
 
 // DoLogin opens a headed system browser for Douyin login and saves state.json.
-func DoLogin(root string) bool {
+func DoLogin(root string) error {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	sess, err := launchBrowser(ctx, BrowserOptions{
 		Root: root, ForceSystem: true, Headless: false, TrimResources: false,
 	})
 	if err != nil {
-		return false
+		return fmt.Errorf("启动登录浏览器：%w", err)
 	}
 	defer sess.Close()
 
@@ -751,22 +760,22 @@ func DoLogin(root string) bool {
 		chromedp.Navigate(loginURL),
 		chromedp.Evaluate(loginConfirmJS, nil),
 	); err != nil {
-		return false
+		return fmt.Errorf("打开抖音登录页：%w", err)
 	}
 
 	for {
 		var done bool
 		err := chromedp.Run(sess.Ctx, chromedp.Evaluate(`window.__LOGIN_DONE__ === true`, &done))
 		if err != nil {
-			return false
+			return fmt.Errorf("登录页面已关闭或无法访问：%w", err)
 		}
 		if done {
 			time.Sleep(time.Second)
 			if err := saveStorageState(sess.Ctx, path); err != nil {
-				return false
+				return fmt.Errorf("保存 state.json：%w", err)
 			}
 			if sessionOK(path) {
-				return true
+				return nil
 			}
 			_ = chromedp.Run(sess.Ctx, chromedp.Evaluate(`(() => {
 				window.__LOGIN_DONE__ = false;
@@ -777,16 +786,18 @@ func DoLogin(root string) bool {
 		}
 		select {
 		case <-sess.Ctx.Done():
-			return false
+			return fmt.Errorf("登录页面已关闭")
 		case <-time.After(500 * time.Millisecond):
 		}
 	}
 }
 
-func sessionOK(path string) bool {
+// CheckSessionState validates the local login credential before routes 1/2 start.
+func CheckSessionState(root string) error {
+	path := statePath(root)
 	raw, err := os.ReadFile(path)
 	if err != nil {
-		return false
+		return fmt.Errorf("未找到 state.json")
 	}
 	var st struct {
 		Cookies []struct {
@@ -795,20 +806,24 @@ func sessionOK(path string) bool {
 			Expires float64 `json:"expires"`
 		} `json:"cookies"`
 	}
-	if json.Unmarshal(raw, &st) != nil {
-		return false
+	if err := json.Unmarshal(raw, &st); err != nil {
+		return fmt.Errorf("state.json 格式错误：%w", err)
 	}
 	now := float64(time.Now().Unix())
 	for _, c := range st.Cookies {
-		if c.Name != "sessionid" || c.Value == "" {
+		if (c.Name != "sessionid" && c.Name != "sessionid_ss") || c.Value == "" {
 			continue
 		}
 		if c.Expires > 0 && c.Expires < now {
-			return false
+			continue
 		}
-		return true
+		return nil
 	}
-	return false
+	return fmt.Errorf("登录凭证缺失或已过期")
+}
+
+func sessionOK(path string) bool {
+	return CheckSessionState(filepath.Dir(path)) == nil
 }
 
 // Route2Driver: chromedp WSS /push/v2/ → OnFrame.
@@ -896,7 +911,8 @@ func runBrowserCapture(ctx context.Context, p Params, jsHook bool) error {
 	}
 	logf("capture begin", "route", string(p.Route), "live_id", p.LiveID, "js_hook", jsHook)
 	sess, err := launchBrowser(ctx, BrowserOptions{
-		Root: p.Root, PreferBundled: true, Headless: true, TrimResources: true,
+		Root: p.Root, PreferBundled: true, RequireState: true,
+		Headless: true, TrimResources: true,
 	})
 	if err != nil {
 		return err
@@ -979,8 +995,8 @@ func runBrowserCapture(ctx context.Context, p Params, jsHook bool) error {
 
 	// 采集旁路：帧解析 + 进房 body 共用 1 条栈。
 	type capJob struct {
-		frame []byte
-		enter network.RequestID
+		frame    []byte
+		enter    network.RequestID
 		hasEnter bool
 	}
 	capCh := make(chan capJob, 128)

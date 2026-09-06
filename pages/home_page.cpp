@@ -335,8 +335,17 @@ public:
 
     void applyLoginState(const QString& text, bool canLogin) {
         loginStatus_->setText(text);
-        loginBtn_->setText(QStringLiteral("登录"));
-        loginEnabled_ = canLogin;
+        loginBtn_->setText(canLogin ? QStringLiteral("登录") : QStringLiteral("重新登录"));
+        // Even a locally valid cookie may have been revoked remotely; never lock
+        // the user out of explicitly refreshing the login state.
+        loginEnabled_ = true;
+        applyLoginBtnStyle();
+    }
+
+    void setLoginChecking() {
+        loginStatus_->setText(QStringLiteral("正在预检查 state.json…"));
+        loginBtn_->setText(QStringLiteral("检查中…"));
+        loginEnabled_ = false;
         applyLoginBtnStyle();
     }
 
@@ -989,9 +998,10 @@ public:
         } else if (op == QStringLiteral("route.env")) {
             handleRouteEnv(packet);
         } else if (op == QStringLiteral("login.state")) {
-            const QString text = packet.value(QStringLiteral("text")).toString();
-            const bool can = packet.value(QStringLiteral("can_login")).toBool(true);
-            for (auto* page : webPages_) page->applyLoginState(text, can);
+            loginText_ = packet.value(QStringLiteral("text")).toString();
+            loginCan_ = packet.value(QStringLiteral("can_login")).toBool(true);
+            loginStateKnown_ = true;
+            for (auto* page : webPages_) page->applyLoginState(loginText_, loginCan_);
         } else if (op == QStringLiteral("error")) {
             toast_->showMsg(packet.value(QStringLiteral("msg"))
                                 .toString(QStringLiteral("错误")), true);
@@ -1045,6 +1055,8 @@ private:
         if (route == QStringLiteral("1") || route == QStringLiteral("2")) {
             auto* wp = new WebRoutePage(route, this, core_, stack_);
             webPages_.insert(route, wp);
+            if (loginStateKnown_) wp->applyLoginState(loginText_, loginCan_);
+            else wp->setLoginChecking();
             page = wp;
         } else if (route == QStringLiteral("3")) {
             route3_ = new Route3Page(this, core_, stack_);
@@ -1089,6 +1101,11 @@ private:
         liveaio::util::configSet(QStringLiteral("route"), route);
         stack_->setCurrentIndex(routeIndex_.value(route));
         if (webPages_.contains(route)) {
+            auto* wp = webPages_.value(route);
+            // Keep last known login state visible while refreshing; only show
+            // "checking" when we have never received login.state yet.
+            if (loginStateKnown_) wp->applyLoginState(loginText_, loginCan_);
+            else wp->setLoginChecking();
             if (core_) core_->uiCommand(QStringLiteral("login.query"));
         } else if (core_) {
             core_->uiCommand(QStringLiteral("route.env"), route);
@@ -1163,6 +1180,9 @@ private:
     Route4Page* route4_ = nullptr;
     QMap<QString, int> routeIndex_;
     QString connectedRoute_;
+    QString loginText_;
+    bool loginCan_ = true;
+    bool loginStateKnown_ = false;
     bool switching_ = false;
 };
 

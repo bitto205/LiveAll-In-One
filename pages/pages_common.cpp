@@ -28,6 +28,7 @@
 #include <QPainterPath>
 #include <QRegion>
 #include <QScrollArea>
+#include <QVector>
 #include <QShowEvent>
 #include <QSizePolicy>
 #include <QStackedWidget>
@@ -107,9 +108,6 @@ class CoreClient final : public QObject {
 public:
     explicit CoreClient(QObject* parent = nullptr) : QObject(parent), socket_(new QTcpSocket(this)) {
         QObject::connect(socket_, &QTcpSocket::readyRead, this, [this]() { onReadyRead(); });
-        QObject::connect(socket_, &QTcpSocket::connected, this, [this]() {
-            if (statusCb_) statusCb_(true);
-        });
         QObject::connect(socket_, &QTcpSocket::disconnected, this, [this]() {
             ready_ = false;
             if (statusCb_) statusCb_(false);
@@ -122,12 +120,32 @@ public:
     bool isReady() const { return ready_; }
 
     void send(const QJsonObject& packet) {
-        if (socket_->state() != QAbstractSocket::ConnectedState) return;
+        // Pages starts asynchronously: initial config/login queries are issued before
+        // TCP and protocol ready. Keep them instead of silently dropping them.
+        if (!ready_ || socket_->state() != QAbstractSocket::ConnectedState) {
+            if (pending_.size() >= 128) pending_.removeFirst();
+            pending_.push_back(packet);
+            return;
+        }
+        writePacket(packet);
+    }
+
+private:
+    void writePacket(const QJsonObject& packet) {
         QByteArray out = QJsonDocument(packet).toJson(QJsonDocument::Compact);
         out.push_back('\n');
         socket_->write(out);
     }
 
+    void flushPending() {
+        if (!ready_ || socket_->state() != QAbstractSocket::ConnectedState) return;
+        QVector<QJsonObject> queued;
+        queued.swap(pending_);
+        for (const QJsonObject& packet : queued) writePacket(packet);
+        socket_->flush();
+    }
+
+public:
     void connectLive(const QString& route, const QString& liveId, bool forceSystem = false) {
         send(QJsonObject{
             {QStringLiteral("op"), QStringLiteral("connect")},
@@ -201,7 +219,12 @@ private:
             QJsonObject packet = doc.object();
             const QString op = packet.value(QStringLiteral("op")).toString();
             if (op == QStringLiteral("ready")) {
+                const bool becameReady = !ready_;
                 ready_ = true;
+                if (becameReady) {
+                    if (statusCb_) statusCb_(true);
+                    flushPending();
+                }
                 if (waitingBye_ && packet.value(QStringLiteral("bye")).toBool()) {
                     waitingBye_ = false;
                     QTimer::singleShot(0, qApp, &QCoreApplication::quit);
@@ -213,6 +236,7 @@ private:
 
     QTcpSocket* socket_;
     QByteArray buffer_;
+    QVector<QJsonObject> pending_;
     bool ready_ = false;
     bool waitingBye_ = false;
     std::function<void(const QJsonObject&)> packetCb_;

@@ -6,8 +6,11 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
+
+	"liveaio/listener"
 )
 
 var (
@@ -157,32 +160,48 @@ func StopPagesChild() {
 	}
 }
 
-// LoginUIState reads state.json and returns (display text, login button enabled).
+// LoginUIState reads state.json and returns (display text, login button label hint).
 // Pages query via IPC (ui.command login.query); they must not read files directly.
+// canLogin=false means "already logged in" (UI may still offer 重新登录).
 func LoginUIState(root string) (text string, canLogin bool) {
+	if err := listener.CheckSessionState(root); err != nil {
+		msg := err.Error()
+		switch {
+		case strings.Contains(msg, "未找到 state.json"):
+			return "未登录", true
+		case strings.Contains(msg, "格式错误"):
+			return "登录状态读取失败", true
+		case strings.Contains(msg, "过期"):
+			return "登录已过期", true
+		default:
+			return "未找到登录凭证", true
+		}
+	}
+
 	path := filepath.Join(root, "state.json")
 	raw, err := os.ReadFile(path)
 	if err != nil {
-		return "未登录", true
+		return "已登录", false
 	}
 	var state map[string]any
 	if err := json.Unmarshal(raw, &state); err != nil {
-		return "登录状态读取失败", true
+		return "已登录", false
 	}
 	cookies, _ := state["cookies"].([]any)
 	now := time.Now().Unix()
+	var bestExp int64
 	for _, c := range cookies {
 		m, ok := c.(map[string]any)
 		if !ok {
 			continue
 		}
 		name, _ := m["name"].(string)
-		if name != "sessionid" {
+		if name != "sessionid" && name != "sessionid_ss" {
 			continue
 		}
 		val, _ := m["value"].(string)
 		if val == "" {
-			return "未找到登录凭证", true
+			continue
 		}
 		exp := int64(-1)
 		switch v := m["expires"].(type) {
@@ -194,18 +213,23 @@ func LoginUIState(root string) (text string, canLogin bool) {
 			exp = int64(v)
 		}
 		if exp > 0 && exp < now {
-			return "登录已过期", true
+			continue
 		}
 		if exp <= 0 {
 			return "已登录", false
 		}
-		days := (exp - now) / 86400
-		if days < 0 {
-			days = 0
+		if exp > bestExp {
+			bestExp = exp
 		}
-		return fmt.Sprintf("已登录，还剩约 %d 天", days), false
 	}
-	return "未找到登录凭证", true
+	if bestExp <= 0 {
+		return "已登录", false
+	}
+	days := (bestExp - now) / 86400
+	if days < 0 {
+		days = 0
+	}
+	return fmt.Sprintf("已登录，还剩约 %d 天", days), false
 }
 
 // DefaultRouteEnv is a UI-safe env snapshot when listener helpers are unavailable.
