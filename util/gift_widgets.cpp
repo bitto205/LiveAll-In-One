@@ -4,12 +4,17 @@
 #define LIVEAIO_UTIL_GIFT_WIDGETS_CPP
 
 #include <QDir>
+#include <QEvent>
 #include <QFrame>
 #include <QGridLayout>
 #include <QHBoxLayout>
 #include <QHideEvent>
+#include <QInputMethodEvent>
 #include <QLabel>
 #include <QLineEdit>
+#include <QPaintEvent>
+#include <QPainter>
+#include <QPointer>
 #include <QPushButton>
 #include <QScrollArea>
 #include <QScrollBar>
@@ -48,11 +53,13 @@ public:
     static constexpr int kPickerBatch = kPickerCols * kPickerRows;
 
     explicit GiftPickerPopup(QWidget* parent = nullptr)
-        : QFrame(parent, Qt::Popup | Qt::FramelessWindowHint) {
+        : QFrame(parent, Qt::Popup | Qt::FramelessWindowHint | Qt::NoDropShadowWindowHint) {
+        setAttribute(Qt::WA_TranslucentBackground);
         setFixedSize(kPickerW, kPickerH);
 
         auto* lay = new QVBoxLayout(this);
-        lay->setContentsMargins(8, 8, 8, 8);
+        // Pad matches painted chrome radius so content stays inside the rounded clip.
+        lay->setContentsMargins(kPad, kPad, kPad, kPad);
         lay->setSpacing(8);
 
         auto* sr = new QHBoxLayout;
@@ -60,23 +67,34 @@ public:
         search_ = new QLineEdit(this);
         search_->setPlaceholderText(QStringLiteral("搜索礼物"));
         search_->setFixedHeight(30);
-        QObject::connect(search_, &QLineEdit::textChanged, this, [this]() { refreshGrid(); });
+        search_->setAttribute(Qt::WA_InputMethodEnabled, true);
+        search_->setInputMethodHints(Qt::ImhNone);
+        search_->installEventFilter(this);
+        // textChanged during IME preedit rebuilds the grid and cancels composition —
+        // only refresh when not composing (see eventFilter + scheduleSearchRefresh).
+        QObject::connect(search_, &QLineEdit::textChanged, this, [this]() {
+            scheduleSearchRefresh();
+        });
         auto* sbtn = new QPushButton(QStringLiteral("搜索"), this);
         sbtn->setFixedSize(52, 30);
         sbtn->setCursor(Qt::PointingHandCursor);
         suppressButtonFocus(sbtn);
-        QObject::connect(sbtn, &QPushButton::clicked, this, [this]() { refreshGrid(); });
+        QObject::connect(sbtn, &QPushButton::clicked, this, [this]() {
+            imeComposing_ = false;
+            refreshGrid();
+        });
         sr->addWidget(search_, 1);
         sr->addWidget(sbtn);
         lay->addLayout(sr);
 
         scroll_ = new QScrollArea(this);
         scroll_->setWidgetResizable(true);
+        scroll_->setFrameShape(QFrame::NoFrame);
         scroll_->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
         scroll_->setFixedHeight(kPickerRows * (kPickerCell + 18));
-        scroll_->setStyleSheet(
-            QStringLiteral("QScrollArea { border: none; background: transparent; }"));
+        scroll_->viewport()->setAutoFillBackground(false);
         gridHost_ = new QWidget(scroll_);
+        gridHost_->setAttribute(Qt::WA_TranslucentBackground);
         grid_ = new QGridLayout(gridHost_);
         grid_->setContentsMargins(0, 0, 2, 0);
         grid_->setHorizontalSpacing(6);
@@ -95,37 +113,90 @@ public:
 
     // showAll=true：模拟区，展示全部礼物；否则隐藏 blocked 中已占用的礼物。
     void openAt(QWidget* anchor, const QSet<QString>& blocked, bool showAll) {
+        if (!anchor) return;
         ensureGiftNames();
         showAll_ = showAll;
         blocked_ = showAll ? QSet<QString>() : blocked;
+        imeComposing_ = false;
         move(anchor->mapToGlobal(QPoint(anchor->width() + 6, 0)));
         search_->clear();
         refreshGrid();
         show();
-        search_->setFocus();
+        raise();
+        activateWindow();
+        search_->setFocus(Qt::ActiveWindowFocusReason);
     }
 
     void refreshTheme() {
         const auto& C = theme();
+        // Frame chrome is painted in paintEvent (rounded + no OS drop shadow).
+        // QSS only styles inner controls — opaque QFrame QSS leaves a square corner
+        // at the bottom-right (esp. beside the scrollbar).
         setStyleSheet(QStringLiteral(
-            "QFrame { background: %1; border: 1px solid %2; border-radius: 4px; }"
-            "QLineEdit { background: %1; color: %3; border: 1px solid %4;"
+            "QFrame { background: transparent; border: none; }"
+            "QLineEdit { background: %1; color: %2; border: 1px solid %3;"
             " border-radius: 6px; padding: 0 8px; font-size: 12px; }"
-            "QPushButton { background: transparent; color: %3; border: 1px solid %4;"
+            "QPushButton { background: transparent; color: %2; border: 1px solid %3;"
             " border-radius: 4px; font-size: 12px; }"
-            "QPushButton:hover { background: %5; border-color: %2; }"
-            "QLabel { background: transparent; border: none; color: %3; }"
-        ).arg(C.card, C.activeLine, C.text, C.border, C.hover) + popupChromeQss());
+            "QPushButton:hover { background: %4; border-color: %5; }"
+            "QLabel { background: transparent; border: none; color: %2; }"
+            "QScrollArea { background: transparent; border: none; }"
+            "QScrollBar:vertical { background: transparent; width: 4px; margin: 2px 0; }"
+            "QScrollBar::handle:vertical { background: %3; border-radius: 2px; min-height: 20px; }"
+            "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }"
+            "QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: transparent; }"
+        ).arg(C.card, C.text, C.border, C.hover, C.activeLine) + popupChromeQss());
+        update();
     }
 
 protected:
+    bool eventFilter(QObject* obj, QEvent* event) override {
+        if (obj == search_ && event->type() == QEvent::InputMethod) {
+            const auto* ime = static_cast<QInputMethodEvent*>(event);
+            const bool composing = !ime->preeditString().isEmpty();
+            imeComposing_ = composing;
+            if (!composing && !ime->commitString().isEmpty()) {
+                QTimer::singleShot(0, this, [this]() {
+                    imeComposing_ = false;
+                    refreshGrid();
+                });
+            }
+        }
+        return QFrame::eventFilter(obj, event);
+    }
+
+    void paintEvent(QPaintEvent*) override {
+        const ThemePalette& C = theme();
+        QPainter p(this);
+        p.setRenderHint(QPainter::Antialiasing);
+        paintChromeBox(p, this, QColor(C.activeLine), QColor(C.card), kBorder, kRadius);
+    }
+
     void hideEvent(QHideEvent* event) override {
         QFrame::hideEvent(event);
+        imeComposing_ = false;
         clearGrid();
         // 不在此清空全局 thumb 缓存：关弹层再开时大量空图/闪烁，且会丢掉刚解好的图。
     }
 
 private:
+    static constexpr int kRadius = 8;
+    static constexpr int kBorder = kControlBorderW;
+    static constexpr int kPad = 8;
+
+    void scheduleSearchRefresh() {
+        if (imeComposing_) return;
+        if (!searchRefreshTimer_) {
+            searchRefreshTimer_ = new QTimer(this);
+            searchRefreshTimer_->setSingleShot(true);
+            searchRefreshTimer_->setInterval(50);
+            QObject::connect(searchRefreshTimer_, &QTimer::timeout, this, [this]() {
+                if (!imeComposing_) refreshGrid();
+            });
+        }
+        searchRefreshTimer_->start();
+    }
+
     static bool fuzzyMatch(const QString& name, const QString& query) {
         const QString q = query.trimmed().toLower();
         if (q.isEmpty()) return true;
@@ -232,13 +303,14 @@ private:
             if (onPicked_) onPicked_(name);
             hide();
         });
-        QTimer::singleShot(0, icon, [icon, name]() {
-            if (!icon) return;
+        QPointer<QLabel> iconGuard(icon);
+        QTimer::singleShot(0, this, [iconGuard, name]() {
+            if (!iconGuard) return;
             const QPixmap px = liveaio::resources::loadGiftPixmapThumb(
                 giftResourcesRoot(), name, kPickerCell - 8);
             if (!px.isNull()) {
-                icon->setPixmap(px);
-                icon->setText(QString());
+                iconGuard->setPixmap(px);
+                iconGuard->setText(QString());
             }
         });
         return btn;
@@ -264,6 +336,8 @@ private:
     QGridLayout* grid_ = nullptr;
     ChunkBuilder* chunkBuilder_ = nullptr;
     bool chunkLoading_ = false;
+    bool imeComposing_ = false;
+    QTimer* searchRefreshTimer_ = nullptr;
     std::function<void(const QString&)> onPicked_;
 };
 

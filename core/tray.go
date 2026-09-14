@@ -1,3 +1,5 @@
+//go:build windows
+
 package core
 
 import (
@@ -44,6 +46,7 @@ const (
 
 	wmApp        = 0x8000
 	wmTray       = wmApp + 1
+	wmLButtonUp  = 0x0202
 	wmLButtonDbl = 0x0203
 	wmRButtonUp  = 0x0205
 	wmCommand    = 0x0111
@@ -174,7 +177,8 @@ func wndProc(h windows.Handle, msgU uint32, w, l uintptr) uintptr {
 	switch msgU {
 	case wmTray:
 		switch l {
-		case wmLButtonDbl:
+		case wmLButtonUp, wmLButtonDbl:
+			// 单击或双击都打开界面（仅双击时用户会感觉「托盘按钮失效」）。
 			cfgMu.Lock()
 			fn := cfg.OnShowUI
 			cfgMu.Unlock()

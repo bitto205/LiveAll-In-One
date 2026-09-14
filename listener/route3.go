@@ -63,19 +63,36 @@ func (d Route3Driver) Run(ctx context.Context, p Params) error {
 		return fmt.Errorf("proxy_shell 未就绪")
 	}
 
+	errCh := make(chan error, 1)
 	cl := &Shell{
 		PlainErrors: true,
 		OnCtrl: func(ctrl string) {
 			switch ctrl {
-			case CtrlLiveOn:
-				logf("route3 live on")
+			case CtrlLiveOn, CtrlWSOpen, CtrlWSConnected:
+				logf("route3 live on", "ctrl", ctrl)
+				if p.OnStatus != nil {
+					p.OnStatus(true)
+				}
 			case CtrlLiveOff, CtrlWSDown:
 				logf("route3 live off", "ctrl", ctrl)
+				if p.OnStatus != nil {
+					p.OnStatus(false)
+				}
 			}
 		},
 		OnFrame: func(raw []byte) {
 			if p.OnFrame != nil {
 				p.OnFrame(raw)
+			}
+		},
+		OnErr: func(err error) {
+			logf("route3 shell err", "err", err)
+			if p.OnStatus != nil {
+				p.OnStatus(false)
+			}
+			select {
+			case errCh <- err:
+			default:
 			}
 		},
 	}
@@ -89,10 +106,18 @@ func (d Route3Driver) Run(ctx context.Context, p Params) error {
 		p.OnStatus(true)
 	}
 
-	<-ctx.Done()
-	logf("route3 lifecycle off")
-	if p.OnStatus != nil {
-		p.OnStatus(false)
+	select {
+	case <-ctx.Done():
+		logf("route3 lifecycle off")
+		if p.OnStatus != nil {
+			p.OnStatus(false)
+		}
+		return ctx.Err()
+	case err := <-errCh:
+		logf("route3 lifecycle off", "err", err)
+		if p.OnStatus != nil {
+			p.OnStatus(false)
+		}
+		return err
 	}
-	return ctx.Err()
 }

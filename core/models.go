@@ -102,8 +102,9 @@ func DefaultCapabilities() Capabilities {
 func NormalizeLeafSettings(raw any) LeafSettings {
 	m, ok := raw.(map[string]any)
 	if !ok {
-		if mm, ok := raw.(map[string]interface{}); ok {
+		if mm, ok2 := raw.(map[string]interface{}); ok2 {
 			m = map[string]any(mm)
+			ok = true
 		}
 	}
 	if !ok || m == nil {
@@ -146,12 +147,9 @@ func normalizeLeafRule(m map[string]any) LeafRule {
 	}
 	if rule.Mode == "random" {
 		rule.MinVal = intValue(m["min"], intValue(m["random_min"], 1))
-		rule.MaxVal = intValue(m["max"], intValue(m["random_max"], rule.MinVal))
-		if rule.MinVal < 0 {
-			rule.MinVal = 0
-		}
-		if rule.MaxVal < 0 {
-			rule.MaxVal = 0
+		rule.MaxVal = intValue(m["max"], intValue(m["random_max"], rule.MinVal+1))
+		if rule.MaxVal <= rule.MinVal {
+			rule.MaxVal = rule.MinVal + 1
 		}
 	}
 	return rule
@@ -265,6 +263,10 @@ func normalizeMode(v string) string {
 		return "sub"
 	case "随机", "random", "rand":
 		return "random"
+	case "清空", "clear":
+		return "clear"
+	case "清屏", "clear_screen", "clearscreen":
+		return "clear_screen"
 	default:
 		return "add"
 	}
@@ -324,6 +326,12 @@ func boolValue(v any, fallback bool) bool {
 		if b == "false" || b == "0" {
 			return false
 		}
+	case float64:
+		return b != 0
+	case int:
+		return b != 0
+	case int64:
+		return b != 0
 	}
 	return fallback
 }

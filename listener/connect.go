@@ -14,6 +14,8 @@ const (
 
 	MsgConnected  = connectdiag.MsgConnected
 	MsgNotLiving  = connectdiag.MsgNotLiving
+	MsgNotLivingConnectFail = connectdiag.MsgNotLivingConnectFail
+	MsgProxyShellNoResponse = connectdiag.MsgProxyShellNoResponse
 	MsgBadRoom    = connectdiag.MsgBadRoom
 	MsgTimeoutNet = connectdiag.MsgTimeoutNet
 	MsgTimeout    = connectdiag.MsgTimeout

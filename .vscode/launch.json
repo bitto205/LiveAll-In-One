@@ -1,0 +1,36 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Debug LiveAIO (build → main)",
+      "type": "go",
+      "request": "launch",
+      "mode": "auto",
+      "program": "${workspaceFolder}/main",
+      "cwd": "${workspaceFolder}",
+      "args": [
+        "--no-admin"
+      ],
+      "env": {
+        "LIVEAIO_ROOT": "${workspaceFolder}"
+      },
+      "console": "integratedTerminal",
+      "preLaunchTask": "build: LiveAIO (cmake+go)"
+    },
+    {
+      "name": "Debug LiveAIO (main only)",
+      "type": "go",
+      "request": "launch",
+      "mode": "auto",
+      "program": "${workspaceFolder}/main",
+      "cwd": "${workspaceFolder}",
+      "args": [
+        "--no-admin"
+      ],
+      "env": {
+        "LIVEAIO_ROOT": "${workspaceFolder}"
+      },
+      "console": "integratedTerminal"
+    }
+  ]
+}

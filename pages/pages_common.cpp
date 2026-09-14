@@ -111,7 +111,20 @@ public:
         QObject::connect(socket_, &QTcpSocket::disconnected, this, [this]() {
             ready_ = false;
             if (statusCb_) statusCb_(false);
+            // 断线自动重连（网络闪断 / Core 重启）；不再依赖读超时踢静默连接。
+            QTimer::singleShot(800, this, [this]() {
+                if (socket_->state() != QAbstractSocket::UnconnectedState) return;
+                socket_->connectToHost(QString::fromLatin1(kCoreHost), kCorePort);
+            });
         });
+        // 可选心跳：便于探测半死链路；静默无礼物时也不影响连接。
+        pingTimer_ = new QTimer(this);
+        pingTimer_->setInterval(20000);
+        QObject::connect(pingTimer_, &QTimer::timeout, this, [this]() {
+            if (!ready_ || socket_->state() != QAbstractSocket::ConnectedState) return;
+            writePacket(QJsonObject{{QStringLiteral("op"), QStringLiteral("ping")}});
+        });
+        pingTimer_->start();
     }
 
     void connectToCore() { socket_->connectToHost(QString::fromLatin1(kCoreHost), kCorePort); }
@@ -235,6 +248,7 @@ private:
     }
 
     QTcpSocket* socket_;
+    QTimer* pingTimer_ = nullptr;
     QByteArray buffer_;
     QVector<QJsonObject> pending_;
     bool ready_ = false;
@@ -277,17 +291,34 @@ public:
     }
 
     void showMsg(const QString& msg, bool error = false, int ms = 2500) {
+        // Multi-line diagnostics (e.g. proxy_shell) must not explode toast layout;
+        // oversized toast historically correlated with Pages hard-exit on open.
+        QString text = msg.trimmed();
+        const QStringList lines = text.split(QLatin1Char('\n'), Qt::SkipEmptyParts);
+        if (lines.size() > 3) {
+            text = lines.mid(0, 3).join(QChar(u'\n'));
+        }
         const QString bg = error ? theme().closeHover : theme().activeLine;
+        setWordWrap(true);
         setStyleSheet(QStringLiteral(
             "background: %1; color: #ffffff; border-radius: 8px; padding: 8px 20px;"
             " font-size: 13px; font-weight: 600;"
         ).arg(bg));
-        setText(msg);
+        setText(text);
+        // Parent may still be 0-width during early layout; never pass a negative
+        // fixed width into QLabel (seen as Pages exit 0xffffffff on open).
+        int w = 420;
+        if (QWidget* p = parentWidget()) {
+            const int pw = p->width();
+            if (pw > 96) w = qMin(pw - 48, 480);
+        }
+        setFixedWidth(w);
+        setMaximumHeight(error ? 110 : 72);
         adjustSize();
         reposition();
         show();
         raise();
-        timer_.start(ms);
+        timer_.start(error ? qMax(ms, 4500) : ms);
     }
 
     void reposition() {

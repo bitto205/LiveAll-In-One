@@ -224,6 +224,14 @@ public:
 
     virtual void setConnState(BtnState state) = 0;
     virtual void refreshTheme() = 0;
+    // Connect failure while Connecting: Error button + visible reason (toast alone is easy to miss).
+    virtual void applyConnectFailure(const QString& msg) {
+        wasConnecting_ = false;
+        preempted_ = false;
+        bindEpoch_ = 0;
+        setConnState(BtnState::Error);
+        Q_UNUSED(msg);
+    }
 
     void markPreempted() {
         preempted_ = true;
@@ -234,8 +242,19 @@ public:
     void resetIdle() {
         wasConnecting_ = false;
         preempted_ = false;
+        bindEpoch_ = 0;
         setConnState(BtnState::Idle);
     }
+
+    // TCP to Core dropped — clear live button without treating it as a room failure toast.
+    void forceCoreLost() {
+        wasConnecting_ = false;
+        preempted_ = false;
+        bindEpoch_ = 0;
+        setConnState(BtnState::Idle);
+    }
+
+    bool sessionMatches() const;
 
 protected:
     QPushButton* makeBackButton(QWidget* parent);
@@ -245,6 +264,7 @@ protected:
     BtnState state_ = BtnState::Idle;
     bool wasConnecting_ = false;
     bool preempted_ = false;
+    qint64 bindEpoch_ = 0;
     QPushButton* backBtn_ = nullptr;
 };
 
@@ -359,10 +379,10 @@ public:
             connLabel_->setVisible(false);
             break;
         case BtnState::Connecting:
-            connBtn_->setText(waitingForSwitch() ? QStringLiteral("等待其他线路退出…")
-                                                 : QStringLiteral("连接中..."));
-            connBtn_->setEnabled(false);
-            connBtn_->setStyleSheet(qssDisabled(44));
+            connBtn_->setText(waitingForSwitch() ? QStringLiteral("等待其他线路退出…点击取消")
+                                                 : QStringLiteral("连接中...点击取消连接"));
+            connBtn_->setEnabled(true);
+            connBtn_->setStyleSheet(qssOutlined(44));
             connLabel_->setVisible(false);
             break;
         case BtnState::Connected:
@@ -377,11 +397,29 @@ public:
             connBtn_->setText(QStringLiteral("连接直播间"));
             connBtn_->setEnabled(true);
             connBtn_->setStyleSheet(qssOutlined(44));
+            if (!connLabel_->isVisible() || connLabel_->text().isEmpty()) {
+                connLabel_->setText(QStringLiteral("⚠️  连接失败"));
+                connLabel_->setStyleSheet(qssErrorLabel());
+                connLabel_->setVisible(true);
+            }
             break;
         }
     }
 
-    void onStatusChange(bool connected);
+    void applyConnectFailure(const QString& msg) override {
+        wasConnecting_ = false;
+        preempted_ = false;
+        bindEpoch_ = 0;
+        setConnState(BtnState::Error);
+        const QString text = msg.trimmed().isEmpty()
+            ? QStringLiteral("⚠️  连接失败")
+            : QStringLiteral("⚠️  %1").arg(msg.trimmed().split(QLatin1Char('\n')).first());
+        connLabel_->setText(text);
+        connLabel_->setStyleSheet(qssErrorLabel());
+        connLabel_->setVisible(true);
+    }
+
+    void onStatusChange(bool connected, const QString& msg = QString());
 
     void refreshTheme() override {
         backBtn_->setStyleSheet(qssBack());
@@ -547,7 +585,7 @@ public:
         refreshConnBtn();
     }
 
-    void onStatusChange(bool connected);
+    void onStatusChange(bool connected, const QString& msg = QString());
 
     void refreshTheme() override {
         backBtn_->setStyleSheet(qssBack());
@@ -630,10 +668,10 @@ private:
             break;
         case BtnState::Connecting: {
             const bool waiting = waitingForSwitch();
-            connBtn_->setText(waiting ? QStringLiteral("等待其他线路退出…")
+            connBtn_->setText(waiting ? QStringLiteral("等待其他线路退出…点击取消")
                                       : QStringLiteral("连接中,等待开播...点击取消连接"));
-            connBtn_->setEnabled(!waiting);
-            connBtn_->setStyleSheet(waiting ? qssDisabled(44) : qssOutlined(44));
+            connBtn_->setEnabled(true);
+            connBtn_->setStyleSheet(qssOutlined(44));
             connLabel_->setVisible(false);
             break;
         }
@@ -649,8 +687,26 @@ private:
             connBtn_->setText(QStringLiteral("连接直播间"));
             connBtn_->setEnabled(isReady);
             connBtn_->setStyleSheet(isReady ? qssOutlined(44) : qssDisabled(44));
+            if (!connLabel_->isVisible() || connLabel_->text().isEmpty()) {
+                connLabel_->setText(QStringLiteral("⚠️  启动失败"));
+                connLabel_->setStyleSheet(qssErrorLabel());
+                connLabel_->setVisible(true);
+            }
             break;
         }
+    }
+
+    void applyConnectFailure(const QString& msg) override {
+        wasConnecting_ = false;
+        preempted_ = false;
+        bindEpoch_ = 0;
+        setConnState(BtnState::Error);
+        const QString text = msg.trimmed().isEmpty()
+            ? QStringLiteral("⚠️  启动失败")
+            : QStringLiteral("⚠️  %1").arg(msg.trimmed().split(QLatin1Char('\n')).first());
+        connLabel_->setText(text);
+        connLabel_->setStyleSheet(qssErrorLabel());
+        connLabel_->setVisible(true);
     }
 
     CoreClient* core_ = nullptr;
@@ -765,7 +821,7 @@ public:
         refreshConnBtn();
     }
 
-    void onStatusChange(bool connected);
+    void onStatusChange(bool connected, const QString& msg = QString());
 
     void refreshTheme() override {
         backBtn_->setStyleSheet(qssBack());
@@ -852,10 +908,10 @@ private:
             break;
         case BtnState::Connecting: {
             const bool waiting = waitingForSwitch();
-            connBtn_->setText(waiting ? QStringLiteral("等待其他线路退出…")
+            connBtn_->setText(waiting ? QStringLiteral("等待其他线路退出…点击取消")
                                       : QStringLiteral("连接中...点击取消连接"));
-            connBtn_->setEnabled(!waiting);
-            connBtn_->setStyleSheet(waiting ? qssDisabled(44) : qssOutlined(44));
+            connBtn_->setEnabled(true);
+            connBtn_->setStyleSheet(qssOutlined(44));
             connLabel_->setVisible(false);
             break;
         }
@@ -871,8 +927,26 @@ private:
             connBtn_->setText(QStringLiteral("连接直播间"));
             connBtn_->setEnabled(isReady);
             connBtn_->setStyleSheet(isReady ? qssOutlined(44) : qssDisabled(44));
+            if (!connLabel_->isVisible() || connLabel_->text().isEmpty()) {
+                connLabel_->setText(QStringLiteral("⚠️  未连接到直播间"));
+                connLabel_->setStyleSheet(qssErrorLabel());
+                connLabel_->setVisible(true);
+            }
             break;
         }
+    }
+
+    void applyConnectFailure(const QString& msg) override {
+        wasConnecting_ = false;
+        preempted_ = false;
+        bindEpoch_ = 0;
+        setConnState(BtnState::Error);
+        const QString text = msg.trimmed().isEmpty()
+            ? QStringLiteral("⚠️  未连接到直播间")
+            : QStringLiteral("⚠️  %1").arg(msg.trimmed().split(QLatin1Char('\n')).first());
+        connLabel_->setText(text);
+        connLabel_->setStyleSheet(qssErrorLabel());
+        connLabel_->setVisible(true);
     }
 
     CoreClient* core_ = nullptr;
@@ -942,18 +1016,38 @@ public:
     Toast* toast() const { return toast_; }
     CoreClient* core() const { return core_; }
     bool switchingListener() const { return switching_; }
+    qint64 liveEpoch() const { return liveEpoch_; }
+    qint64 beginLiveSession() { return ++liveEpoch_; }
+    void endLiveSession() { ++liveEpoch_; }
 
-    QString activeListenerRoute() const {
+    void onStatusChange(bool connected) override {
+        // TCP link to Core — not room status. Room updates arrive via status packets.
+        if (connected) return;
+        endLiveSession();
+        connectedRoute_.clear();
+        switching_ = false;
+        for (auto* page : webPages_) {
+            if (page) page->forceCoreLost();
+        }
+        if (route3_) route3_->forceCoreLost();
+        if (route4_) route4_->forceCoreLost();
+        if (toast_) toast_->showMsg(QStringLiteral("Core 连接已断开"), true, 4000);
+    }
+
+    QString activeListenerRoute(const QString& exclude = {}) const {
         for (auto it = webPages_.constBegin(); it != webPages_.constEnd(); ++it) {
+            if (!exclude.isEmpty() && it.key() == exclude) continue;
             const BtnState s = it.value()->btnState();
             if (s == BtnState::Connecting || s == BtnState::Connected) return it.key();
         }
-        if (route3_ && (route3_->btnState() == BtnState::Connecting
-                        || route3_->btnState() == BtnState::Connected)) {
+        if (exclude != QStringLiteral("3") && route3_
+            && (route3_->btnState() == BtnState::Connecting
+                || route3_->btnState() == BtnState::Connected)) {
             return QStringLiteral("3");
         }
-        if (route4_ && (route4_->btnState() == BtnState::Connecting
-                        || route4_->btnState() == BtnState::Connected)) {
+        if (exclude != QStringLiteral("4") && route4_
+            && (route4_->btnState() == BtnState::Connecting
+                || route4_->btnState() == BtnState::Connected)) {
             return QStringLiteral("4");
         }
         return {};
@@ -965,9 +1059,10 @@ public:
     }
 
     void requestConnect(const QString& route, const QString& liveId) {
-        const QString active = activeListenerRoute();
-        // 四线路互斥：目标线路先显示“等待其他线路退出”，由 core 完成切换。
-        switching_ = !active.isEmpty() && active != route;
+        // Exclude the target route: onConnClicked already marked it Connecting,
+        // which must not look like the "other" active listener.
+        const QString active = activeListenerRoute(route);
+        switching_ = !active.isEmpty();
         preemptOtherListeners(route);
         connectedRoute_ = route;
         if (auto* target = pageForRoute(route)) {
@@ -984,6 +1079,7 @@ public:
     }
 
     void requestDisconnect() {
+        endLiveSession();
         connectedRoute_.clear();
         switching_ = false;
         if (core_) core_->disconnectLive();
@@ -993,8 +1089,12 @@ public:
         const QString op = packet.value(QStringLiteral("op")).toString();
         if (op == QStringLiteral("status")) {
             if (!packet.contains(QStringLiteral("connected"))) return;
+            // Core OpConnect resets connected=false with connecting=true; keep UI
+            // on Connecting until connected=true or an error packet.
+            if (packet.value(QStringLiteral("connecting")).toBool()) return;
             handleStatus(packet.value(QStringLiteral("connected")).toBool(),
-                         packet.value(QStringLiteral("route")).toString());
+                         packet.value(QStringLiteral("route")).toString(),
+                         packet.value(QStringLiteral("msg")).toString());
         } else if (op == QStringLiteral("route.env")) {
             handleRouteEnv(packet);
         } else if (op == QStringLiteral("login.state")) {
@@ -1003,8 +1103,30 @@ public:
             loginStateKnown_ = true;
             for (auto* page : webPages_) page->applyLoginState(loginText_, loginCan_);
         } else if (op == QStringLiteral("error")) {
-            toast_->showMsg(packet.value(QStringLiteral("msg"))
-                                .toString(QStringLiteral("错误")), true);
+            const QString msg = packet.value(QStringLiteral("msg"))
+                                    .toString(QStringLiteral("错误"));
+            toast_->showMsg(msg, true, 5000);
+            switching_ = false;
+            QString route = packet.value(QStringLiteral("route")).toString();
+            if (route.isEmpty()) route = connectedRoute_;
+            if (route.isEmpty()) route = activeListenerRoute();
+            auto* page = pageForRoute(route);
+            if (!page) {
+                // Fallback: any page still spinning on Connecting.
+                for (auto* p : webPages_) {
+                    if (p && p->btnState() == BtnState::Connecting) {
+                        page = p;
+                        break;
+                    }
+                }
+                if (!page && route3_ && route3_->btnState() == BtnState::Connecting) page = route3_;
+                if (!page && route4_ && route4_->btnState() == BtnState::Connecting) page = route4_;
+            }
+            if (page && (page->btnState() == BtnState::Connecting
+                         || page->btnState() == BtnState::Error
+                         || page->btnState() == BtnState::Connected)) {
+                page->applyConnectFailure(msg);
+            }
         }
     }
 
@@ -1119,6 +1241,17 @@ private:
             if (!msg.isEmpty()) {
                 toast_->showMsg(msg, !packet.value(QStringLiteral("ok")).toBool(true));
             }
+            // Action ack is toast-only; full field refresh arrives in a follow-up
+            // route.env without "action". If Core omitted that packet historically,
+            // re-query so Patch/Unpatch leaves the in-progress label.
+            if (core_) {
+                if (route == QStringLiteral("3") || route == QStringLiteral("4")) {
+                    core_->uiCommand(QStringLiteral("route.env"), route);
+                } else {
+                    core_->uiCommand(QStringLiteral("route.env"), QStringLiteral("3"));
+                    core_->uiCommand(QStringLiteral("route.env"), QStringLiteral("4"));
+                }
+            }
             return;
         }
         const RouteEnv env = RouteEnv::fromPacket(packet);
@@ -1126,7 +1259,7 @@ private:
         else if (route == QStringLiteral("4") && route4_) route4_->applyEnv(env);
     }
 
-    void handleStatus(bool connected, const QString& routeHint) {
+    void handleStatus(bool connected, const QString& routeHint, const QString& msg = QString()) {
         QString route = routeHint;
         if (route.isEmpty()) {
             route = connected
@@ -1137,22 +1270,22 @@ private:
 
         if (connected) {
             connectedRoute_ = route;
-            dispatchStatus(route, true);
+            dispatchStatus(route, true, msg);
             resetOtherPages(route);
             return;
         }
-        dispatchStatus(route, false);
+        dispatchStatus(route, false, msg);
         connectedRoute_.clear();
         resetOtherPages(activeListenerRoute());
     }
 
-    void dispatchStatus(const QString& route, bool connected) {
+    void dispatchStatus(const QString& route, bool connected, const QString& msg = QString()) {
         if (auto* page = webPages_.value(route)) {
-            page->onStatusChange(connected);
+            page->onStatusChange(connected, msg);
         } else if (route == QStringLiteral("3") && route3_) {
-            route3_->onStatusChange(connected);
+            route3_->onStatusChange(connected, msg);
         } else if (route == QStringLiteral("4") && route4_) {
-            route4_->onStatusChange(connected);
+            route4_->onStatusChange(connected, msg);
         }
     }
 
@@ -1184,9 +1317,14 @@ private:
     bool loginCan_ = true;
     bool loginStateKnown_ = false;
     bool switching_ = false;
+    qint64 liveEpoch_ = 0;
 };
 
 // ── RouteDetailPage / 各线路页依赖 HomePage 的实现放在这里 ──
+inline bool RouteDetailPage::sessionMatches() const {
+    return home_ && bindEpoch_ != 0 && bindEpoch_ == home_->liveEpoch();
+}
+
 inline QPushButton* RouteDetailPage::makeBackButton(QWidget* parent) {
     auto* btn = new QPushButton(QStringLiteral("← 返回选择线路"), parent);
     btn->setCursor(Qt::PointingHandCursor);
@@ -1213,18 +1351,27 @@ inline void WebRoutePage::onConnClicked() {
         }
         setConnState(BtnState::Connecting);
         wasConnecting_ = true;
+        bindEpoch_ = home_ ? home_->beginLiveSession() : 0;
         liveaio::util::configSet(QStringLiteral("route"), route_);
         if (home_) home_->requestConnect(route_, liveId);
+    } else if (state_ == BtnState::Connecting) {
+        setConnState(BtnState::Idle);
+        wasConnecting_ = false;
+        bindEpoch_ = 0;
+        if (home_) home_->requestDisconnect();
+        toast(QStringLiteral("已取消连接"));
     } else if (state_ == BtnState::Connected) {
         setConnState(BtnState::Idle);
         wasConnecting_ = false;
+        bindEpoch_ = 0;
         if (home_) home_->requestDisconnect();
         toast(QStringLiteral("已断开连接"));
     }
 }
 
-inline void WebRoutePage::onStatusChange(bool connected) {
+inline void WebRoutePage::onStatusChange(bool connected, const QString& msg) {
     if (connected) {
+        if (!sessionMatches()) return; // cancelled / superseded session
         preempted_ = false;
         wasConnecting_ = false;
         setConnState(BtnState::Connected);
@@ -1235,23 +1382,29 @@ inline void WebRoutePage::onStatusChange(bool connected) {
         preempted_ = false;
         return;
     }
+    if (bindEpoch_ != 0 && home_ && bindEpoch_ != home_->liveEpoch()) {
+        // Stale false from an old session after user already cancelled/reconnected.
+        return;
+    }
     const bool wasConnected = state_ == BtnState::Connected;
     if (wasConnecting_ && !wasConnected) {
-        setConnState(BtnState::Error);
-        connLabel_->setText(QStringLiteral("⚠️  直播间已断开或没有连接"));
-        connLabel_->setStyleSheet(qssErrorLabel());
-        connLabel_->setVisible(true);
-        toast(QStringLiteral("直播间已断开"), true);
-    } else {
+        applyConnectFailure(msg.isEmpty() ? QStringLiteral("直播间已断开或没有连接") : msg);
+        toast(msg.isEmpty() ? QStringLiteral("直播间已断开") : msg, true);
+    } else if (wasConnected) {
+        // Unexpected drop after Connected — keep Error label visible (toast alone is easy to miss).
+        applyConnectFailure(msg.isEmpty() ? QStringLiteral("直播已断开") : msg);
+        toast(msg.isEmpty() ? QStringLiteral("直播已断开") : msg, true);
+    } else if (state_ != BtnState::Error) {
+        // Preserve Error from OpError: Core always follows with status connected=false.
         setConnState(BtnState::Idle);
         connLabel_->setVisible(false);
-        if (wasConnected) toast(QStringLiteral("直播已断开"), true);
     }
     wasConnecting_ = false;
+    bindEpoch_ = 0;
 }
 
 inline bool Route3Page::waitingForSwitch() const {
-    return home_ && home_->switchingListener();
+    return home_ && home_->switchingListener() && home_->activeListenerRoute() == route_;
 }
 
 inline void Route3Page::toast(const QString& msg, bool error) const {
@@ -1274,23 +1427,27 @@ inline void Route3Page::onConnClicked() {
         }
         setConnState(BtnState::Connecting);
         wasConnecting_ = true;
+        bindEpoch_ = home_ ? home_->beginLiveSession() : 0;
         liveaio::util::configSet(QStringLiteral("route"), QStringLiteral("3"));
         if (home_) home_->requestConnect(QStringLiteral("3"), QString());
     } else if (state_ == BtnState::Connecting) {
         setConnState(BtnState::Idle);
         wasConnecting_ = false;
+        bindEpoch_ = 0;
         if (home_) home_->requestDisconnect();
         toast(QStringLiteral("已取消连接"));
     } else if (state_ == BtnState::Connected) {
         setConnState(BtnState::Idle);
         wasConnecting_ = false;
+        bindEpoch_ = 0;
         if (home_) home_->requestDisconnect();
         toast(QStringLiteral("已断开连接"));
     }
 }
 
-inline void Route3Page::onStatusChange(bool connected) {
+inline void Route3Page::onStatusChange(bool connected, const QString& msg) {
     if (connected) {
+        if (!sessionMatches()) return;
         preempted_ = false;
         wasConnecting_ = false;
         setConnState(BtnState::Connected);
@@ -1301,23 +1458,25 @@ inline void Route3Page::onStatusChange(bool connected) {
         preempted_ = false;
         return;
     }
+    if (bindEpoch_ != 0 && home_ && bindEpoch_ != home_->liveEpoch()) return;
     const bool wasConnected = state_ == BtnState::Connected;
     if (wasConnecting_ && !wasConnected) {
-        setConnState(BtnState::Error);
-        connLabel_->setText(QStringLiteral("⚠️  启动失败，请检查环境后重试"));
-        connLabel_->setStyleSheet(qssErrorLabel());
-        connLabel_->setVisible(true);
-        toast(QStringLiteral("启动失败"), true);
-    } else {
+        applyConnectFailure(msg.isEmpty() ? QStringLiteral("启动失败，请检查环境后重试") : msg);
+        toast(msg.isEmpty() ? QStringLiteral("启动失败") : msg, true);
+    } else if (wasConnected) {
+        applyConnectFailure(msg.isEmpty() ? QStringLiteral("监听已停止") : msg);
+        toast(msg.isEmpty() ? QStringLiteral("监听已停止") : msg, true);
+    } else if (state_ != BtnState::Error) {
+        // Preserve Error from OpError: Core always follows with status connected=false.
         setConnState(BtnState::Idle);
         connLabel_->setVisible(false);
-        if (wasConnected) toast(QStringLiteral("已断开连接"));
     }
     wasConnecting_ = false;
+    bindEpoch_ = 0;
 }
 
 inline bool Route4Page::waitingForSwitch() const {
-    return home_ && home_->switchingListener();
+    return home_ && home_->switchingListener() && home_->activeListenerRoute() == route_;
 }
 
 inline void Route4Page::toast(const QString& msg, bool error) const {
@@ -1346,23 +1505,27 @@ inline void Route4Page::onConnClicked() {
         }
         setConnState(BtnState::Connecting);
         wasConnecting_ = true;
+        bindEpoch_ = home_ ? home_->beginLiveSession() : 0;
         liveaio::util::configSet(QStringLiteral("route"), QStringLiteral("4"));
         if (home_) home_->requestConnect(QStringLiteral("4"), QString());
     } else if (state_ == BtnState::Connecting) {
         setConnState(BtnState::Idle);
         wasConnecting_ = false;
+        bindEpoch_ = 0;
         if (home_) home_->requestDisconnect();
         toast(QStringLiteral("已取消连接"));
     } else if (state_ == BtnState::Connected) {
         setConnState(BtnState::Idle);
         wasConnecting_ = false;
+        bindEpoch_ = 0;
         if (home_) home_->requestDisconnect();
         toast(QStringLiteral("已断开连接"));
     }
 }
 
-inline void Route4Page::onStatusChange(bool connected) {
+inline void Route4Page::onStatusChange(bool connected, const QString& msg) {
     if (connected) {
+        if (!sessionMatches()) return;
         preempted_ = false;
         wasConnecting_ = false;
         setConnState(BtnState::Connected);
@@ -1373,19 +1536,21 @@ inline void Route4Page::onStatusChange(bool connected) {
         preempted_ = false;
         return;
     }
+    if (bindEpoch_ != 0 && home_ && bindEpoch_ != home_->liveEpoch()) return;
     const bool wasConnected = state_ == BtnState::Connected;
     if (wasConnecting_ && !wasConnected) {
-        setConnState(BtnState::Error);
-        connLabel_->setText(QStringLiteral("⚠️  未连接到直播间"));
-        connLabel_->setStyleSheet(qssErrorLabel());
-        connLabel_->setVisible(true);
-        toast(QStringLiteral("未连接到直播间"), true);
-    } else {
+        applyConnectFailure(msg.isEmpty() ? QStringLiteral("未连接到直播间") : msg);
+        toast(msg.isEmpty() ? QStringLiteral("未连接到直播间") : msg, true);
+    } else if (wasConnected) {
+        applyConnectFailure(msg.isEmpty() ? QStringLiteral("直播间下播，已断开连接") : msg);
+        toast(msg.isEmpty() ? QStringLiteral("直播间下播，已断开连接") : msg, true);
+    } else if (state_ != BtnState::Error) {
+        // Preserve Error from OpError: Core always follows with status connected=false.
         setConnState(BtnState::Idle);
         connLabel_->setVisible(false);
-        if (wasConnected) toast(QStringLiteral("直播间下播，已断开连接"), true);
     }
     wasConnecting_ = false;
+    bindEpoch_ = 0;
 }
 
 }  // namespace liveaio::pages

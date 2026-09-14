@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -20,6 +21,7 @@ import (
 	"github.com/chromedp/cdproto/cdp"
 	"github.com/chromedp/cdproto/fetch"
 	"github.com/chromedp/cdproto/network"
+	"github.com/chromedp/cdproto/page"
 	"github.com/chromedp/cdproto/runtime"
 	"github.com/chromedp/chromedp"
 )
@@ -54,6 +56,11 @@ type BrowserSession struct {
 	// CDP 旁路任务共用 1 条常驻栈（fetch 放行/拦截 + trim），不再按请求/阶段开 goroutine。
 	jobOnce sync.Once
 	jobQ    chan sessJob
+
+	// Windows Job Object + pid so Close/process-exit reaps the whole Chrome tree.
+	chromeJob  *chromeJob
+	browserPID atomic.Int32
+	userDataDir string // per-session temp profile; removed on Close
 }
 
 type fetchReply struct {
@@ -164,11 +171,23 @@ func launchBrowser(parent context.Context, opt BrowserOptions) (*BrowserSession,
 	} else {
 		opts = append(opts, chromedp.Flag("headless", false))
 	}
-	if opt.UserDataDir != "" {
-		opts = append(opts, chromedp.UserDataDir(opt.UserDataDir))
+	userDataDir := opt.UserDataDir
+	if userDataDir == "" && opt.TrimResources {
+		// Fresh profile each capture avoids reconnect flakes (locked Singleton*
+		// / half-written prefs after hard kill) that show up as enter_reqs=0.
+		userDataDir = filepath.Join(os.TempDir(),
+			fmt.Sprintf("liveaio-cap-%d-%d", os.Getpid(), time.Now().UnixNano()))
+		if err := os.MkdirAll(userDataDir, 0o700); err != nil {
+			return nil, fmt.Errorf("chrome user-data-dir: %w", err)
+		}
+	}
+	if userDataDir != "" {
+		opts = append(opts, chromedp.UserDataDir(userDataDir))
 	}
 	if opt.TrimResources {
-		// 采集只要进房 + WSS/JS 运行时；挡住样式/图/流/礼物插件等。
+		// Capture profile: allow enter-room + WSS/JS to boot, then phase-2 filter
+		// trims UI. Aggressive low-end / 480p / 128MB V8 previously left
+		// enter_reqs=0 (page never called /webcast/room/enter).
 		opts = append(opts,
 			chromedp.WindowSize(800, 450),
 			chromedp.Flag("blink-settings", "imagesEnabled=false"),
@@ -177,16 +196,52 @@ func launchBrowser(parent context.Context, opt BrowserOptions) (*BrowserSession,
 			chromedp.Flag("disable-software-rasterizer", true),
 			chromedp.Flag("disable-webgl", true),
 			chromedp.Flag("mute-audio", true),
+			// Headless tabs otherwise throttle timers/WS after a while.
+			chromedp.Flag("disable-background-timer-throttling", true),
+			chromedp.Flag("disable-backgrounding-occluded-windows", true),
+			chromedp.Flag("disable-renderer-backgrounding", true),
 		)
 	} else {
 		opts = append(opts, chromedp.WindowSize(1920, 1080))
 	}
+
+	job, jobErr := newChromeJob()
+	if jobErr != nil {
+		job = nil
+	}
+	var earlyPID int32
+	opts = append(opts, chromedp.ModifyCmdFunc(func(cmd *exec.Cmd) {
+		// Register as LiveAIO child process (no detach) + Job Object membership.
+		bindChromeChildCmd(cmd, exe)
+		if job == nil {
+			return
+		}
+		go attachCmdToJob(cmd, job, &earlyPID)
+	}))
+
 	allocCtx, allocCancel := chromedp.NewExecAllocator(parent, opts...)
 	ctx, cancel := chromedp.NewContext(allocCtx)
-	s := &BrowserSession{Ctx: ctx, System: system, Exe: exe, cancel: cancel, allocCancel: allocCancel}
+	s := &BrowserSession{
+		Ctx: ctx, System: system, Exe: exe,
+		cancel: cancel, allocCancel: allocCancel,
+		chromeJob: job, userDataDir: userDataDir,
+	}
 	if err := chromedp.Run(ctx); err != nil {
 		s.Close()
 		return nil, fmt.Errorf("chromedp start: %w", err)
+	}
+	if pid := atomic.LoadInt32(&earlyPID); pid > 0 {
+		s.browserPID.Store(pid)
+	} else {
+		// Slow assign path: wait briefly for ModifyCmdFunc goroutine.
+		deadline := time.Now().Add(2 * time.Second)
+		for time.Now().Before(deadline) {
+			if pid := atomic.LoadInt32(&earlyPID); pid > 0 {
+				s.browserPID.Store(pid)
+				break
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
 	}
 	_ = chromedp.Run(ctx, chromedp.ActionFunc(func(ctx context.Context) error {
 		return network.Enable().Do(ctx)
@@ -296,7 +351,7 @@ func (s *BrowserSession) applyPostWSSTrim(logf func(string, ...any)) {
 			if !s.trimPhase.CompareAndSwap(1, 2) {
 				return
 			}
-			logf("wss trim phase2", "desc", "block css/img/font/gift ui, kill video dom")
+			logf("wss trim phase2", "desc", "block css/img/font/gift ui, lean dom")
 			_ = chromedp.Run(s.Ctx,
 				chromedp.ActionFunc(func(ctx context.Context) error {
 					return fetch.Enable().WithPatterns(captureTrimPatterns()).Do(ctx)
@@ -314,6 +369,7 @@ func (s *BrowserSession) applyPostWSSTrim(logf func(string, ...any)) {
 					return nil
 				}),
 				chromedp.Evaluate(killMediaJS, nil),
+				chromedp.Evaluate(leanDomJS, nil),
 			)
 		})
 	})
@@ -395,10 +451,16 @@ func captureTrimAllow(rt network.ResourceType, rawURL string) bool {
 	return true
 }
 
+// Pause A/V without removing <video>: Douyin WSS signature / room boot can
+// depend on a video node existing. Stripping it mid-session also hurts reconnect.
 const killMediaJS = `(() => {
   const kill = () => {
     document.querySelectorAll('video,audio').forEach(el => {
-      try { el.pause(); el.removeAttribute('src'); el.load(); el.remove(); } catch (e) {}
+      try {
+        if (typeof el.pause === 'function') el.pause();
+        el.removeAttribute('src');
+        if (typeof el.load === 'function') el.load();
+      } catch (e) {}
     });
   };
   kill();
@@ -410,15 +472,146 @@ const killMediaJS = `(() => {
   }
 })()`
 
+// leanDomJS strips visual-heavy media after WSS is up. Keep <video>/<audio> nodes
+// (paused only). Do NOT wipe nodes whose class contains "gift"/"player" — Douyin
+// nests IM dispatch under those shells, and removing them empties the route-1
+// JS hook while WSS itself stays fine.
+const leanDomJS = `(() => {
+  const lean = () => {
+    document.querySelectorAll('video,audio').forEach(el => {
+      try {
+        if (typeof el.pause === 'function') el.pause();
+        el.removeAttribute('src');
+        if (typeof el.load === 'function') el.load();
+      } catch (e) {}
+    });
+    document.querySelectorAll('canvas,iframe,img,picture,source,svg,lottie-player').forEach(el => {
+      try {
+        el.removeAttribute('src');
+        el.remove();
+      } catch (e) {}
+    });
+    try {
+      if (window.gc) window.gc();
+    } catch (e) {}
+  };
+  lean();
+  if (!window.__DY_LEAN_DOM__) {
+    window.__DY_LEAN_DOM__ = true;
+    try {
+      let t = 0;
+      new MutationObserver(() => {
+        const now = Date.now();
+        if (now - t < 1500) return;
+        t = now;
+        lean();
+      }).observe(document.documentElement, { childList: true, subtree: true });
+    } catch (e) {}
+    try { setInterval(lean, 8000); } catch (e) {}
+  }
+})()`
+
+func (s *BrowserSession) leaveLiveBestEffort(logf func(string, ...any), root string) {
+	if s == nil || s.Ctx == nil || s.Ctx.Err() != nil {
+		return
+	}
+	if logf == nil {
+		logf = func(string, ...any) {}
+	}
+	// Persist cookies refreshed during this capture (ttwid etc.). Reusing a
+	// stale state.json on the next Start is a common cause of enter_reqs=0.
+	if root != "" {
+		saveCtx, saveCancel := context.WithTimeout(s.Ctx, 800*time.Millisecond)
+		if err := saveStorageState(saveCtx, statePath(root)); err != nil {
+			logf("leave save state", "err", err)
+		} else {
+			logf("leave save state", "ok", true)
+		}
+		saveCancel()
+	}
+	// Navigate away while the page/WSS are still alive so Douyin can drop the
+	// watcher presence. Hard-killing Chrome leaves the account "in room" for a while.
+	leaveCtx, cancel := context.WithTimeout(s.Ctx, 2500*time.Millisecond)
+	defer cancel()
+	err := chromedp.Run(leaveCtx,
+		chromedp.Evaluate(`(() => {
+  try { window.stop(); } catch (e) {}
+  try {
+    for (const k of Object.keys(window)) {
+      const v = window[k];
+      if (v && v.constructor && v.constructor.name === 'WebSocket') {
+        try { v.close(); } catch (e2) {}
+      }
+    }
+  } catch (e) {}
+  return true;
+})()`, nil),
+		// Homepage first so the site can clear room presence; blank alone is weaker.
+		chromedp.Navigate("https://live.douyin.com/"),
+		chromedp.Sleep(400*time.Millisecond),
+		chromedp.Navigate("about:blank"),
+	)
+	if err != nil {
+		logf("leave live", "err", err)
+		return
+	}
+	logf("leave live", "ok", true)
+}
+
 func (s *BrowserSession) Close() {
 	if s == nil {
 		return
 	}
-	if s.cancel != nil {
-		s.cancel()
+	var once sync.Once
+	reap := func() {
+		once.Do(func() {
+			pid := int(s.browserPID.Load())
+			if s.chromeJob != nil {
+				s.chromeJob.close()
+				s.chromeJob = nil
+			}
+			if processAlive(pid) {
+				killProcessTree(pid)
+			}
+			untrackOwnedBrowser(pid)
+			s.browserPID.Store(0)
+			if s.userDataDir != "" {
+				_ = os.RemoveAll(s.userDataDir)
+				s.userDataDir = ""
+			}
+		})
 	}
-	if s.allocCancel != nil {
-		s.allocCancel()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		defer reap()
+		if s.Ctx != nil && s.Ctx.Err() == nil {
+			tctx, tcancel := context.WithTimeout(s.Ctx, 1500*time.Millisecond)
+			_ = chromedp.Cancel(tctx)
+			tcancel()
+		}
+		if s.cancel != nil {
+			s.cancel()
+			s.cancel = nil
+		}
+		if s.allocCancel != nil {
+			allocDone := make(chan struct{})
+			go func() {
+				s.allocCancel()
+				close(allocDone)
+			}()
+			select {
+			case <-allocDone:
+			case <-time.After(1500 * time.Millisecond):
+			}
+			s.allocCancel = nil
+		}
+	}()
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		reap()
 	}
 }
 
@@ -835,7 +1028,8 @@ func (d Route2Driver) Run(ctx context.Context, p Params) error {
 	return runBrowserCapture(ctx, p, false)
 }
 
-// Route1Driver: JS hook → OnMessage (message.ingest semantics).
+// Route1Driver: chromedp live page + WSS /push/v2/ → OnFrame (same as route 2).
+// JS hook remains a pre-WSS backup only; after push socket is up, frames are authoritative.
 type Route1Driver struct{}
 
 func (Route1Driver) ID() ID { return Route1 }
@@ -845,11 +1039,20 @@ func (d Route1Driver) Run(ctx context.Context, p Params) error {
 }
 
 // Hook pushes into __DY_MSG_Q for Go drain (avoids fragile console parsing).
+// Gift fields: Douyin web payload is usually camelCase (comboCount/repeatEnd);
+// some builds also emit snake_case — read both. Track peak combo until repeatEnd
+// so a final frame with comboCount=1 still settles the full burst (e.g. 66×小心心).
 const hookJS = `(() => {
-    if (window.__DY_HOOK__) return;
-    window.__DY_HOOK__ = true;
     window.__DY_MSG_Q = window.__DY_MSG_Q || [];
-    const oldPush = Array.prototype.push;
+    window.__DY_GIFT_COMBO__ = window.__DY_GIFT_COMBO__ || Object.create(null);
+    if (!window.__DY_PUSH_ORIG__) {
+        window.__DY_PUSH_ORIG__ = Array.prototype.push;
+    }
+    const origPush = window.__DY_PUSH_ORIG__;
+    const num = (v) => {
+        const n = Number(v);
+        return Number.isFinite(n) ? n : 0;
+    };
     Array.prototype.push = function (...args) {
         try {
             for (const msg of args) {
@@ -865,11 +1068,25 @@ const hookJS = `(() => {
                     if (user && content) data = { type: "chat", user, user_id, content };
                 } else if (method === "WebcastGiftMessage") {
                     const gift = payload?.gift?.name || "";
-                    const gift_id = payload?.gift?.id ?? 0;
-                    const repeat_end = payload?.repeat_end;
-                    const count = payload?.combo_count ? Number(payload.combo_count) : 1;
-                    if (user && gift && String(repeat_end).trim() === "1")
-                        data = { type: "gift", user, user_id, gift, gift_id, count, repeat_end: 1 };
+                    const gift_id = payload?.gift?.id ?? payload?.gift?.id_str ?? 0;
+                    const repeat_end = payload?.repeat_end ?? payload?.repeatEnd;
+                    const combo = Math.max(
+                        num(payload?.combo_count), num(payload?.comboCount),
+                        num(payload?.repeat_count), num(payload?.repeatCount),
+                        num(payload?.group_count), num(payload?.groupCount));
+                    const key = String(user_id || user) + "|" + String(gift_id || gift);
+                    const ended = String(repeat_end).trim() === "1" || repeat_end === 1 || repeat_end === true;
+                    if (user && gift) {
+                        const prev = num(window.__DY_GIFT_COMBO__[key]);
+                        const peak = Math.max(prev, combo, 1);
+                        if (!ended) {
+                            window.__DY_GIFT_COMBO__[key] = peak;
+                        } else {
+                            delete window.__DY_GIFT_COMBO__[key];
+                            const count = Math.max(peak, combo, 1);
+                            data = { type: "gift", user, user_id, gift, gift_id, count, repeat_end: 1 };
+                        }
+                    }
                 } else if (method === "WebcastLikeMessage") {
                     const count = Number(payload?.count || 1);
                     if (user) data = { type: "like", user, user_id, count };
@@ -894,11 +1111,12 @@ const hookJS = `(() => {
                 } else if (method === "WebcastControlMessage") {
                     data = { type: "control", status: Number(payload?.status || 0) };
                 }
-                if (data) { try { window.__DY_MSG_Q.push(data); } catch(e) {} }
+                if (data) { try { origPush.call(window.__DY_MSG_Q, data); } catch(e) {} }
             }
         } catch(e) {}
-        return oldPush.apply(this, args);
+        return origPush.apply(this, args);
     };
+    window.__DY_HOOK__ = true;
 })();`
 
 func runBrowserCapture(ctx context.Context, p Params, jsHook bool) error {
@@ -910,15 +1128,33 @@ func runBrowserCapture(ctx context.Context, p Params, jsHook bool) error {
 		return fmt.Errorf("live_id required")
 	}
 	logf("capture begin", "route", string(p.Route), "live_id", p.LiveID, "js_hook", jsHook)
-	sess, err := launchBrowser(ctx, BrowserOptions{
+	// Own the browser on a detached allocator so parent cancel does not SIGKILL
+	// Chrome mid-room — we leave via about:blank first, then Close gracefully.
+	sess, err := launchBrowser(context.Background(), BrowserOptions{
 		Root: p.Root, PreferBundled: true, RequireState: true,
 		Headless: true, TrimResources: true,
 	})
 	if err != nil {
 		return err
 	}
-	defer sess.Close()
-	logf("browser launched", "exe", sess.Exe, "system", sess.System, "bundled", !sess.System, "headless", true, "live_id", p.LiveID)
+	defer func() {
+		// Bound leave so a wedged CDP cannot skip Close / job kill forever.
+		left := make(chan struct{})
+		go func() {
+			defer close(left)
+			sess.leaveLiveBestEffort(logf, p.Root)
+		}()
+		select {
+		case <-left:
+		case <-time.After(2 * time.Second):
+			logf("leave live", "hard_timeout", true)
+		}
+		sess.Close()
+	}()
+	logf("browser launched",
+		"exe", sess.Exe, "system", sess.System, "bundled", !sess.System,
+		"headless", true, "child_pid", sess.browserPID.Load(),
+		"user_data", sess.userDataDir != "", "live_id", p.LiveID)
 
 	var (
 		mu          sync.Mutex
@@ -927,6 +1163,8 @@ func runBrowserCapture(ctx context.Context, p Params, jsHook bool) error {
 		stopped     bool
 		wssOK       bool
 		offlineAt   time.Time
+		wssDownAt   time.Time
+		lastHookAt  time.Time
 		pushSockets = map[network.RequestID]bool{}
 		enterReqs   = map[network.RequestID]bool{}
 	)
@@ -1067,17 +1305,36 @@ func runBrowserCapture(ctx context.Context, p Params, jsHook bool) error {
 		case *network.EventWebSocketCreated:
 			if strings.Contains(e.URL, "/push/v2/") {
 				mu.Lock()
+				_, known := pushSockets[e.RequestID]
 				pushSockets[e.RequestID] = true
+				reconnected := wssOK || !wssDownAt.IsZero()
 				wssOK = true
+				wssDownAt = time.Time{}
 				mu.Unlock()
+				if !known {
+					if reconnected {
+						logf("wss reconnected", "url", e.URL)
+					} else {
+						logf("wss created", "url", e.URL)
+					}
+				}
 				sess.applyPostWSSTrim(logf)
+				if jsHook {
+					sess.enqueueRun(func() {
+						_ = chromedp.Run(sess.Ctx, chromedp.Evaluate(hookJS, nil))
+					})
+				}
 			}
 		case *network.EventWebSocketFrameReceived:
 			mu.Lock()
 			okSock := pushSockets[e.RequestID]
 			okLive := liveOK && !stopped
 			mu.Unlock()
-			if !okSock || !okLive || jsHook {
+			// Always ingest /push/v2/ binary frames (same as route 2). Route 1 used to
+			// skip this when jsHook was on and rely solely on Array.prototype.push;
+			// leanDom / page changes routinely leave that hook dry while WSS still
+			// delivers WebcastGiftMessage — gifts never reached Core/tools.
+			if !okSock || !okLive {
 				return
 			}
 			if e.Response.Opcode != 2 {
@@ -1095,35 +1352,58 @@ func runBrowserCapture(ctx context.Context, p Params, jsHook bool) error {
 			default:
 			}
 		case *network.EventWebSocketClosed:
+			// Douyin rotates push sockets; do not end the live session immediately.
 			mu.Lock()
-			was := pushSockets[e.RequestID] && liveOK && !stopped
-			if was {
-				stopped = true
+			if pushSockets[e.RequestID] {
+				delete(pushSockets, e.RequestID)
+				if liveOK && !stopped && len(pushSockets) == 0 {
+					wssOK = false
+					wssDownAt = time.Now()
+					// Douyin often rotates push sockets; short grace false-ends the room.
+					logf("wss down", "grace_s", 30)
+				}
 			}
 			mu.Unlock()
-			if was {
-				logf("live ended", "reason", "wss_closed")
-				emitStatus(false)
-			}
 		case *runtime.EventConsoleAPICalled:
 			_ = e // queue drain path preferred
 		}
 	})
 
+	// Route 1: install hook on every new document *before* Navigate so it survives
+	// the live page load. A one-shot Evaluate before Navigate only hits about:blank
+	// and is wiped; re-injecting only after chromedp.Navigate's load wait (often 45s
+	// with resource trim) delayed all gifts/chat until "navigate incomplete".
 	if jsHook {
-		_ = chromedp.Run(sess.Ctx, chromedp.Evaluate(hookJS, nil))
+		_ = chromedp.Run(sess.Ctx, chromedp.ActionFunc(func(ctx context.Context) error {
+			_, err := page.AddScriptToEvaluateOnNewDocument(hookJS).Do(ctx)
+			return err
+		}))
 	}
 
 	url := fmt.Sprintf("https://live.douyin.com/%s", p.LiveID)
 	logf("navigate live page", "url", url)
 	navStarted := time.Now()
 	go func() {
-		navCtx, navCancel := context.WithTimeout(sess.Ctx, 45*time.Second)
+		navCtx, navCancel := context.WithTimeout(sess.Ctx, 20*time.Second)
 		defer navCancel()
-		if err := chromedp.Run(navCtx, chromedp.Navigate(url)); err != nil {
+		// page.Navigate returns when the navigation is accepted — do not wait for
+		// window loadEvent (trim blocks css/img so load may never complete).
+		if err := chromedp.Run(navCtx, chromedp.ActionFunc(func(ctx context.Context) error {
+			_, _, errText, _, err := page.Navigate(url).Do(ctx)
+			if err != nil {
+				return err
+			}
+			if errText != "" {
+				return fmt.Errorf("%s", errText)
+			}
+			return nil
+		})); err != nil {
 			logf("navigate incomplete", "err", err)
+		} else {
+			logf("navigate issued")
 		}
 		if jsHook {
+			// Belt-and-suspenders if on-new-document raced the first paint.
 			_ = chromedp.Run(sess.Ctx, chromedp.Evaluate(hookJS, nil))
 		}
 	}()
@@ -1132,42 +1412,71 @@ func runBrowserCapture(ctx context.Context, p Params, jsHook bool) error {
 	ackDeadline := time.Now().Add(moduleAckTimeout())
 	enterHangN := 0
 	badRoomProbed := false
+	lastWaitLog := time.Time{}
 	ticker := time.NewTicker(400 * time.Millisecond)
 	defer ticker.Stop()
 
 	for {
 		select {
 		case <-ctx.Done():
-			emitStatus(false)
+			// Do not emitStatus(false) on cancel. Hub OpConnect/Disconnect already
+			// publishes authoritative status; a late false here races the next
+			// connect and flashed 连接失败 while enter status=2 was succeeding.
 			return ctx.Err()
 		case <-ticker.C:
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			// Keep CDP probes short so Manager.Stop cancel is observed quickly;
+			// otherwise a wedged Evaluate can delay leave/Close by tens of seconds.
+			probeCtx, probeCancel := context.WithTimeout(sess.Ctx, 800*time.Millisecond)
 			mu.Lock()
 			doneEnter := enterSeen || liveOK || stopped
 			alive := liveOK && !stopped
 			offline := enterSeen && !liveOK && !stopped
 			offAt := offlineAt
 			wss := wssOK
+			wssDown := wssDownAt
 			seenEnter := enterSeen
 			enterReqN := len(enterReqs)
 			mu.Unlock()
 
-			if offline && (wss || (!offAt.IsZero() && time.Since(offAt) > 3*time.Second)) {
+			if alive && !wss && !wssDown.IsZero() && time.Since(wssDown) > 30*time.Second {
+				probeCancel()
+				endLive("wss_closed")
+				continue
+			}
+
+			if offline && (wss || (!offAt.IsZero() && time.Since(offAt) > 8*time.Second)) {
+				probeCancel()
 				logf("capture idle", "reason", "not_living", "wss", wss)
 				emitStatus(false)
 				return errNotLiving()
 			}
 
 			if !doneEnter {
-				if fb, _ := extractEnterFromPage(sess.Ctx); fb != nil {
+				if fb, _ := extractEnterFromPage(probeCtx); fb != nil {
 					applyEnter(fb)
 				}
 			}
 
-			if connectdiag.BrowserStuck(enterReqN, seenEnter, wss) && !badRoomProbed &&
+			if connectdiag.BrowserStuck(enterReqN, seenEnter, wss) &&
 				time.Since(navStarted) >= connectdiag.BadRoomMinWait {
-				badRoomProbed = true
-				if err := connectdiag.TryBadRoom(sess.Ctx, enterReqN, seenEnter, time.Since(navStarted)); err != nil {
-					logf("page signal", "bad_room", true, "reason", "landing_title")
+				since := time.Since(navStarted)
+				if !badRoomProbed {
+					badRoomProbed = true
+					if err := connectdiag.TryBadRoom(probeCtx, enterReqN, seenEnter, since); err != nil {
+						probeCancel()
+						logf("page signal", "bad_room", true, "reason", "landing_title")
+						emitStatus(false)
+						return err
+					}
+				}
+				// Private/offline: title still "…的抖音直播间", no RENDER_DATA / room/enter,
+				// body shows 直播已结束 — treat as not_living instead of hanging → timeout_net.
+				if err := connectdiag.TryEndedLive(probeCtx, enterReqN, seenEnter, since); err != nil {
+					probeCancel()
+					logf("page signal", "not_living", true, "reason", "ended_body")
 					emitStatus(false)
 					return err
 				}
@@ -1180,15 +1489,17 @@ func runBrowserCapture(ctx context.Context, p Params, jsHook bool) error {
 			mu.Unlock()
 
 			if !doneEnter && time.Now().After(ackDeadline) {
-				fb, _ := extractEnterFromPage(sess.Ctx)
+				fb, _ := extractEnterFromPage(probeCtx)
 				if fb != nil {
 					applyEnter(fb)
 				} else if enterReqN == 0 {
+					probeCancel()
 					fail()
 					return connectdiag.ClassifyBrowserFault(sess.Ctx, enterReqN, seenEnter, nil)
 				} else {
 					enterHangN++
 					if enterHangN > 2 {
+						probeCancel()
 						fail()
 						return connectdiag.ClassifyBrowserFault(sess.Ctx, enterReqN, seenEnter, nil)
 					}
@@ -1196,12 +1507,33 @@ func runBrowserCapture(ctx context.Context, p Params, jsHook bool) error {
 					ackDeadline = time.Now().Add(moduleAckTimeout())
 					logf("waiting enter status", "enter_reqs", enterReqN)
 				}
+			} else if !doneEnter && time.Since(navStarted) >= 8*time.Second &&
+				(lastWaitLog.IsZero() || time.Since(lastWaitLog) >= 8*time.Second) {
+				lastWaitLog = time.Now()
+				var title, href string
+				_ = chromedp.Run(probeCtx,
+					chromedp.Evaluate(`document.title||''`, &title),
+					chromedp.Evaluate(`location.href||''`, &href),
+				)
+				logf("waiting room enter", "elapsed_s", int(time.Since(navStarted).Seconds()),
+					"enter_reqs", enterReqN, "wss", wss, "title", title, "href", href)
 			}
 			if jsHook && alive {
-				if drainHookQueue(sess.Ctx, p) {
-					endLive("control")
+				if lastHookAt.IsZero() || time.Since(lastHookAt) >= 12*time.Second {
+					lastHookAt = time.Now()
+					_ = chromedp.Run(probeCtx, chromedp.Evaluate(hookJS, nil))
+				}
+				// Prefer WSS protobuf once the push socket is up to avoid double
+				// gift/chat from hook + frame. Hook remains a pre-WSS backup.
+				if !wss {
+					if drainHookQueue(probeCtx, p) {
+						probeCancel()
+						endLive("control")
+						continue
+					}
 				}
 			}
+			probeCancel()
 			mu.Lock()
 			ended := stopped && liveOK
 			mu.Unlock()

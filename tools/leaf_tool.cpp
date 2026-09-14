@@ -5,12 +5,16 @@ namespace liveaio::tools::leaf {
 static const QString kGeoKey = QStringLiteral("leaf_window_geometry");
 // v3：再次重置历史坐标，保证垃圾桶默认右上角（忽略 v2 左上坏档）。
 static const QString kTrashPosKey = QStringLiteral("leaf_trash_pos_v3");
+static const QString kRulesHudPosKey = QStringLiteral("leaf_rules_hud_pos_v1");
+static const QString kStatsHudPosKey = QStringLiteral("leaf_stats_hud_pos_v1");
 static const QString kMaxPercentKey = QStringLiteral("leaf_max_percent");
 static const QString kLeafScaleKey = QStringLiteral("leaf_scale_percent");
 static const QString kTrashScaleKey = QStringLiteral("leaf_trash_scale_percent");
 static const QString kViewportSizeKey = QStringLiteral("leaf_last_viewport_size");
 static const QString kFaceShieldEnabledKey = QStringLiteral("leaf_face_shield_enabled");
 static const QString kFaceShieldRectKey = QStringLiteral("leaf_face_shield_rect_v1");
+static constexpr int kHudMarginPx = 20;
+static constexpr int kRulesStripFixedW = 168;
 static constexpr qreal kShieldPeakFrac = 0.22;
 static constexpr qreal kShieldEjectAccel = 420.0;  // 框内缓慢向下挤出
 // 旧资源路径：仅作皮肤文件缺失时的回退。
@@ -38,37 +42,62 @@ static constexpr qreal kDefTrashHaloAmount = 0.72;
 static constexpr qreal kDefLeafHaloAmount = 0.82;
 static constexpr qreal kWorldPadCm = 0.15;
 static constexpr int kMinLeaves = 0;
-static constexpr int kMaxLeavesHard = 240;
-// 容量按理论上限的百分比配置。
+static constexpr int kMaxLeavesHard = 1600;
+// 容量 = (世界面积 × 百分比) / 碰撞箱面积；滑条是填满密度 20%~85%。
 static constexpr int kCapPercentMin = 20;
-static constexpr int kCapPercentMax = 70;
+static constexpr int kCapPercentMax = 85;
 static constexpr int kCapPercentDefault = 50;
 // 出场/退场节奏：排队生成，不一次性刷屏。
 static constexpr qreal kSpawnIntervalSec = 0.20;
 static constexpr qreal kDespawnIntervalSec = 0.10;
 static constexpr qreal kFadeInSec = 0.16;
 static constexpr qreal kFadeOutSec = 0.16;
-// 待生成/待吊销队列硬顶，防止礼物刷屏把 pending 撑爆。
-static constexpr int kPendingQueueCap = 120;
-static constexpr int kTickMs = 16;
-static constexpr int kPositionIters = 8;
-static constexpr int kResizeSettleIters = 18;
-static constexpr int kDragPositionIters = 3;
+// 待生成/待吊销队列硬顶。必须远高于场上硬顶：大额礼物先全部入队，
+// 再按软容量慢慢落地；不能和 kMaxLeavesHard 共用同一个顶，否则队列里已有
+// 残留时，下一次大批量只会「看起来只加了几十」。
+static constexpr int kPendingQueueCap = kMaxLeavesHard * 20;
+// 流畅优先：醒着约 60fps；整堆睡着后降到 ~20fps 省 CPU。
+static constexpr int kTickMs = 50;
+static constexpr int kTickMsBusy = 16;
+static constexpr int kTickMsMass = 20;
+// 分离轮次：堆叠要够硬，但不能轮数过多互推乱抖。
+static constexpr int kPositionIters = 3;
+static constexpr int kPositionItersCircle = 3;
+static constexpr int kPositionItersMass = 3;
+static constexpr int kResizeSettleIters = 4;
+static constexpr int kDragPositionIters = 2;
 static constexpr int kMaxDragSubsteps = 8;
-static constexpr qreal kGravity = 1400.0;
-// 阻尼再低一档：叶子滑得更远、转得更久。
-static constexpr qreal kDamping = 0.960;
+static constexpr int kPerfPaintThreshold = 56;   // 关 SmoothPixmap
+static constexpr int kHeavyPaintThreshold = 80;  // 关 AA + 闲置光晕
+static constexpr int kCircleContactThreshold = 36;
+static constexpr int kMassLeafThreshold = 220;   // 仅很高密度才略降采样
+// 休眠：物理解算后「小位移」连续约 3s 才冻死锁位（先前判睡时机有 bug，门槛按真休眠重定）。
+static constexpr qreal kSleepSpeed = 10.0;        // px/s（解算后残余）
+static constexpr qreal kSleepAngVel = 0.035;
+static constexpr qreal kSleepStillSec = 3.0;
+static constexpr qreal kSleepMaxDriftPx = 4.0;    // 相对静锚的位移上限
+static constexpr qreal kSleepSupportMinFrac = 0.5; // 下方支撑覆盖 < 此比例 → 唤醒
+static constexpr qreal kGravity = 1400.0;         // 只加在每个自身对象上
+static constexpr qreal kSleepSupportGapFrac = 2.6; // 下方支撑搜索深度（×rigidRadius）
+static constexpr qreal kDragWakeRingFrac = 2.8;   // 拖叶起始点唤醒半径（×rigidRadius）
+static constexpr qreal kDamping = 0.955;
 static constexpr qreal kAngDamping = 0.820;
 static constexpr qreal kMaxAngVel = 0.9;
 static constexpr qreal kMaxSpeed = 165.0;
-static constexpr qreal kCollisionTorque = 0.001;
-static constexpr qreal kPositionSlopPx = 0.25;
-static constexpr qreal kPositionMaxCorrectionFrac = 0.65;
+static constexpr qreal kCollisionTorque = 0.0;
+static constexpr qreal kPositionSlopPx = 0.12;
+static constexpr qreal kSeparateBias = 0.99;
+static constexpr qreal kPositionMaxCorrectionFrac = 1.45;
+static constexpr qreal kStackUpperWeight = 0.88;
+static constexpr qreal kStackLowerWeight = 0.12;
 static constexpr qreal kDragStepFrac = 0.70;
 static constexpr qreal kDragPushRatio = 0.55;
-static constexpr qreal kFriction = 0.32;
+static constexpr qreal kFriction = 0.62;
+static constexpr qreal kFrictionStatic = 0.90;
 static constexpr qreal kRestitution = 0.0;
-static constexpr qreal kFloorFriction = 0.72;
+static constexpr qreal kFloorFriction = 0.94;
+// 包装格填充：默认约 14cm 窗 + 缩放 100% 时，85% ≈ 210 片。
+static constexpr qreal kPackFillFactor = 1.013;
 static constexpr qreal kPi = 3.14159265358979323846;
 
 static qreal screenDpi() {
@@ -230,25 +259,38 @@ static QVector<liveaio::resources::SkinEntry> listLeafSkins() {
 }
 
 static const LeafSkinParams& leafParams();
+static QSizeF leafArtPx(qreal scale = 1.0);
 
 static qreal leafVisualPx(qreal scale = 1.0) { return cmToPxF(leafParams().leafSideCm) * scale; }
 static qreal rigidHalfLength(qreal scale = 1.0) {
-    return leafVisualPx(scale) * leafParams().rigidHalfLengthFrac;
+    const QSizeF art = leafArtPx(scale);
+    return std::min(art.width() * leafParams().rigidHalfLengthFrac, art.width() * 0.5);
 }
 static qreal rigidHalfWidth(qreal scale = 1.0) {
-    return leafVisualPx(scale) * leafParams().rigidHalfWidthFrac;
+    const QSizeF art = leafArtPx(scale);
+    return std::min(art.height() * leafParams().rigidHalfWidthFrac, art.height() * 0.5);
 }
 static qreal rigidBevel(qreal scale = 1.0) {
-    return leafVisualPx(scale) * leafParams().rigidBevelFrac;
+    const QSizeF art = leafArtPx(scale);
+    return std::min(art.width(), art.height()) * leafParams().rigidBevelFrac;
 }
 static qreal rigidRadius(qreal scale = 1.0) {
     return std::hypot(rigidHalfLength(scale), rigidHalfWidth(scale));
 }
-static qreal softR(qreal scale = 1.0) { return leafVisualPx(scale) * leafParams().softRadiusFrac; }
-static qreal softHalf(qreal scale = 1.0) { return leafVisualPx(scale) * leafParams().softHalfLenFrac; }
+static qreal softR(qreal scale = 1.0) {
+    const QSizeF art = leafArtPx(scale);
+    const qreal r = std::min(art.width(), art.height()) * leafParams().softRadiusFrac;
+    return std::min(r, std::min(art.width(), art.height()) * 0.5);
+}
+static qreal softHalf(qreal scale = 1.0) {
+    const QSizeF art = leafArtPx(scale);
+    const qreal r = softR(scale);
+    const qreal half = art.width() * leafParams().softHalfLenFrac;
+    return std::min(half, std::max(0.0, art.width() * 0.5 - r));
+}
 
 static qreal leafPackSide(qreal leafScale = 1.0) {
-    // 最坏倾角下仍能包住八边形刚体的轴对齐正方形。
+    // 最坏倾角下仍能包住八边形刚体的轴对齐正方形（生成/间距/容量用）。
     return 2.0 * rigidRadius(leafScale);
 }
 
@@ -264,15 +306,16 @@ static int maxLeavesForSize(const QSize& contentSize, qreal leafScale = 1.0,
     const qreal pad = cmToPxF(kWorldPadCm);
     const qreal w = std::max(0.0, contentSize.width() - 2.0 * pad);
     const qreal h = std::max(0.0, contentSize.height() - 2.0 * pad);
-    const qreal cell = std::max(1.0, leafPackSide(leafScale));
-    const int cols = static_cast<int>(std::floor(w / cell));
-    const int rows = static_cast<int>(std::floor(h / cell));
-    int base = cols * rows;
+    const qreal worldArea = w * h;
+    // 用旋转外接包装格；fill 按默认窗 100% 缩放标定（85% ≈ 210）。
+    const qreal packSide = leafPackSide(leafScale);
+    const qreal leafArea = std::max(1.0, packSide * packSide);
+    int base = static_cast<int>(std::floor(worldArea / leafArea * kPackFillFactor));
     if (shieldSquare && shieldSquare->width() > 1.0 && shieldSquare->height() > 1.0) {
         const qreal side = std::min(shieldSquare->width(), shieldSquare->height());
         const qreal peak = side * std::clamp(shieldPeakFrac, 0.05, 0.6);
-        const qreal area = side * side + 0.5 * side * peak;
-        base -= static_cast<int>(std::floor(area / (cell * cell)));
+        const qreal shieldArea = side * side + 0.5 * side * peak;
+        base -= static_cast<int>(std::floor(shieldArea / leafArea * kPackFillFactor));
     }
     return std::clamp(base, kMinLeaves, kMaxLeavesHard);
 }
@@ -329,6 +372,24 @@ static QPixmap cropOpaque(const QPixmap& src) {
     // 紧贴内容裁切，不留呼吸边：绘制时按长宽比 fit，不会被裁死。
     const QRect r(minx, miny, maxx - minx + 1, maxy - miny + 1);
     return QPixmap::fromImage(img.copy(r.intersected(img.rect())));
+}
+
+// 有色像素占外接矩形的比例（开方）：不规则 emoji/剪影碰撞比矩形 bbox 更紧。
+static qreal opaqueFillFactor(const QPixmap& pm) {
+    if (pm.isNull() || pm.width() <= 0 || pm.height() <= 0) return 1.0;
+    const QImage img = pm.toImage().convertToFormat(QImage::Format_ARGB32);
+    const qreal area = static_cast<qreal>(img.width()) * static_cast<qreal>(img.height());
+    if (area < 1.0) return 1.0;
+    int opaque = 0;
+    for (int y = 0; y < img.height(); ++y) {
+        const auto* line = reinterpret_cast<const QRgb*>(img.constScanLine(y));
+        for (int x = 0; x < img.width(); ++x) {
+            if (qAlpha(line[x]) >= 20) ++opaque;
+        }
+    }
+    const qreal fill = std::sqrt(static_cast<qreal>(opaque) / area);
+    // 略收一点，保证八边形/胶囊不顶出剪影；下限避免过小难点选。
+    return std::clamp(fill * 0.92, 0.55, 1.0);
 }
 
 // 关盖图头顶透明很大：去掉大部分，但保留少量原图空间，避免贴边裁死。
@@ -466,6 +527,10 @@ struct LeafSharedAssets {
     QPixmap trashOpenHaloPm;
     // 关盖图为开盖预留了头顶透明区；设置页预览用裁切后贴图，避免框内大片空白。
     QPixmap trashPreviewPm;
+    // 碰撞相对 leafVisualPx：贴图 fit 进方框后的宽高比 + 有色像素覆盖率（不规则剪影再收一圈）。
+    qreal leafFitWFrac = 1.0;
+    qreal leafFitHFrac = 1.0;
+    qreal leafOpaqueFill = 1.0;
 
     static LeafSharedAssets& instance() {
         static LeafSharedAssets* g = nullptr;
@@ -516,6 +581,14 @@ struct LeafSharedAssets {
                 leafPm = leafPm.scaled(side, side, Qt::KeepAspectRatio, Qt::SmoothTransformation);
             }
         }
+        {
+            const qreal side = std::max(1.0, cmToPxF(params.leafSideCm));
+            const QRectF box(0.0, 0.0, side, side);
+            const QRectF fitted = fitPixmap(box, leafPm);
+            leafFitWFrac = std::clamp(fitted.width() / side, 0.2, 1.0);
+            leafFitHFrac = std::clamp(fitted.height() / side, 0.2, 1.0);
+            leafOpaqueFill = opaqueFillFactor(leafPm);
+        }
         const int tw = std::max(64, static_cast<int>(std::lround(cmToPxF(params.trashWCm) * 4.0)));
         const int th = std::max(80, static_cast<int>(std::lround(cmToPxF(params.trashHCm) * 4.0)));
         auto scaleTrash = [tw, th](QPixmap& pm, const QColor& fallback) {
@@ -543,6 +616,13 @@ struct LeafSharedAssets {
 };
 
 static const LeafSkinParams& leafParams() { return LeafSharedAssets::instance().params; }
+
+static QSizeF leafArtPx(qreal scale) {
+    const auto& a = LeafSharedAssets::instance();
+    const qreal side = leafVisualPx(scale);
+    const qreal fill = a.leafOpaqueFill;
+    return QSizeF(side * a.leafFitWFrac * fill, side * a.leafFitHFrac * fill);
+}
 
 class LeafScalePreview final : public QWidget {
 public:
@@ -680,6 +760,15 @@ static const QString kGiftRulesKey = QStringLiteral("leaf.settings");
 static constexpr int kMaxGiftRules = 10;
 static const QString kNullGift = QStringLiteral("Null");
 
+static void leafAddRuleLog(const QString& msg) {
+    const QString path = QDir::temp().filePath(QStringLiteral("liveaio_leaf_add_rule.log"));
+    QFile f(path);
+    if (!f.open(QIODevice::WriteOnly | QIODevice::Append | QIODevice::Text)) return;
+    f.write(QStringLiteral("%1 %2\n")
+                .arg(QDateTime::currentDateTime().toString(Qt::ISODateWithMs), msg)
+                .toUtf8());
+}
+
 struct LeafGiftRule {
     QString gift;  // empty / Null → ignored
     QString mode = QStringLiteral("加");
@@ -689,7 +778,8 @@ struct LeafGiftRule {
 };
 
 static QStringList leafGiftModes() {
-    return {QStringLiteral("加"), QStringLiteral("减"), QStringLiteral("随机")};
+    return {QStringLiteral("加"), QStringLiteral("减"), QStringLiteral("随机"),
+            QStringLiteral("清空"), QStringLiteral("清屏")};
 }
 
 static QString normalizeLeafGiftName(const QString& gift) {
@@ -704,10 +794,36 @@ static QString leafGiftDisplayName(const QString& gift) {
 }
 
 static QString leafRuleCompactLabel(const LeafGiftRule& r) {
+    if (r.mode == QStringLiteral("清空")) return QStringLiteral("清空全部叶子");
+    if (r.mode == QStringLiteral("清屏")) return QStringLiteral("清除屏幕叶子");
     if (r.mode == QStringLiteral("随机")) {
         return QStringLiteral("随机 %1~%2片叶子").arg(r.randomMin).arg(r.randomMax);
     }
     return QStringLiteral("%1 %2片叶子").arg(r.mode).arg(r.value);
+}
+
+// Overlay HUD only shows rules with a real gift; empty drafts must not rebuild it.
+static QString overlayRulesSignature(const QVector<LeafGiftRule>& rules) {
+    QStringList parts;
+    for (const LeafGiftRule& r : rules) {
+        if (normalizeLeafGiftName(r.gift).isEmpty()) continue;
+        parts << QStringLiteral("%1\x1f%2\x1f%3\x1f%4\x1f%5")
+                     .arg(r.gift, r.mode)
+                     .arg(r.value)
+                     .arg(r.randomMin)
+                     .arg(r.randomMax);
+    }
+    return parts.join(QLatin1Char('\n'));
+}
+
+static QVector<LeafGiftRule> effectiveLeafGiftRules(const QVector<LeafGiftRule>& rules) {
+    QVector<LeafGiftRule> out;
+    for (const LeafGiftRule& r : rules) {
+        if (normalizeLeafGiftName(r.gift).isEmpty()) continue;
+        out.append(r);
+        if (out.size() >= kMaxGiftRules) break;
+    }
+    return out;
 }
 
 static LeafGiftRule leafRuleFromMap(const QVariantMap& m) {
@@ -719,14 +835,19 @@ static LeafGiftRule leafRuleFromMap(const QVariantMap& m) {
              || mode == QStringLiteral("减")) r.mode = QStringLiteral("减");
     else if (mode == QStringLiteral("random") || mode == QStringLiteral("随机"))
         r.mode = QStringLiteral("随机");
+    else if (mode == QStringLiteral("clear") || mode == QStringLiteral("清空"))
+        r.mode = QStringLiteral("清空");
+    else if (mode == QStringLiteral("clear_screen") || mode == QStringLiteral("clearscreen")
+             || mode == QStringLiteral("清屏"))
+        r.mode = QStringLiteral("清屏");
     else r.mode = QStringLiteral("加");
     r.value = std::max(0, m.value(QStringLiteral("value"), 1).toInt());
-    r.randomMin = std::max(0, m.value(QStringLiteral("min"),
-                                      m.value(QStringLiteral("random_min"), 1)).toInt());
-    r.randomMax = std::max(0, m.value(QStringLiteral("max"),
-                                      m.value(QStringLiteral("random_max"),
-                                              std::max(r.randomMin, 3))).toInt());
-    if (r.randomMax < r.randomMin) std::swap(r.randomMin, r.randomMax);
+    r.randomMin = m.value(QStringLiteral("min"),
+                          m.value(QStringLiteral("random_min"), 1)).toInt();
+    r.randomMax = m.value(QStringLiteral("max"),
+                          m.value(QStringLiteral("random_max"),
+                                  r.randomMin + 1)).toInt();
+    if (r.randomMax <= r.randomMin) r.randomMax = r.randomMin + 1;
     return r;
 }
 
@@ -734,6 +855,8 @@ static QVariantMap leafRuleToMap(const LeafGiftRule& r) {
     QString mode = QStringLiteral("add");
     if (r.mode == QStringLiteral("减")) mode = QStringLiteral("sub");
     else if (r.mode == QStringLiteral("随机")) mode = QStringLiteral("random");
+    else if (r.mode == QStringLiteral("清空")) mode = QStringLiteral("clear");
+    else if (r.mode == QStringLiteral("清屏")) mode = QStringLiteral("clear_screen");
     return {
         {QStringLiteral("gift"), r.gift},
         {QStringLiteral("mode"), mode},
@@ -773,6 +896,38 @@ static QJsonObject leafSettingsPacket(const QVector<LeafGiftRule>& rules) {
 
 static void pushLeafGiftRulesToCore(const QVector<LeafGiftRule>& rules) {
     if (g_sendPacket) g_sendPacket(leafSettingsPacket(rules));
+}
+
+enum class LeafGiftAction { Delta, ClearAll, ClearScreen };
+
+struct LeafGiftEffect {
+    LeafGiftAction action = LeafGiftAction::Delta;
+    int delta = 0;
+};
+
+// Mirrors core/leaf.go ruleToLeaves + HandleSimGift fallback so 模拟送礼 can paint
+// immediately; Core leaf.spawn is suppressed once to avoid double-drop.
+static LeafGiftEffect leafEffectForGift(const QVector<LeafGiftRule>& rules, const QString& gift,
+                                        int count, bool simFallback) {
+    if (count < 1) count = 1;
+    const QString want = gift.trimmed();
+    for (const LeafGiftRule& r : rules) {
+        if (normalizeLeafGiftName(r.gift).isEmpty()) continue;
+        if (QString::compare(r.gift.trimmed(), want, Qt::CaseInsensitive) != 0) continue;
+        if (r.mode == QStringLiteral("清空")) return {LeafGiftAction::ClearAll, 0};
+        if (r.mode == QStringLiteral("清屏")) return {LeafGiftAction::ClearScreen, 0};
+        if (r.mode == QStringLiteral("减")) return {LeafGiftAction::Delta, -r.value * count};
+        if (r.mode == QStringLiteral("随机")) {
+            int lo = r.randomMin;
+            int hi = r.randomMax;
+            if (hi <= lo) hi = lo + 1;
+            const int span = hi - lo + 1;
+            const int n = lo + static_cast<int>(QRandomGenerator::global()->bounded(span));
+            return {LeafGiftAction::Delta, n * count};
+        }
+        return {LeafGiftAction::Delta, r.value * count};
+    }
+    return {LeafGiftAction::Delta, simFallback ? count : 0};
 }
 
 class LeafGiftRuleCard final : public QFrame {
@@ -822,11 +977,11 @@ public:
 
     LeafGiftRule toRule() const {
         LeafGiftRule r = rule_;
-        r.mode = mode_->currentText();
-        r.value = valueSpin_->value();
-        r.randomMin = minSpin_->value();
-        r.randomMax = maxSpin_->value();
-        if (r.randomMax < r.randomMin) std::swap(r.randomMin, r.randomMax);
+        if (mode_) r.mode = mode_->currentText();
+        if (valueSpin_) r.value = valueSpin_->value();
+        if (minSpin_) r.randomMin = minSpin_->value();
+        if (maxSpin_) r.randomMax = maxSpin_->value();
+        if (r.randomMax <= r.randomMin) r.randomMax = r.randomMin + 1;
         return r;
     }
 
@@ -906,14 +1061,28 @@ private:
         randomLay->setAlignment(Qt::AlignVCenter);
         minSpin_ = new liveaio::util::ThemedSpinBox(randomHost_);
         maxSpin_ = new liveaio::util::ThemedSpinBox(randomHost_);
-        minSpin_->setRange(0, 999);
-        maxSpin_->setRange(0, 999);
-        minSpin_->setFixedSize(72, ctrlH);
-        maxSpin_->setFixedSize(72, ctrlH);
+        minSpin_->setRange(-999, 999);
+        maxSpin_->setRange(-999, 999);
+        minSpin_->setFixedSize(78, ctrlH);
+        maxSpin_->setFixedSize(78, ctrlH);
         QObject::connect(minSpin_, qOverload<int>(&QSpinBox::valueChanged),
-                         this, [this](int) { emitChange(); });
+                         this, [this](int v) {
+                             if (loading_) return;
+                             if (maxSpin_ && maxSpin_->value() <= v) {
+                                 QSignalBlocker b(maxSpin_);
+                                 maxSpin_->setValue(v + 1);
+                             }
+                             emitChange();
+                         });
         QObject::connect(maxSpin_, qOverload<int>(&QSpinBox::valueChanged),
-                         this, [this](int) { emitChange(); });
+                         this, [this](int v) {
+                             if (loading_) return;
+                             if (minSpin_ && v <= minSpin_->value()) {
+                                 QSignalBlocker b(minSpin_);
+                                 minSpin_->setValue(v - 1);
+                             }
+                             emitChange();
+                         });
         auto* tilde = new QLabel(QStringLiteral("~"), randomHost_);
         tilde->setFixedHeight(ctrlH);
         tilde->setAlignment(Qt::AlignCenter);
@@ -943,8 +1112,11 @@ private:
         rule_ = rule;
         mode_->setCurrentText(rule.mode);
         valueSpin_->setValue(rule.value);
-        minSpin_->setValue(rule.randomMin);
-        maxSpin_->setValue(rule.randomMax);
+        int lo = rule.randomMin;
+        int hi = rule.randomMax;
+        if (hi <= lo) hi = lo + 1;
+        minSpin_->setValue(lo);
+        maxSpin_->setValue(hi);
         loading_ = false;
         syncMode();
         if (normalizeLeafGiftName(rule.gift).isEmpty()) {
@@ -984,8 +1156,10 @@ private:
     }
 
     void syncMode() {
-        const bool isRand = mode_->currentText() == QStringLiteral("随机");
-        valueHost_->setVisible(!isRand);
+        const QString m = mode_ ? mode_->currentText() : QString();
+        const bool isRand = m == QStringLiteral("随机");
+        const bool needsValue = m == QStringLiteral("加") || m == QStringLiteral("减");
+        valueHost_->setVisible(needsValue);
         randomHost_->setVisible(isRand);
     }
 
@@ -1019,8 +1193,9 @@ public:
     explicit LeafOverlayRuleCard(QWidget* parent = nullptr) : QFrame(parent) {
         // 半透明悬浮窗上 QSS 背景经常不画，必须自绘 + StyledBackground。
         setAttribute(Qt::WA_StyledBackground, true);
+        setAttribute(Qt::WA_TransparentForMouseEvents);
         setAutoFillBackground(false);
-        setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+        setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
     }
 
 protected:
@@ -1033,26 +1208,72 @@ protected:
     }
 };
 
+class LeafHudBounds final : public QWidget {
+public:
+    explicit LeafHudBounds(QWidget* parent = nullptr) : QWidget(parent) {
+        setAttribute(Qt::WA_TransparentForMouseEvents);
+        setAttribute(Qt::WA_TranslucentBackground);
+        hide();
+    }
+
+    void setActive(bool on) {
+        if (active_ == on) return;
+        active_ = on;
+        setVisible(on);
+        if (on) update();
+    }
+
+protected:
+    void paintEvent(QPaintEvent*) override {
+        if (!active_) return;
+        QPainter p(this);
+        p.setRenderHint(QPainter::Antialiasing, true);
+        const QRectF box = QRectF(rect()).adjusted(kHudMarginPx + 0.5, kHudMarginPx + 0.5,
+                                                   -(kHudMarginPx + 0.5), -(kHudMarginPx + 0.5));
+        p.setPen(QPen(QColor(255, 255, 255, 48), 1.0, Qt::DashLine));
+        p.setBrush(QColor(255, 255, 255, 10));
+        p.drawRoundedRect(box, 8.0, 8.0);
+    }
+
+private:
+    bool active_ = false;
+};
+
 class LeafRulesStrip final : public QWidget {
 public:
     explicit LeafRulesStrip(QWidget* parent = nullptr) : QWidget(parent) {
-        setAttribute(Qt::WA_TransparentForMouseEvents);
         setAttribute(Qt::WA_TranslucentBackground);
+        setCursor(Qt::OpenHandCursor);
+        setFixedWidth(kRulesStripFixedW);
         auto* lay = new QVBoxLayout(this);
-        // 宽度缩约 1/4；字号/行高保持可读，不跟着压扁。
+        // 固定宽度；字号/行高保持可读，不随窗口百分比伸缩。
         lay->setContentsMargins(6, 6, 6, 6);
         lay->setSpacing(5);
         lay_ = lay;
         setRules({});
     }
 
-    void setRules(const QVector<LeafGiftRule>& rules) {
+    void setDragHandlers(std::function<void(bool)> onActive,
+                         std::function<QPoint(const QPoint&)> clampPos,
+                         std::function<void()> onEnd) {
+        onDragActive_ = std::move(onActive);
+        clampPos_ = std::move(clampPos);
+        onDragEnd_ = std::move(onEnd);
+    }
+
+    // Returns false when the visible overlay content is unchanged (skip delete/rebuild).
+    bool setRules(const QVector<LeafGiftRule>& rules) {
+        const QString sig = overlayRulesSignature(rules);
+        if (sig == appliedSig_ && lay_ && lay_->count() > 0) return false;
+        appliedSig_ = sig;
         releaseHeavyResources();
+        // Immediate delete while still parented. setParent(nullptr)+deleteLater turns
+        // translucent overlay cards into transient top-level windows mid-paint and has
+        // AV'd Pages (0xc0000005) when「添加规则」rebuilds the strip during live gifts.
         while (QLayoutItem* item = lay_->takeAt(0)) {
             if (QWidget* w = item->widget()) {
                 w->hide();
-                w->setParent(nullptr);
-                w->deleteLater();
+                delete w;
             }
             delete item;
         }
@@ -1062,6 +1283,7 @@ public:
         for (const LeafGiftRule& r : rules) {
             if (normalizeLeafGiftName(r.gift).isEmpty()) continue;
             auto* card = new LeafOverlayRuleCard(this);
+            card->setFixedWidth(kRulesStripFixedW - 12);
             auto* hl = new QHBoxLayout(card);
             hl->setContentsMargins(8, 5, 8, 5);
             hl->setSpacing(6);
@@ -1069,6 +1291,7 @@ public:
             icon->setFixedSize(22, 22);
             icon->setAlignment(Qt::AlignCenter);
             icon->setAttribute(Qt::WA_TranslucentBackground);
+            icon->setAttribute(Qt::WA_TransparentForMouseEvents);
             icon->setStyleSheet(QStringLiteral("background: transparent; border: none;"));
             icon->setText(QStringLiteral("·"));
             auto* col = new QVBoxLayout;
@@ -1076,11 +1299,13 @@ public:
             col->setSpacing(1);
             auto* name = new QLabel(leafGiftDisplayName(r.gift), card);
             name->setAttribute(Qt::WA_TranslucentBackground);
+            name->setAttribute(Qt::WA_TransparentForMouseEvents);
             name->setStyleSheet(QStringLiteral(
                 "background: transparent; border: none;"
                 " color: rgba(255,255,255,235); font-size: 11px; font-weight: 600;"));
             auto* detail = new QLabel(leafRuleCompactLabel(r), card);
             detail->setAttribute(Qt::WA_TranslucentBackground);
+            detail->setAttribute(Qt::WA_TransparentForMouseEvents);
             detail->setStyleSheet(QStringLiteral(
                 "background: transparent; border: none;"
                 " color: rgba(210,210,215,200); font-size: 10px;"));
@@ -1095,10 +1320,12 @@ public:
         }
         if (shown == 0) {
             auto* tip = new LeafOverlayRuleCard(this);
+            tip->setFixedWidth(kRulesStripFixedW - 12);
             auto* tipLay = new QVBoxLayout(tip);
             tipLay->setContentsMargins(8, 6, 8, 6);
             auto* tipLbl = new QLabel(QStringLiteral("未配置有效礼物规则"), tip);
             tipLbl->setAttribute(Qt::WA_TranslucentBackground);
+            tipLbl->setAttribute(Qt::WA_TransparentForMouseEvents);
             tipLbl->setStyleSheet(QStringLiteral(
                 "background: transparent; border: none;"
                 " color: rgba(255,255,255,200); font-size: 10px;"));
@@ -1109,6 +1336,7 @@ public:
         lay_->addStretch(1);
         updateGeometry();
         scheduleDeferredIconLoads();
+        return true;
     }
 
     void scheduleDeferredIconLoads() {
@@ -1131,7 +1359,7 @@ public:
     }
 
     QSize sizeHint() const override {
-        if (!lay_) return QSize(160, 40);
+        if (!lay_) return QSize(kRulesStripFixedW, 40);
         const QMargins m = lay_->contentsMargins();
         int h = m.top() + m.bottom();
         int rows = 0;
@@ -1143,12 +1371,38 @@ public:
             ++rows;
         }
         if (rows > 1) h += lay_->spacing() * (rows - 1);
-        return QSize(width() > 0 ? width() : 160, std::max(40, h));
+        return QSize(kRulesStripFixedW, std::max(40, h));
     }
 
 protected:
     void paintEvent(QPaintEvent*) override {
         // 规则条本身透明，只靠卡片自绘底色。
+    }
+
+    void mousePressEvent(QMouseEvent* event) override {
+        if (event->button() != Qt::LeftButton) return;
+        dragging_ = true;
+        dragOffset_ = event->pos();
+        setCursor(Qt::ClosedHandCursor);
+        if (onDragActive_) onDragActive_(true);
+        event->accept();
+    }
+
+    void mouseMoveEvent(QMouseEvent* event) override {
+        if (!dragging_ || !(event->buttons() & Qt::LeftButton)) return;
+        QPoint next = mapToParent(event->pos() - dragOffset_);
+        if (clampPos_) next = clampPos_(next);
+        move(next);
+        event->accept();
+    }
+
+    void mouseReleaseEvent(QMouseEvent* event) override {
+        if (event->button() != Qt::LeftButton || !dragging_) return;
+        dragging_ = false;
+        setCursor(Qt::OpenHandCursor);
+        if (onDragActive_) onDragActive_(false);
+        if (onDragEnd_) onDragEnd_();
+        event->accept();
     }
 
 private:
@@ -1160,6 +1414,12 @@ private:
     QVBoxLayout* lay_ = nullptr;
     QVector<IconRow> iconRows_;
     quint64 loadGen_ = 0;
+    QString appliedSig_;
+    bool dragging_ = false;
+    QPoint dragOffset_;
+    std::function<void(bool)> onDragActive_;
+    std::function<QPoint(const QPoint&)> clampPos_;
+    std::function<void()> onDragEnd_;
 };
 
 static QPointF closestPointOnSegment(const QPointF& a, const QPointF& b, const QPointF& p) {
@@ -1186,6 +1446,12 @@ struct LeafBody {
     qreal birthAngVel = 0.0;
     LeafState state = LeafState::Free;
     quint64 id = 0;
+    bool asleep = false;
+    qreal stillSec = 0.0;     // 连续「够静」累计秒数，满 kSleepStillSec 才休眠
+    QPointF sleepAnchor;      // 静锚：位移超 kSleepMaxDriftPx 则重新计时
+    QPointF lockedPos;        // 休眠锁死的碰撞箱位置（重叠也不改）
+    qreal lockedAngle = 0.0;
+    QPointF wakeForce;
 };
 
 static bool isPhysical(const LeafState s) {
@@ -1214,7 +1480,9 @@ public:
         LeafSharedAssets::instance();
         loadTrashPos();
         loadFaceShield();
+        resetSessionStats();
         tick_ = new QTimer(this);
+        tick_->setTimerType(Qt::PreciseTimer);
         tick_->setInterval(kTickMs);
         QObject::connect(tick_, &QTimer::timeout, this, [this]() { onTick(); });
         tick_->start();
@@ -1265,12 +1533,104 @@ public:
         return n;
     }
 
+    // 场上剩余：不含正在淡出的。
+    int remainingCount() const {
+        int n = 0;
+        for (const LeafBody& L : leaves_) {
+            if (L.state == LeafState::Idle || L.state == LeafState::Dragging
+                || L.state == LeafState::Spawning) {
+                ++n;
+            }
+        }
+        return n;
+    }
+
+    int todayAdded() const { return sessionAdded_; }
+    int todayCleared() const { return sessionCleared_; }
+
     int maxLeaves() const { return maxLeaves_; }
     int theoreticalCapacity() const { return theoreticalCapacity_; }
     int maxPercent() const { return preferredPercent_; }
     int pendingCount() const { return pendingSpawns_ + pendingRemovals_; }
+    int pendingSpawnCount() const { return pendingSpawns_; }
     int leafScalePercent() const { return qRound(leafScale_ * 100.0); }
     int trashScalePercent() const { return qRound(trashScale_ * 100.0); }
+    qint64 lastTickUs() const { return lastTickUs_; }
+    qint64 lastPaintUs() const { return lastPaintUs_; }
+
+    int awakeCount() const {
+        int n = 0;
+        for (const LeafBody& L : leaves_) {
+            if (!isPhysical(L.state)) continue;
+            if (!L.asleep) ++n;
+        }
+        return n;
+    }
+
+    // 压测：瞬间铺满到 count（跳过排队/淡入），用于测 1000+ 主线程预算。
+    void debugForceFill(int count) {
+        count = std::clamp(count, 0, kMaxLeavesHard);
+        pendingSpawns_ = 0;
+        pendingRemovals_ = 0;
+        spawnCooldown_ = 0.0;
+        removeCooldown_ = 0.0;
+        dragId_ = 0;
+        dragTargetValid_ = false;
+        for (LeafBody& L : leaves_) resetLeafBody(&L);
+        leaves_.clear();
+        maxLeaves_ = count;
+        theoreticalCapacity_ = std::max(theoreticalCapacity_, count);
+        if (count <= 0) {
+            update();
+            emitStats();
+            return;
+        }
+        const QRectF w = worldRect();
+        const qreal r = std::max(4.0, rigidRadius(leafScale_));
+        const qreal step = r * 2.05;
+        const qreal left = w.left() + r;
+        const qreal right = w.right() - r;
+        const qreal bottom = w.bottom() - r;
+        const qreal top = w.top() + r;
+        qreal x = left;
+        qreal y = bottom;
+        leaves_.reserve(count);
+        for (int i = 0; i < count; ++i) {
+            LeafBody L;
+            L.id = ++nextId_;
+            L.state = LeafState::Idle;
+            L.alpha = 1.0;
+            L.spawnT = 1.0;
+            L.pos = QPointF(x, y);
+            L.angle = 0.0;
+            L.vel = {};
+            L.angVel = 0.0;
+            L.asleep = true;
+            L.stillSec = 0.0;
+            clampToWorld(L);
+            L.lockedPos = L.pos;
+            L.lockedAngle = L.angle;
+            leaves_.append(L);
+            x += step;
+            if (x > right) {
+                x = left;
+                y -= step;
+                if (y < top) y = bottom;
+            }
+        }
+        noteAdded(count);
+        update();
+        emitStats();
+    }
+
+    void debugWakeAll(qreal vy = 80.0) {
+        for (LeafBody& L : leaves_) {
+            if (!isPhysical(L.state)) continue;
+            forceWakeLeaf(L);
+            L.vel = QPointF((QRandomGenerator::global()->generateDouble() - 0.5) * 40.0, vy);
+        }
+        update();
+    }
 
     void applySettings(int maxPercent, int leafPercent, int trashPercent) {
         leafPercent = std::clamp(leafPercent, 50, 200);
@@ -1294,7 +1654,16 @@ public:
         const int cancel = std::min(left, pendingRemovals_);
         pendingRemovals_ -= cancel;
         left -= cancel;
-        pendingSpawns_ = std::min(kPendingQueueCap, pendingSpawns_ + left);
+        const int before = pendingSpawns_;
+        const int room = std::max(0, kPendingQueueCap - pendingSpawns_);
+        if (left > room) {
+            qWarning("leaf enqueueSpawn truncated: want=%d room=%d pending=%d cap=%d",
+                     left, room, pendingSpawns_, kPendingQueueCap);
+            left = room;
+        }
+        pendingSpawns_ += left;
+        qInfo("leaf enqueueSpawn delta=%d cancel_removals=%d pending %d -> %d (alive=%d max=%d)",
+              count, cancel, before, pendingSpawns_, aliveCount(), maxLeaves_);
         flushSpawns();
         emitStats();
         update();
@@ -1314,6 +1683,36 @@ public:
     void applyLeafDelta(int delta) {
         if (delta > 0) enqueueSpawn(delta);
         else if (delta < 0) enqueueRemove(-delta);
+    }
+
+    // 清空：取消等待生成队列，并对场上叶子播淡出（与减/垃圾桶同套 Removing 动画）。
+    void clearAllLeaves() {
+        pendingSpawns_ = 0;
+        pendingRemovals_ = 0;
+        spawnCooldown_ = 0.0;
+        removeCooldown_ = 0.0;
+        dragId_ = 0;
+        dragTargetValid_ = false;
+        for (LeafBody& L : leaves_) {
+            if (L.state == LeafState::Free || L.state == LeafState::Removing) continue;
+            beginRemoval(L);
+        }
+        emitStats();
+        update();
+    }
+
+    // 清屏：只对当前已渲染叶子播淡出；保留 pendingSpawns_ 等待队列。
+    void clearRenderedLeaves() {
+        pendingRemovals_ = 0;
+        removeCooldown_ = 0.0;
+        dragId_ = 0;
+        dragTargetValid_ = false;
+        for (LeafBody& L : leaves_) {
+            if (L.state == LeafState::Free || L.state == LeafState::Removing) continue;
+            beginRemoval(L);
+        }
+        emitStats();
+        update();
     }
 
     void beginResizePause() {
@@ -1352,10 +1751,12 @@ public:
     }
 
     void setStatsCallback(std::function<void()> cb) { statsCb_ = std::move(cb); }
+    void setOverlayStatsCallback(std::function<void()> cb) { overlayStatsCb_ = std::move(cb); }
 
     // 关窗/卸挂时清队列与实例，停表，避免残留定时器与幽灵叶子。
     void shutdown() {
         if (tick_) tick_->stop();
+        syncBusyBudget(false);
         pendingSpawns_ = 0;
         pendingRemovals_ = 0;
         spawnCooldown_ = 0.0;
@@ -1365,6 +1766,8 @@ public:
         draggingTrash_ = false;
         for (LeafBody& L : leaves_) resetLeafBody(&L);
         leaves_.clear();
+        resetSessionStats();
+        overlayStatsCb_ = {};
         statsCb_ = {};
     }
 
@@ -1393,9 +1796,15 @@ protected:
     }
 
     void paintEvent(QPaintEvent*) override {
+        QElapsedTimer paintClock;
+        paintClock.start();
         QPainter p(this);
-        p.setRenderHint(QPainter::Antialiasing, true);
-        p.setRenderHint(QPainter::SmoothPixmapTransform, true);
+        // 叶子多时关掉平滑/抗锯齿：透明叠层每帧全量重绘，这里最容易把 UI 拖卡。
+        const int phys = physicalLeafCount();
+        const bool heavy = phys >= kPerfPaintThreshold;
+        const bool denser = phys >= kHeavyPaintThreshold;
+        p.setRenderHint(QPainter::Antialiasing, !denser);
+        p.setRenderHint(QPainter::SmoothPixmapTransform, !heavy);
 
         if (faceShieldEditing_) {
             // 暗化只盖边框内 content，不含外圈阴影带；与框同帧高质量绘制。
@@ -1405,23 +1814,35 @@ protected:
                              std::max(0, height() - sw)),
                        QColor(0, 0, 0, 110));
             drawFaceShieldEdit(p);
+            lastPaintUs_ = paintClock.nsecsElapsed() / 1000;
             return;
         }
 
         const auto& assets = LeafSharedAssets::instance();
         const qreal side = leafVisualPx(leafScale_);
+        const QPixmap& haloPm = denser ? QPixmap() : assets.leafHaloPm;
 
+        // Idle / spawning below trash; removing / dragging above trash.
         for (const LeafBody& L : leaves_) {
-            if (L.state == LeafState::Free || L.state == LeafState::Dragging) continue;
-            drawLeaf(p, L, side, assets.leafPm, assets.leafHaloPm, 0.0);
+            if (L.state == LeafState::Free || L.state == LeafState::Dragging
+                || L.state == LeafState::Removing) {
+                continue;
+            }
+            drawLeaf(p, L, side, assets.leafPm, haloPm, 0.0);
         }
 
         drawTrash(p, assets);
 
         for (const LeafBody& L : leaves_) {
+            if (L.state != LeafState::Removing) continue;
+            drawLeaf(p, L, side, assets.leafPm, haloPm, 0.0);
+        }
+        for (const LeafBody& L : leaves_) {
             if (L.state != LeafState::Dragging) continue;
             drawLeaf(p, L, side, assets.leafPm, assets.leafHaloPm, leafHalo_);
         }
+        lastPaintUs_ = paintClock.nsecsElapsed() / 1000;
+        // Day stats HUD is a QLabel on LeafRoot (top-left); do not paint/write config here.
     }
 
     void mousePressEvent(QMouseEvent* event) override {
@@ -1443,6 +1864,9 @@ protected:
             LeafBody& L = leaves_[i];
             if (!isPhysical(L.state)) continue;
             if (!hitSoft(L, pos)) continue;
+            forceWakeLeaf(L);
+            // 拖起瞬间先唤醒初始位置周围一圈，抽走后悬空可连锁掉落。
+            wakeRingAround(L.pos, rigidRadius(leafScale_) * kDragWakeRingFrac);
             L.state = LeafState::Dragging;
             L.vel = {};
             L.angVel = 0.0;
@@ -1451,6 +1875,9 @@ protected:
             dragTarget_ = L.pos;
             dragVelocity_ = {};
             dragTargetValid_ = true;
+            // 拖叶本身不再当支撑，立刻再扫一轮悬空唤醒做连锁。
+            rebuildContactGrid();
+            wakeUnsupportedAsleep();
             update();
             return;
         }
@@ -1582,6 +2009,7 @@ private:
     }
 
     void emitStats() {
+        if (overlayStatsCb_) overlayStatsCb_();
         if (statsCb_) statsCb_();
     }
 
@@ -1701,6 +2129,28 @@ private:
                 std::clamp(m.value(QStringLiteral("y"), 1.0).toDouble(), 0.0, 1.0));
             hasLegacyTrashNorm_ = true;
         }
+    }
+
+    // HUD counters are per overlay session: start at 0 when the floating window
+    // opens, discard on close (no day/config persistence).
+    void resetSessionStats() {
+        sessionAdded_ = 0;
+        sessionCleared_ = 0;
+        emitStats();
+    }
+
+    void noteAdded(int n) {
+        if (n <= 0) return;
+        sessionAdded_ += n;
+        emitStats();
+        update();
+    }
+
+    void noteCleared(int n) {
+        if (n <= 0) return;
+        sessionCleared_ += n;
+        emitStats();
+        update();
     }
 
     void ensureTrashPosition() {
@@ -2069,6 +2519,10 @@ private:
             if (!queryHouseContact(L.pos, radius, square, &n, &pen, &inside)) continue;
             // 半导：只允许外向位置修正。
             if (pen > kPositionSlopPx) {
+                if (L.asleep) {
+                    // 护脸需要挪叶时才唤醒；普通堆叠不唤醒静叶。
+                    forceWakeLeaf(L);
+                }
                 L.pos += n * std::min(pen, rigidHalfWidth(leafScale_) * kPositionMaxCorrectionFrac);
             }
         }
@@ -2086,6 +2540,7 @@ private:
             if (!queryHouseContact(L.pos, radius, square, &n, &pen, &inside)) continue;
             if (!inside) continue;
             // 框内：缓慢向下 + 略偏外侧挤出。
+            if (L.asleep) forceWakeLeaf(L);
             L.vel.setY(L.vel.y() + kShieldEjectAccel * dt);
             L.vel.setX(L.vel.x() + n.x() * 120.0 * dt);
             if (L.state != LeafState::Dragging) clampSpeed(L);
@@ -2269,6 +2724,7 @@ private:
         L.angVel = 0.0;
         L.removeT = 0.0;
         L.fadeFrom = L.alpha;
+        noteCleared(1);
     }
 
     bool removeOldest() {
@@ -2307,14 +2763,58 @@ private:
         if (w.width() < margin * 4.0 || w.height() < margin * 4.0) return false;
         const qreal spawnHeight = std::min(w.height() * 0.28, w.height() - 2.0 * margin);
         if (spawnHeight <= 0.0) return false;
-        for (int attempt = 0; attempt < 36; ++attempt) {
+
+        // 按列统计场上密度：优先在最空列生成，避免一侧已满还继续往那落。
+        const qreal xMin = w.left() + margin;
+        const qreal xMax = w.right() - margin;
+        const qreal usableW = std::max(1.0, xMax - xMin);
+        const qreal pack = std::max(1.0, leafPackSide(leafScale_));
+        const int nCols = std::clamp(static_cast<int>(std::floor(usableW / (pack * 0.9))),
+                                     4, 48);
+        QVector<int> occ(nCols, 0);
+        QVector<qreal> pileTopY(nCols, w.bottom()); // Qt y 向下：越小 = 堆得越高
+        for (const LeafBody& o : leaves_) {
+            if (o.state == LeafState::Free || o.state == LeafState::Removing) continue;
+            const int c = std::clamp(
+                static_cast<int>(std::floor((o.pos.x() - xMin) / usableW * nCols)),
+                0, nCols - 1);
+            ++occ[c];
+            pileTopY[c] = std::min(pileTopY[c], o.pos.y());
+        }
+        int minOcc = occ[0];
+        for (int c = 1; c < nCols; ++c) minOcc = std::min(minOcc, occ[c]);
+        const qreal spawnBandBottom = w.top() + margin + spawnHeight;
+        // 堆顶已顶进刷新区 / 明显高于最空列 → 视为该列已满，不再选。
+        auto colBlocked = [&](int c) {
+            if (occ[c] > minOcc + 1) return true;
+            if (pileTopY[c] < spawnBandBottom + margin * 0.5) return true;
+            return false;
+        };
+        QVector<int> preferred;
+        preferred.reserve(nCols);
+        for (int c = 0; c < nCols; ++c) {
+            if (!colBlocked(c)) preferred.append(c);
+        }
+        if (preferred.isEmpty()) {
+            // 全部偏满时仍只挑占用最少的列，保证横向均匀。
+            for (int c = 0; c < nCols; ++c) {
+                if (occ[c] == minOcc) preferred.append(c);
+            }
+        }
+        if (preferred.isEmpty()) {
+            for (int c = 0; c < nCols; ++c) preferred.append(c);
+        }
+
+        auto* rng = QRandomGenerator::global();
+        for (int attempt = 0; attempt < 48; ++attempt) {
+            const int col = preferred[rng->bounded(preferred.size())];
+            const qreal colL = xMin + usableW * (static_cast<qreal>(col) / nCols);
+            const qreal colR = xMin + usableW * (static_cast<qreal>(col + 1) / nCols);
             LeafBody cand;
             cand.pos = QPointF(
-                w.left() + margin + QRandomGenerator::global()->generateDouble()
-                                        * std::max(1.0, w.width() - 2.0 * margin),
-                w.top() + margin + QRandomGenerator::global()->generateDouble()
-                                       * spawnHeight);
-            cand.angle = (QRandomGenerator::global()->generateDouble() - 0.5) * 1.6;
+                colL + rng->generateDouble() * std::max(1.0, colR - colL),
+                w.top() + margin + rng->generateDouble() * spawnHeight);
+            cand.angle = (rng->generateDouble() - 0.5) * 1.6;
             clampToWorld(cand);
             if (shieldActivePlay()) {
                 bool inside = false;
@@ -2324,27 +2824,29 @@ private:
                     continue;
                 }
             }
-            bool overlaps = false;
+            bool ok = true;
             for (const LeafBody& o : leaves_) {
                 if (o.state == LeafState::Free || o.state == LeafState::Removing) continue;
                 if (rigidOverlap(cand, o)) {
-                    overlaps = true;
+                    ok = false;
                     break;
                 }
             }
-            if (overlaps) continue;
-            // 淡入期间静止，动画结束时才接管这份初速度。
+            if (!ok) continue;
             cand.birthVel =
-                QPointF((QRandomGenerator::global()->generateDouble() - 0.5) * 40.0, 20.0);
-            cand.birthAngVel = (QRandomGenerator::global()->generateDouble() - 0.5) * 2.4;
+                QPointF((rng->generateDouble() - 0.5) * 40.0, 20.0);
+            cand.birthAngVel = (rng->generateDouble() - 0.5) * 2.4;
             cand.state = LeafState::Spawning;
             cand.spawnT = 0.0;
             cand.alpha = 0.0;
             cand.vel = {};
             cand.angVel = 0.0;
             cand.id = ++nextId_;
+            cand.asleep = false;
+            cand.stillSec = 0.0;
             LeafBody& slot = leaves_[acquireLeafSlot()];
             slot = cand;
+            noteAdded(1);
             return true;
         }
         // 顶部刷新区暂时没有空位：保留 pending，等叶子落下后再重试。
@@ -2367,67 +2869,325 @@ private:
         return polygonContact(A, B, 0.0, normal, overlap);
     }
 
-    void solvePositions(int iters, qreal maxCorrection, bool draggedContactsOnly = false) {
-        for (int it = 0; it < iters; ++it) {
-            for (int i = 0; i < leaves_.size(); ++i) {
-                LeafBody& A = leaves_[i];
-                if (!isPhysical(A.state)) continue;
-                for (int j = i + 1; j < leaves_.size(); ++j) {
-                    LeafBody& B = leaves_[j];
-                    if (!isPhysical(B.state)) continue;
-                    const bool aDrag = A.state == LeafState::Dragging;
-                    const bool bDrag = B.state == LeafState::Dragging;
-                    // 拖叶无体积：任一端在拖就不做叶-叶接触。
-                    if (aDrag || bDrag) continue;
-                    if (draggedContactsOnly) continue;
-                    QPointF n;
-                    qreal overlap = 0.0;
-                    if (!contactData(A, B, &n, &overlap)) continue;
-                    const qreal corr = std::min(
-                        std::max(0.0, overlap - kPositionSlopPx), maxCorrection);
-                    if (corr <= 0.0) continue;
-                    A.pos -= n * (corr * 0.5);
-                    B.pos += n * (corr * 0.5);
-                    if (it == 0) {
-                        const qreal turn = corr * kCollisionTorque;
-                        A.angVel -= turn;
-                        B.angVel += turn;
+    static qint64 gridKey(int gx, int gy) {
+        return (static_cast<qint64>(gx) << 32) ^ static_cast<quint32>(gy);
+    }
+
+    int physicalLeafCount() const {
+        int n = 0;
+        for (const LeafBody& L : leaves_) {
+            if (isPhysical(L.state)) ++n;
+        }
+        return n;
+    }
+
+    static void forceWakeLeaf(LeafBody& L) {
+        L.asleep = false;
+        L.stillSec = 0.0;
+        L.wakeForce = {};
+    }
+
+    static bool isSleepy(const LeafBody& L) {
+        return std::hypot(L.vel.x(), L.vel.y()) <= kSleepSpeed
+            && std::abs(L.angVel) <= kSleepAngVel;
+    }
+
+    static void putLeafToSleep(LeafBody& L) {
+        L.vel = {};
+        L.angVel = 0.0;
+        L.asleep = true;
+        L.stillSec = 0.0;
+        L.wakeForce = {};
+        L.lockedPos = L.pos;
+        L.lockedAngle = L.angle;
+    }
+
+    static void pinAsleepLeaf(LeafBody& L) {
+        if (!L.asleep) return;
+        // 碰撞箱位置锁死：任何重叠/解算都不得挪动静叶。
+        L.pos = L.lockedPos;
+        L.angle = L.lockedAngle;
+        L.vel = {};
+        L.angVel = 0.0;
+        L.wakeForce = {};
+    }
+
+    // 唤醒圆心附近一圈静叶（拖拽起始连锁用）。
+    void wakeRingAround(const QPointF& center, qreal radius) {
+        const qreal r2 = std::max(1.0, radius * radius);
+        for (LeafBody& L : leaves_) {
+            if (!L.asleep || !isPhysical(L.state)) continue;
+            const qreal dx = L.pos.x() - center.x();
+            const qreal dy = L.pos.y() - center.y();
+            if (dx * dx + dy * dy <= r2) forceWakeLeaf(L);
+        }
+    }
+
+    // 物理解算后尝试入睡：小位移 + 连续静置约 3s。
+    void tryEnterSleep(qreal dt) {
+        for (LeafBody& L : leaves_) {
+            if (L.state != LeafState::Idle || L.asleep) continue;
+            if (!isSleepy(L)) {
+                L.stillSec = 0.0;
+                continue;
+            }
+            if (L.stillSec <= 0.0) L.sleepAnchor = L.pos;
+            const qreal drift = std::hypot(L.pos.x() - L.sleepAnchor.x(),
+                                           L.pos.y() - L.sleepAnchor.y());
+            if (drift > kSleepMaxDriftPx) {
+                L.stillSec = 0.0;
+                L.sleepAnchor = L.pos;
+                continue;
+            }
+            L.stillSec += dt;
+            if (L.stillSec >= kSleepStillSec) putLeafToSleep(L);
+        }
+    }
+
+    // 休眠维护：静叶位姿锁死；接触不挤醒；下方支撑不足约一半则唤醒。
+    void pollSleepWakeForces(qreal /*dt*/) {
+        for (LeafBody& L : leaves_) {
+            if (L.asleep) pinAsleepLeaf(L);
+        }
+        wakeUnsupportedAsleep();
+        for (LeafBody& L : leaves_) {
+            if (L.asleep) pinAsleepLeaf(L);
+        }
+    }
+
+    // 下方支撑覆盖率 < kSleepSupportMinFrac（默认 50%）则唤醒，不必完全悬空。
+    void wakeUnsupportedAsleep() {
+        const QRectF w = worldRect();
+        if (w.height() <= 1.0) return;
+        const qreal r = rigidRadius(leafScale_);
+        const qreal gap = r * kSleepSupportGapFrac;
+        const qreal floorY = w.bottom() - r * 0.85;
+        const qreal halfW = r * 1.05;
+        for (int i = 0; i < leaves_.size(); ++i) {
+            LeafBody& L = leaves_[i];
+            if (!L.asleep || !isPhysical(L.state)) continue;
+            if (L.pos.y() >= floorY) continue; // 贴地算有支撑
+            const qreal spanL = L.pos.x() - halfW;
+            const qreal spanR = L.pos.x() + halfW;
+            const qreal span = spanR - spanL;
+            if (span <= 1.0) continue;
+
+            QVector<QPair<qreal, qreal>> segs;
+            const qreal cell = std::max(12.0, gridCellSize_);
+            const int gx = static_cast<int>(std::floor(L.pos.x() / cell));
+            const int gy = static_cast<int>(std::floor(L.pos.y() / cell));
+            for (int dx = -2; dx <= 2; ++dx) {
+                for (int dy = 0; dy <= 2; ++dy) { // 只看同级与下方
+                    const auto it = gridBuckets_.constFind(gridKey(gx + dx, gy + dy));
+                    if (it == gridBuckets_.cend()) continue;
+                    for (int j : *it) {
+                        if (j == i) continue;
+                        const LeafBody& B = leaves_[j];
+                        if (B.state != LeafState::Idle) continue; // 拖叶/淡出不算支撑
+                        const qreal ddy = B.pos.y() - L.pos.y();
+                        if (ddy < r * 0.2 || ddy > gap) continue;
+                        const qreal blo = B.pos.x() - r;
+                        const qreal bri = B.pos.x() + r;
+                        const qreal lo = std::max(spanL, blo);
+                        const qreal hi = std::min(spanR, bri);
+                        if (hi > lo) segs.append(qMakePair(lo, hi));
                     }
                 }
             }
+            std::sort(segs.begin(), segs.end(),
+                      [](const QPair<qreal, qreal>& a, const QPair<qreal, qreal>& b) {
+                          return a.first < b.first;
+                      });
+            qreal covered = 0.0;
+            qreal curL = 0.0;
+            qreal curR = 0.0;
+            bool have = false;
+            for (const auto& s : segs) {
+                if (!have) {
+                    curL = s.first;
+                    curR = s.second;
+                    have = true;
+                    continue;
+                }
+                if (s.first <= curR) {
+                    curR = std::max(curR, s.second);
+                } else {
+                    covered += curR - curL;
+                    curL = s.first;
+                    curR = s.second;
+                }
+            }
+            if (have) covered += curR - curL;
+            if ((covered / span) < kSleepSupportMinFrac) forceWakeLeaf(L);
+        }
+    }
+
+    static void applyTangentialFriction(LeafBody& moving, const QPointF& n, qreal amount) {
+        if (amount <= 0.0) return;
+        const qreal vn = QPointF::dotProduct(moving.vel, n);
+        const QPointF vt = moving.vel - n * vn;
+        moving.vel -= vt * std::clamp(amount, 0.0, 1.0);
+    }
+
+    int positionItersForCount(int physicalCount) const {
+        if (physicalCount >= kMassLeafThreshold) return kPositionItersMass;
+        if (physicalCount >= kCircleContactThreshold) return kPositionItersCircle;
+        return kPositionIters;
+    }
+
+    // 均匀网格宽相：桶里放全部物理叶；外圈只扫醒叶，睡着的堆几乎零 CPU。
+    void rebuildContactGrid() {
+        gridBuckets_.clear();
+        gridActive_.clear();
+        const qreal cell = std::max(12.0, rigidRadius(leafScale_) * 2.2);
+        gridCellSize_ = cell;
+        gridActive_.reserve(leaves_.size());
+        for (int i = 0; i < leaves_.size(); ++i) {
+            const LeafBody& L = leaves_[i];
+            if (!isPhysical(L.state)) continue;
+            const int gx = static_cast<int>(std::floor(L.pos.x() / cell));
+            const int gy = static_cast<int>(std::floor(L.pos.y() / cell));
+            gridBuckets_[gridKey(gx, gy)].append(i);
+            if (!L.asleep) gridActive_.append(i);
+        }
+    }
+
+    template <typename Fn>
+    void forEachBroadphasePair(Fn&& fn) {
+        if (gridActive_.isEmpty()) return;
+        const qreal cell = gridCellSize_;
+        for (int i : gridActive_) {
+            LeafBody& A = leaves_[i];
+            const int gx = static_cast<int>(std::floor(A.pos.x() / cell));
+            const int gy = static_cast<int>(std::floor(A.pos.y() / cell));
+            for (int dx = -1; dx <= 1; ++dx) {
+                for (int dy = -1; dy <= 1; ++dy) {
+                    const auto it = gridBuckets_.constFind(gridKey(gx + dx, gy + dy));
+                    if (it == gridBuckets_.cend()) continue;
+                    for (int j : *it) {
+                        if (j == i) continue;
+                        LeafBody& B = leaves_[j];
+                        // 睡-睡永不配对；醒-醒只一次；醒-睡当静支撑。
+                        if (B.asleep && A.asleep) continue;
+                        if (!B.asleep && j < i) continue;
+                        fn(A, B);
+                    }
+                }
+            }
+        }
+    }
+
+    bool circleContact(const LeafBody& A, const LeafBody& B, QPointF* normal,
+                       qreal* overlap) const {
+        const QPointF delta = B.pos - A.pos;
+        const qreal dist2 = QPointF::dotProduct(delta, delta);
+        const qreal minDist = rigidRadius(leafScale_) * 2.0;
+        if (dist2 >= minDist * minDist) return false;
+        const qreal dist = std::sqrt(std::max(dist2, 1e-12));
+        QPointF n = delta / dist;
+        if (dist2 < 1e-10) n = QPointF(0.0, -1.0);
+        if (normal) *normal = n;
+        if (overlap) *overlap = minDist - dist;
+        return true;
+    }
+
+    bool resolveContact(const LeafBody& A, const LeafBody& B, QPointF* normal,
+                        qreal* overlap, bool useCircle) const {
+        return useCircle ? circleContact(A, B, normal, overlap)
+                         : contactData(A, B, normal, overlap);
+    }
+
+    void separatePair(LeafBody& A, LeafBody& B, const QPointF& n, qreal overlap,
+                      qreal maxCorrection, qreal /*dt*/) {
+        const qreal raw = (overlap - kPositionSlopPx) * kSeparateBias;
+        if (raw <= 0.0) return;
+        const qreal corr = std::min(raw, maxCorrection);
+        // 静叶锁死：只挤开醒叶，静叶坐标绝不改（重叠也保持锁定）。
+        if (A.asleep && !B.asleep) {
+            B.pos += n * corr;
+            return;
+        }
+        if (B.asleep && !A.asleep) {
+            A.pos -= n * corr;
+            return;
+        }
+        // 两边都醒：重力只作用在各自对象上；分离按「上层多挪、下层少挪」。
+        const bool aUpper = A.pos.y() <= B.pos.y();
+        const qreal wA = aUpper ? kStackUpperWeight : kStackLowerWeight;
+        const qreal wB = aUpper ? kStackLowerWeight : kStackUpperWeight;
+        A.pos -= n * (corr * wA);
+        B.pos += n * (corr * wB);
+    }
+
+    void solvePositions(int iters, qreal maxCorrection, qreal dt,
+                        bool draggedContactsOnly = false) {
+        const bool useCircle = physicalLeafCount() >= kCircleContactThreshold;
+        rebuildContactGrid();
+        for (int it = 0; it < iters; ++it) {
+            forEachBroadphasePair([&](LeafBody& A, LeafBody& B) {
+                if (A.state == LeafState::Dragging || B.state == LeafState::Dragging) return;
+                if (draggedContactsOnly) return;
+                QPointF n;
+                qreal overlap = 0.0;
+                if (!resolveContact(A, B, &n, &overlap, useCircle)) return;
+                separatePair(A, B, n, overlap, maxCorrection, dt);
+            });
             solveFaceShieldPositions();
             for (LeafBody& L : leaves_) {
-                if (isPhysical(L.state)) clampToWorld(L);
+                if (!isPhysical(L.state)) continue;
+                if (L.asleep) pinAsleepLeaf(L);
+                else clampToWorld(L);
             }
         }
     }
 
     void solveVelocities() {
-        for (int i = 0; i < leaves_.size(); ++i) {
-            LeafBody& A = leaves_[i];
-            if (!isPhysical(A.state)) continue;
-            for (int j = i + 1; j < leaves_.size(); ++j) {
-                LeafBody& B = leaves_[j];
-                if (!isPhysical(B.state)) continue;
-                // 拖叶无体积。
-                if (A.state == LeafState::Dragging || B.state == LeafState::Dragging) continue;
-                QPointF n;
-                qreal overlap = 0.0;
-                if (!contactData(A, B, &n, &overlap)) continue;
-                const QPointF rel = B.vel - A.vel;
-                const qreal vn = QPointF::dotProduct(rel, n);
+        const bool useCircle = physicalLeafCount() >= kCircleContactThreshold;
+        rebuildContactGrid();
+        forEachBroadphasePair([&](LeafBody& A, LeafBody& B) {
+            if (A.state == LeafState::Dragging || B.state == LeafState::Dragging) return;
+            QPointF n;
+            qreal overlap = 0.0;
+            if (!resolveContact(A, B, &n, &overlap, useCircle)) return;
+            if (A.asleep && !B.asleep) {
+                const qreal vn = QPointF::dotProduct(B.vel, n);
+                if (vn < 0.0) B.vel -= n * vn;
+                applyTangentialFriction(B, n, kFrictionStatic);
+                clampSpeed(B);
+                return;
+            }
+            if (B.asleep && !A.asleep) {
+                const qreal vnA = QPointF::dotProduct(A.vel, n);
+                if (vnA > 0.0) A.vel -= n * vnA;
+                applyTangentialFriction(A, n, kFrictionStatic);
+                clampSpeed(A);
+                return;
+            }
+            const QPointF rel = B.vel - A.vel;
+            const qreal vn = QPointF::dotProduct(rel, n);
+            if (vn >= 0.0) {
                 const QPointF vt = rel - n * vn;
-                if (vn < 0.0) {
-                    // 轻微耗散法向速度，避免密集堆叠把冲量来回传递成颤动。
-                    const qreal impulse = -vn * (1.0 + kRestitution) * 0.42;
-                    A.vel -= n * impulse;
-                    B.vel += n * impulse;
-                }
-                A.vel += vt * (kFriction * 0.5);
-                B.vel -= vt * (kFriction * 0.5);
+                A.vel += vt * (kFriction * 0.25);
+                B.vel -= vt * (kFriction * 0.25);
                 clampSpeed(A);
                 clampSpeed(B);
+                return;
             }
+            const qreal impulse = -vn * 0.5;
+            A.vel -= n * impulse;
+            B.vel += n * impulse;
+            const QPointF vt = rel - n * vn;
+            A.vel += vt * (kFriction * 0.5);
+            B.vel -= vt * (kFriction * 0.5);
+            clampSpeed(A);
+            clampSpeed(B);
+        });
+    }
+
+    void flushSleepWake() {
+        for (LeafBody& L : leaves_) {
+            if (L.asleep) pinAsleepLeaf(L);
+            else L.wakeForce = {};
         }
     }
 
@@ -2435,25 +3195,26 @@ private:
         const QRectF w = worldRect();
         for (LeafBody& L : leaves_) {
             if (L.state != LeafState::Idle) continue;
+            if (L.asleep) continue; // 静叶不碰边界冲量
             qreal ex = 0.0, ey = 0.0;
             rigidExtents(L, &ex, &ey);
             if (L.pos.x() <= w.left() + ex + 0.5 && L.vel.x() < 0.0) {
                 L.vel.setX(-L.vel.x() * kRestitution);
-                L.vel.setY(L.vel.y() * kFloorFriction);
+                L.vel.setY(L.vel.y() * (1.0 - kFloorFriction));
             }
             if (L.pos.x() >= w.right() - ex - 0.5 && L.vel.x() > 0.0) {
                 L.vel.setX(-L.vel.x() * kRestitution);
-                L.vel.setY(L.vel.y() * kFloorFriction);
+                L.vel.setY(L.vel.y() * (1.0 - kFloorFriction));
             }
             if (L.pos.y() <= w.top() + ey + 0.5 && L.vel.y() < 0.0) {
                 L.vel.setY(-L.vel.y() * kRestitution);
-                L.vel.setX(L.vel.x() * kFloorFriction);
+                L.vel.setX(L.vel.x() * (1.0 - kFloorFriction));
             }
             if (L.pos.y() >= w.bottom() - ey - 0.5 && L.vel.y() > 0.0) {
                 L.vel.setY(-L.vel.y() * kRestitution);
-                L.vel.setX(L.vel.x() * kFloorFriction);
+                L.vel.setX(L.vel.x() * (1.0 - kFloorFriction));
                 if (std::abs(L.vel.y()) < 18.0) L.vel.setY(0.0);
-                if (std::abs(L.vel.x()) < 6.0) L.vel.setX(0.0);
+                if (std::abs(L.vel.x()) < 8.0) L.vel.setX(0.0);
             }
             clampSpeed(L);
         }
@@ -2499,32 +3260,35 @@ private:
     void squeezeIntoBounds() {
         for (LeafBody& L : leaves_) {
             if (L.state == LeafState::Free || L.state == LeafState::Removing) continue;
+            forceWakeLeaf(L);
             clampToWorld(L);
         }
         solvePositions(kResizeSettleIters,
-                       rigidHalfWidth(leafScale_) * kPositionMaxCorrectionFrac);
+                       rigidHalfWidth(leafScale_) * kPositionMaxCorrectionFrac,
+                       kTickMsBusy / 1000.0);
         solveVelocities();
         solveBoundaryVelocities();
+        pollSleepWakeForces(kTickMsBusy / 1000.0);
     }
 
     void onTick() {
         if (resizePaused_) return;
         if (faceShieldEditing_) return;
-        const qreal dt = kTickMs / 1000.0;
+        QElapsedTimer tickClock;
+        tickClock.start();
+        const int tickMs = tick_ ? tick_->interval() : kTickMs;
+        const qreal dt = std::max(1, tickMs) / 1000.0;
         bool dirty = pendingSpawns_ > 0 || pendingRemovals_ > 0;
         bool statsDirty = false;
+        bool needPhysics = dragId_ != 0 || pendingSpawns_ > 0 || pendingRemovals_ > 0;
         spawnCooldown_ = std::max(0.0, spawnCooldown_ - dt);
         removeCooldown_ = std::max(0.0, removeCooldown_ - dt);
-        // 已满时丢掉多余待生成，避免队列无限堆积。
-        if (aliveCount() >= maxLeaves_ && pendingSpawns_ > 0) {
-            pendingSpawns_ = 0;
-            statsDirty = true;
-        }
         flushSpawns();
         flushRemovals();
         advanceDragged(dt);
         applyFaceShieldEject(dt);
 
+        bool anyAsleep = false;
         for (LeafBody& L : leaves_) {
             if (L.state == LeafState::Free) continue;
             if (L.state == LeafState::Spawning) {
@@ -2535,9 +3299,11 @@ private:
                     L.alpha = 1.0;
                     L.vel = L.birthVel;
                     L.angVel = L.birthAngVel;
+                    forceWakeLeaf(L);
                     clampToWorld(L);
                 }
                 dirty = true;
+                needPhysics = true;
                 continue;
             }
             if (L.state == LeafState::Removing) {
@@ -2547,9 +3313,18 @@ private:
                 continue;
             }
             if (L.state == LeafState::Dragging) {
+                forceWakeLeaf(L);
                 dirty = true;
+                needPhysics = true;
                 continue;
             }
+            if (L.asleep) {
+                anyAsleep = true;
+                pinAsleepLeaf(L);
+                continue;
+            }
+            needPhysics = true;
+            // 重力只加在该叶子自身；堆压力只来自相邻接触分离/摩擦。
             L.vel.setY(L.vel.y() + kGravity * dt);
             L.pos += L.vel * dt;
             L.angle += L.angVel * dt;
@@ -2557,19 +3332,37 @@ private:
             L.angVel *= kAngDamping;
             L.angVel = std::clamp(L.angVel, -kMaxAngVel, kMaxAngVel);
             clampSpeed(L);
-            if (std::hypot(L.vel.x(), L.vel.y()) < 20.0) {
-                L.vel *= 0.90;
-                L.angVel *= 0.88;
-                if (std::hypot(L.vel.x(), L.vel.y()) < 6.0) L.vel = {};
-                if (std::abs(L.angVel) < 0.02) L.angVel = 0.0;
-            }
+            // 不在这里判睡：刚加完重力，贴地也会有几十 px/s，永远进不了休眠。
             dirty = true;
         }
 
-        solvePositions(kPositionIters,
-                       rigidHalfWidth(leafScale_) * kPositionMaxCorrectionFrac);
-        solveVelocities();
-        solveBoundaryVelocities();
+        if (needPhysics) {
+            const int phys = physicalLeafCount();
+            solvePositions(positionItersForCount(phys),
+                           rigidHalfWidth(leafScale_) * kPositionMaxCorrectionFrac,
+                           dt);
+            solveVelocities();
+            // 圆碰撞路径中等规模再跑一轮速度，减少挤成一团。
+            if (phys >= kCircleContactThreshold && phys < kMassLeafThreshold) {
+                solveVelocities();
+            }
+            solveBoundaryVelocities();
+            // 先维护已睡叶，再按解算后残余速度尝试入睡（真冻死）。
+            pollSleepWakeForces(dt);
+            tryEnterSleep(dt);
+            dirty = true;
+        } else if (anyAsleep) {
+            // 全睡：锁死位姿；仅下方太空才唤醒。
+            rebuildContactGrid();
+            for (LeafBody& L : leaves_) {
+                if (L.asleep) pinAsleepLeaf(L);
+            }
+            wakeUnsupportedAsleep();
+            for (LeafBody& L : leaves_) {
+                if (L.asleep) pinAsleepLeaf(L);
+            }
+        }
+        syncBusyBudget(needPhysics);
 
         const qreal prevLid = lidOpen_;
         const qreal prevTrashHalo = trashHalo_;
@@ -2589,19 +3382,40 @@ private:
                 statsDirty = true;
             }
         }
-        // 收掉尾部空槽，池不会只涨不缩。
         while (!leaves_.isEmpty() && leaves_.last().state == LeafState::Free) {
             leaves_.removeLast();
         }
 
-        if (dirty) {
-            update();
-        }
+        if (dirty) update();
         if (statsDirty) emitStats();
+        lastTickUs_ = tickClock.nsecsElapsed() / 1000;
+    }
+
+    void syncBusyBudget(bool busy) {
+        if (!tick_) return;
+        const int phys = physicalLeafCount();
+        int want = kTickMs;
+        if (busy) {
+            want = (phys >= kMassLeafThreshold) ? kTickMsMass : kTickMsBusy;
+        }
+        if (tick_->interval() != want) tick_->setInterval(want);
+        // 不抬线程优先级，避免无谓抢 CPU；手感靠帧率与分离轮次。
+#ifdef Q_OS_WIN
+        if (threadBoosted_) {
+            threadBoosted_ = false;
+            SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_NORMAL);
+        }
+#endif
     }
 
     QTimer* tick_ = nullptr;
+    bool threadBoosted_ = false;
+    qint64 lastTickUs_ = 0;
+    qint64 lastPaintUs_ = 0;
     QVector<LeafBody> leaves_;
+    QHash<qint64, QVector<int>> gridBuckets_;
+    QVector<int> gridActive_;
+    qreal gridCellSize_ = 32.0;
     int pendingSpawns_ = 0;
     int pendingRemovals_ = 0;
     qreal spawnCooldown_ = 0.0;
@@ -2629,6 +3443,10 @@ private:
     bool resizePaused_ = false;
     bool suppressResizeCommit_ = false;
     std::function<void()> statsCb_;
+    std::function<void()> overlayStatsCb_;
+
+    int sessionAdded_ = 0;
+    int sessionCleared_ = 0;
 
     bool faceShieldEnabled_ = false;
     bool faceShieldEditing_ = false;
@@ -2883,13 +3701,173 @@ private:
     std::function<void(bool)> onToggled_;
 };
 
+class LeafStatsHud final : public QWidget {
+public:
+    explicit LeafStatsHud(QWidget* parent = nullptr) : QWidget(parent) {
+        setAttribute(Qt::WA_TranslucentBackground);
+        setCursor(Qt::OpenHandCursor);
+    }
+
+    void setDragHandlers(std::function<void(bool)> onActive,
+                         std::function<QPoint(const QPoint&)> clampPos,
+                         std::function<void()> onEnd) {
+        onDragActive_ = std::move(onActive);
+        clampPos_ = std::move(clampPos);
+        onDragEnd_ = std::move(onEnd);
+    }
+
+    void setStats(int added, int queued, int remaining, int cleared) {
+        if (added_ == added && queued_ == queued && remaining_ == remaining
+            && cleared_ == cleared) return;
+        added_ = added;
+        queued_ = queued;
+        remaining_ = remaining;
+        cleared_ = cleared;
+        updateGeometry();
+        update();
+    }
+
+    QSize sizeHint() const override {
+        QFont f = font();
+        f.setPixelSize(20);
+        f.setBold(true);
+        const QFontMetrics fm(f);
+        const QStringList lines = {
+            QStringLiteral("本次增加：%1").arg(added_),
+            QStringLiteral("队列中：%1").arg(queued_),
+            QStringLiteral("剩余：%1").arg(remaining_),
+            QStringLiteral("本次清扫：%1").arg(cleared_),
+        };
+        int w = 0;
+        for (const QString& line : lines) w = std::max(w, fm.horizontalAdvance(line));
+        const int lineH = fm.height() + 2;
+        // Pad for outline drawn outside glyph bounds.
+        return QSize(w + 10, lineH * lines.size() + 8);
+    }
+
+protected:
+    void paintEvent(QPaintEvent*) override {
+        QPainter p(this);
+        p.setRenderHint(QPainter::TextAntialiasing, true);
+        QFont f = font();
+        f.setPixelSize(20);
+        f.setBold(true);
+        p.setFont(f);
+        const QFontMetrics fm(f);
+        const QStringList lines = {
+            QStringLiteral("本次增加：%1").arg(added_),
+            QStringLiteral("队列中：%1").arg(queued_),
+            QStringLiteral("剩余：%1").arg(remaining_),
+            QStringLiteral("本次清扫：%1").arg(cleared_),
+        };
+        const int lineH = fm.height() + 2;
+        int y = 4 + fm.ascent();
+        const int x = 4;
+        static const QPoint kShadowOff[] = {
+            {-2, 0}, {2, 0}, {0, -2}, {0, 2},
+            {-1, -1}, {1, -1}, {-1, 1}, {1, 1},
+            {-2, -1}, {2, -1}, {-2, 1}, {2, 1},
+            {-1, -2}, {1, -2}, {-1, 2}, {1, 2},
+        };
+        for (const QString& line : lines) {
+            p.setPen(QColor(0, 0, 0, 210));
+            for (const QPoint& o : kShadowOff) {
+                p.drawText(x + o.x(), y + o.y(), line);
+            }
+            p.setPen(QColor(255, 255, 255, 245));
+            p.drawText(x, y, line);
+            y += lineH;
+        }
+    }
+
+    void mousePressEvent(QMouseEvent* event) override {
+        if (event->button() != Qt::LeftButton) return;
+        dragging_ = true;
+        dragOffset_ = event->pos();
+        setCursor(Qt::ClosedHandCursor);
+        if (onDragActive_) onDragActive_(true);
+        event->accept();
+    }
+
+    void mouseMoveEvent(QMouseEvent* event) override {
+        if (!dragging_ || !(event->buttons() & Qt::LeftButton)) return;
+        QPoint next = mapToParent(event->pos() - dragOffset_);
+        if (clampPos_) next = clampPos_(next);
+        move(next);
+        event->accept();
+    }
+
+    void mouseReleaseEvent(QMouseEvent* event) override {
+        if (event->button() != Qt::LeftButton || !dragging_) return;
+        dragging_ = false;
+        setCursor(Qt::OpenHandCursor);
+        if (onDragActive_) onDragActive_(false);
+        if (onDragEnd_) onDragEnd_();
+        event->accept();
+    }
+
+private:
+    int added_ = 0;
+    int queued_ = 0;
+    int remaining_ = 0;
+    int cleared_ = 0;
+    bool dragging_ = false;
+    QPoint dragOffset_;
+    std::function<void(bool)> onDragActive_;
+    std::function<QPoint(const QPoint&)> clampPos_;
+    std::function<void()> onDragEnd_;
+};
+
 class LeafRoot final : public RippleOverlayRoot {
 public:
     explicit LeafRoot(QMainWindow* win) : RippleOverlayRoot(win) {
         content()->setAttribute(Qt::WA_TransparentForMouseEvents, false);
         canvas_ = new LeafCanvas(content());
+        hudBounds_ = new LeafHudBounds(content());
+        statsHud_ = new LeafStatsHud(content());
         rulesStrip_ = new LeafRulesStrip(content());
-        rulesStrip_->raise();
+        canvas_->setOverlayStatsCallback([this]() { refreshStatsHud(); });
+
+        auto onDragActive = [this](bool on) {
+            if (hudBounds_) {
+                hudBounds_->setGeometry(content()->rect());
+                hudBounds_->raise();
+                if (statsHud_) statsHud_->raise();
+                if (rulesStrip_) rulesStrip_->raise();
+                hudBounds_->setActive(on);
+            }
+        };
+        rulesStrip_->setDragHandlers(onDragActive, [this](const QPoint& pos) {
+            rulesPos_ = clampHudPos(pos, rulesStrip_->size());
+            rulesPosReady_ = true;
+            return rulesPos_;
+        }, [this]() {
+            if (rulesStrip_) {
+                rulesPos_ = rulesStrip_->pos();
+                rulesPosReady_ = true;
+                writeConfigValue(kRulesHudPosKey, QVariantMap{
+                    {QStringLiteral("x"), rulesPos_.x()},
+                    {QStringLiteral("y"), rulesPos_.y()},
+                });
+            }
+        });
+        statsHud_->setDragHandlers(onDragActive, [this](const QPoint& pos) {
+            statsPos_ = clampHudPos(pos, statsHud_->size());
+            statsPosReady_ = true;
+            return statsPos_;
+        }, [this]() {
+            if (statsHud_) {
+                statsPos_ = statsHud_->pos();
+                statsPosReady_ = true;
+                writeConfigValue(kStatsHudPosKey, QVariantMap{
+                    {QStringLiteral("x"), statsPos_.x()},
+                    {QStringLiteral("y"), statsPos_.y()},
+                });
+            }
+        });
+
+        loadHudPositions();
+        raiseHudStack();
 
         extraBox_ = new QWidget(this);
         extraBox_->setStyleSheet(QStringLiteral("background: transparent;"));
@@ -2920,22 +3898,72 @@ public:
         }
 
         canvas_->commitViewport(content()->rect());
-        setGiftRules(loadLeafGiftRules());
+        setGiftRules(effectiveLeafGiftRules(loadLeafGiftRules()));
         refreshEditMutex();
+        refreshStatsHud();
+        layoutOverlayHuds();
     }
 
     LeafCanvas* canvas() const { return canvas_; }
 
     void setGiftRules(const QVector<LeafGiftRule>& rules) {
-        if (rulesStrip_) {
-            rulesStrip_->setRules(rules);
-            layoutRulesStrip();
-        }
+        if (!rulesStrip_) return;
+        if (!rulesStrip_->setRules(rules)) return;
+        layoutOverlayHuds();
     }
 
     void releaseHeavyResources() {
         if (canvas_) canvas_->shutdown();
         if (rulesStrip_) rulesStrip_->releaseHeavyResources();
+    }
+
+    void layoutOverlayHuds() {
+        if (!content()) return;
+        if (canvas_ && canvas_->faceShieldEditing()) {
+            if (rulesStrip_) rulesStrip_->hide();
+            if (statsHud_) statsHud_->hide();
+            if (hudBounds_) hudBounds_->setActive(false);
+            return;
+        }
+        if (hudBounds_) {
+            hudBounds_->setGeometry(content()->rect());
+        }
+        if (rulesStrip_) {
+            // Fixed width — never tied to window percentage or drag clamps.
+            rulesStrip_->setFixedWidth(kRulesStripFixedW);
+            const int h = std::max(40, rulesStrip_->sizeHint().height());
+            const QRect area = hudBoundArea();
+            rulesStrip_->setFixedHeight(std::min(h, std::max(40, area.height())));
+            if (!rulesPosReady_) {
+                rulesPos_ = QPoint(area.left(), area.top());
+                rulesPosReady_ = true;
+            }
+            rulesPos_ = clampHudPos(rulesPos_, rulesStrip_->size());
+            rulesStrip_->move(rulesPos_);
+            rulesStrip_->show();
+        }
+        if (statsHud_) {
+            statsHud_->show();
+            refreshStatsHud();
+        }
+        raiseHudStack();
+    }
+
+    void refreshStatsHud() {
+        if (!statsHud_ || !canvas_ || !content()) return;
+        statsHud_->setStats(canvas_->todayAdded(), canvas_->pendingSpawnCount(),
+                            canvas_->remainingCount(), canvas_->todayCleared());
+        statsHud_->adjustSize();
+        const QRect area = hudBoundArea();
+        if (!statsPosReady_) {
+            statsPos_ = QPoint(std::max(area.left(), area.right() - statsHud_->width() + 1),
+                               area.top());
+            statsPosReady_ = true;
+        }
+        statsPos_ = clampHudPos(statsPos_, statsHud_->size());
+        statsHud_->move(statsPos_);
+        statsHud_->show();
+        raiseHudStack();
     }
 
 protected:
@@ -2984,6 +4012,14 @@ protected:
 
     bool contentWantsMouse(const QPoint& contentLocal) const override {
         if (!canvas_ || resizing() || canvas_->resizePaused()) return false;
+        if (rulesStrip_ && rulesStrip_->isVisible()
+            && rulesStrip_->geometry().contains(contentLocal)) {
+            return true;
+        }
+        if (statsHud_ && statsHud_->isVisible()
+            && statsHud_->geometry().contains(contentLocal)) {
+            return true;
+        }
         return canvas_->hitInteractive(canvas_->mapFrom(content(), contentLocal));
     }
 
@@ -2993,19 +4029,66 @@ protected:
 
     void onContentGeometryChanged() override {
         if (canvas_) canvas_->commitViewport(content()->rect());
-        layoutRulesStrip();
+        layoutOverlayHuds();
     }
 
     void onContentGeometryWhileResizing() override {
         if (canvas_) canvas_->commitViewport(content()->rect());
+        if (statsHud_ && statsHud_->isVisible()) {
+            statsPos_ = clampHudPos(statsHud_->pos(), statsHud_->size());
+            statsHud_->move(statsPos_);
+        }
+        if (rulesStrip_ && rulesStrip_->isVisible()) {
+            rulesPos_ = clampHudPos(rulesStrip_->pos(), rulesStrip_->size());
+            rulesStrip_->move(rulesPos_);
+        }
+        if (hudBounds_) hudBounds_->setGeometry(content()->rect());
     }
 
     void onResizeResume() override {
         if (canvas_) canvas_->endResizePause();
-        layoutRulesStrip();
+        layoutOverlayHuds();
     }
 
 private:
+    QRect hudBoundArea() const {
+        if (!content()) return QRect();
+        return content()->rect().adjusted(kHudMarginPx, kHudMarginPx,
+                                          -kHudMarginPx, -kHudMarginPx);
+    }
+
+    QPoint clampHudPos(const QPoint& pos, const QSize& sz) const {
+        const QRect area = hudBoundArea();
+        if (area.width() <= 0 || area.height() <= 0) return pos;
+        const int maxX = std::max(area.left(), area.right() - sz.width() + 1);
+        const int maxY = std::max(area.top(), area.bottom() - sz.height() + 1);
+        return QPoint(std::clamp(pos.x(), area.left(), maxX),
+                      std::clamp(pos.y(), area.top(), maxY));
+    }
+
+    void raiseHudStack() {
+        // Canvas bottom → bounds → stats → gift rules (cards above counter).
+        if (canvas_) canvas_->lower();
+        if (hudBounds_) hudBounds_->raise();
+        if (statsHud_) statsHud_->raise();
+        if (rulesStrip_) rulesStrip_->raise();
+    }
+
+    void loadHudPositions() {
+        const QVariantMap rules = configValue(kRulesHudPosKey).toMap();
+        if (rules.contains(QStringLiteral("x")) && rules.contains(QStringLiteral("y"))) {
+            rulesPos_ = QPoint(rules.value(QStringLiteral("x")).toInt(),
+                               rules.value(QStringLiteral("y")).toInt());
+            rulesPosReady_ = true;
+        }
+        const QVariantMap stats = configValue(kStatsHudPosKey).toMap();
+        if (stats.contains(QStringLiteral("x")) && stats.contains(QStringLiteral("y"))) {
+            statsPos_ = QPoint(stats.value(QStringLiteral("x")).toInt(),
+                               stats.value(QStringLiteral("y")).toInt());
+            statsPosReady_ = true;
+        }
+    }
+
     bool canEnterFaceShieldEdit() const {
         // 隐藏或锁定时不可进入编辑。
         return chromeBorderShown_ && !chromeLocked_;
@@ -3032,7 +4115,6 @@ private:
         if (shieldSwitch_) {
             shieldSwitch_->setVisible(on);
             if (on) {
-                shieldSwitch_->resetHoverArming();
                 shieldSwitch_->setOn(canvas_ && canvas_->faceShieldEnabled(), false, false);
             }
         }
@@ -3058,35 +4140,23 @@ private:
             }
         });
         refreshEditMutex();
-        layoutRulesStrip();
+        layoutOverlayHuds();
         update();
     }
 
-    void layoutRulesStrip() {
-        if (!rulesStrip_ || !content()) return;
-        if (canvas_ && canvas_->faceShieldEditing()) {
-            rulesStrip_->hide();
-            return;
-        }
-        // 相对原先宽约缩 1/4。
-        const int w = std::min(210, std::max(135, static_cast<int>(content()->width() * 0.375)));
-        rulesStrip_->setFixedWidth(w);
-        // 高度按卡片内容估，避免 adjustSize 在半透明父窗上算出 0。
-        const int h = std::max(40, rulesStrip_->sizeHint().height());
-        const int maxH = std::max(40, content()->height() - 12);
-        rulesStrip_->setFixedHeight(std::min(h, maxH));
-        rulesStrip_->move(6, 6);
-        rulesStrip_->raise();
-        rulesStrip_->show();
-    }
-
     LeafCanvas* canvas_ = nullptr;
+    LeafHudBounds* hudBounds_ = nullptr;
     LeafRulesStrip* rulesStrip_ = nullptr;
+    LeafStatsHud* statsHud_ = nullptr;
     QWidget* extraBox_ = nullptr;
     FaceShieldEditButton* editBtn_ = nullptr;
     FaceShieldSwitch* shieldSwitch_ = nullptr;
     bool chromeBorderShown_ = true;
     bool chromeLocked_ = false;
+    QPoint rulesPos_;
+    QPoint statsPos_;
+    bool rulesPosReady_ = false;
+    bool statsPosReady_ = false;
 };
 
 class LeafOverlayController final : public QObject {
@@ -3105,11 +4175,13 @@ public:
 
     void show(std::function<void()> onClosed) {
         auto& host = OverlayHostService::instance();
+        // Drop the controller pointer before host.show so a replace-detach of an
+        // older mount cannot unmount()/tryRelease against the root we are creating.
         root_ = nullptr;
         auto* shell = host.shell(OverlayToolId::Leaf);
-        root_ = new LeafRoot(shell);
-        const QVector<LeafGiftRule> rules = loadLeafGiftRules();
-        root_->setGiftRules(rules);
+        auto* root = new LeafRoot(shell);
+        const QVector<LeafGiftRule> rules = effectiveLeafGiftRules(loadLeafGiftRules());
+        root->setGiftRules(rules);
         // 最小高度：顶栏 + 10 张规则卡完整渲染空间 + 少许游玩边距。
         constexpr int kOverlayCardH = 32;
         constexpr int kOverlayCardGap = 4;
@@ -3121,12 +4193,20 @@ public:
         const int minH = RippleOverlayRoot::kTopbarH + rulesBlockH + cmToPx(2.5);
         const int defW = std::max(minW, cmToPx(14.0));
         const int defH = std::max(minH, static_cast<int>(defW * 1.15));
+        QPointer<LeafOverlayController> self(this);
         host.show(OverlayToolId::Leaf, QStringLiteral("捡叶子"), kGeoKey,
-                  minW, minH, defW, defH, root_,
-                  [this, onClosed]() {
-                      unmount();
-                      if (onClosed) onClosed();
+                  minW, minH, defW, defH, root,
+                  [self, root, onClosed]() {
+                      if (!self) return;
+                      if (self->root_ == root) {
+                          self->unmount();
+                          if (onClosed) onClosed();
+                          return;
+                      }
+                      // Stale replace: stop timers; host destroyer owns the widget.
+                      if (root) root->releaseHeavyResources();
                   });
+        root_ = root;
     }
 
 private:
@@ -3165,7 +4245,20 @@ public:
             host.teardown(OverlayToolId::Leaf);
             return;
         }
-        pushLeafGiftRulesToCore(loadLeafGiftRules());
+        ensureOverlayOpen(std::move(onClosed));
+    }
+
+    // Open (never toggle-close). Used when a gift arrives and the overlay must be up.
+    void ensureOverlayOpen(std::function<void()> onClosed = nullptr) {
+        publishToolDemand(QStringLiteral("leaf"), true);
+        pushLeafGiftRulesToCore(effectiveLeafGiftRules(loadLeafGiftRules()));
+        if (isOverlayActive() && canvas()) return;
+        auto& host = OverlayHostService::instance();
+        // Host still thinks Leaf is mounted but our canvas pointer is gone — remount.
+        if (host.isToolActive(OverlayToolId::Leaf) && !canvas()) {
+            host.teardown(OverlayToolId::Leaf);
+        }
+        if (host.isToolActive(OverlayToolId::Leaf)) return;
         controller()->show([this, onClosed]() {
             if (onClosed) onClosed();
             if (tryRelease_) tryRelease_();
@@ -3173,7 +4266,7 @@ public:
     }
 
     void spawnTest(int count = 1) {
-        if (!isOverlayActive()) toggleOverlay(nullptr);
+        if (!isOverlayActive()) ensureOverlayOpen(nullptr);
         if (auto* c = controller()->canvas()) c->enqueueSpawn(count);
     }
 
@@ -3187,7 +4280,8 @@ public:
     }
 
     void applyGiftRules(const QVector<LeafGiftRule>& rules) {
-        if (overlayCtrl_) overlayCtrl_->setGiftRules(rules);
+        if (!isOverlayActive() || !overlayCtrl_) return;
+        overlayCtrl_->setGiftRules(rules);
     }
 
     void applyLeafDelta(int delta) {
@@ -3195,15 +4289,122 @@ public:
         if (auto* c = canvas()) c->applyLeafDelta(delta);
     }
 
+    void applyLeafEffect(const LeafGiftEffect& effect) {
+        if (!isOverlayActive()) return;
+        auto* c = canvas();
+        if (!c) return;
+        switch (effect.action) {
+        case LeafGiftAction::ClearAll:
+            c->clearAllLeaves();
+            break;
+        case LeafGiftAction::ClearScreen:
+            c->clearRenderedLeaves();
+            break;
+        case LeafGiftAction::Delta:
+            qInfo("leaf applyLeafEffect delta=%d pending=%d", effect.delta, c->pendingCount());
+            c->applyLeafDelta(effect.delta);
+            break;
+        }
+    }
+
+    void enqueueCoreEffect(const LeafGiftEffect& effect, const QString& user = QString()) {
+        if (effect.action == LeafGiftAction::Delta && effect.delta == 0) return;
+        // suppressCoreSpawn_ only cancels the Core echo of an optimistic 模拟送礼
+        // (user "sim" / "LiveAIO"). Stale suppress must not drop a real viewer's gift.
+        if (suppressCoreSpawn_ > 0) {
+            --suppressCoreSpawn_;
+            const bool simEcho = user.isEmpty()
+                || user == QLatin1String("sim")
+                || user == QLatin1String("LiveAIO");
+            if (simEcho) {
+                qInfo("leaf suppress sim echo user=%s delta=%d", qPrintable(user), effect.delta);
+                return;
+            }
+        }
+        pendingEffects_.append(effect);
+        flushPendingEffects();
+    }
+
+    void flushPendingEffects() {
+        if (pendingEffects_.isEmpty()) return;
+        ensureOverlayOpen(nullptr);
+        if (!isOverlayActive() || !canvas()) {
+            // host.show finishes layout on the next event-loop turn.
+            if (!flushRetryScheduled_) {
+                flushRetryScheduled_ = true;
+                QTimer::singleShot(0, this, [this]() {
+                    flushRetryScheduled_ = false;
+                    flushPendingEffects();
+                });
+            }
+            return;
+        }
+        while (!pendingEffects_.isEmpty()) {
+            // Do not drop: if canvas disappears mid-flush, put the rest back.
+            if (!isOverlayActive() || !canvas()) break;
+            applyLeafEffect(pendingEffects_.takeFirst());
+        }
+        if (!pendingEffects_.isEmpty() && !flushRetryScheduled_) {
+            flushRetryScheduled_ = true;
+            QTimer::singleShot(0, this, [this]() {
+                flushRetryScheduled_ = false;
+                flushPendingEffects();
+            });
+        }
+    }
+
+    // Optimistic sim: paint locally, then let Core echo leaf.spawn (suppressed once).
+    void applySimGiftLocally(const QString& gift, int count) {
+        const QVector<LeafGiftRule> rules = effectiveLeafGiftRules(loadLeafGiftRules());
+        const LeafGiftEffect effect = leafEffectForGift(rules, gift, count, true);
+        if (effect.action == LeafGiftAction::Delta && effect.delta == 0) return;
+        if (!isOverlayActive() || !canvas()) {
+            ensureOverlayOpen(nullptr);
+        }
+        if (!isOverlayActive() || !canvas()) {
+            pendingEffects_.append(effect);
+            flushPendingEffects();
+            return;
+        }
+        ++suppressCoreSpawn_;
+        applyLeafEffect(effect);
+    }
+
     void onCorePacket(const QJsonObject& packet) override {
         if (packet.value(QStringLiteral("op")).toString() != QStringLiteral("leaf.spawn")) return;
-        if (!isOverlayActive()) return;
-        applyLeafDelta(packet.value(QStringLiteral("count")).toInt());
+        const QString action = packet.value(QStringLiteral("action")).toString();
+        const QString user = packet.value(QStringLiteral("user")).toString();
+        const QString gift = packet.value(QStringLiteral("gift")).toString();
+        LeafGiftEffect effect;
+        if (action == QLatin1String("clear")) {
+            effect.action = LeafGiftAction::ClearAll;
+        } else if (action == QLatin1String("clear_screen")) {
+            effect.action = LeafGiftAction::ClearScreen;
+        } else {
+            effect.action = LeafGiftAction::Delta;
+            // Prefer rounded double: some Qt builds reject non-integral doubles in toInt().
+            const QJsonValue raw = packet.value(QStringLiteral("count"));
+            if (raw.isDouble()) {
+                effect.delta = static_cast<int>(std::llround(raw.toDouble()));
+            } else if (raw.isString()) {
+                bool ok = false;
+                effect.delta = raw.toString().toInt(&ok);
+                if (!ok) effect.delta = 0;
+            } else {
+                effect.delta = raw.toInt();
+            }
+        }
+        qInfo("leaf.spawn recv gift=%s count=%d action=%s user=%s",
+              qPrintable(gift), effect.delta, qPrintable(action), qPrintable(user));
+        enqueueCoreEffect(effect, user);
     }
 
 private:
     LeafOverlayController* overlayCtrl_ = nullptr;
     std::function<void()> tryRelease_;
+    QVector<LeafGiftEffect> pendingEffects_;
+    int suppressCoreSpawn_ = 0;
+    bool flushRetryScheduled_ = false;
 };
 
 class LeafToolWindow final : public TabbedToolWindow {
@@ -3237,6 +4438,17 @@ public:
 
     QString toolId() const override { return QStringLiteral("leaf"); }
     void onCorePacket(const QJsonObject&) override {}
+
+    // Full-path smoke for「添加规则」(gift tab + persist). Not for production UI.
+    void debugSmokeAddRules(int n) {
+        switchTab(1);
+        QApplication::processEvents();
+        for (int i = 0; i < n; ++i) {
+            addGiftRule();
+            QApplication::processEvents();
+        }
+        QApplication::processEvents();
+    }
 
     void onPanelClosing() override {
         liveaio::util::hideSessionGiftPicker();
@@ -3431,7 +4643,7 @@ private:
         trashScaleSpin_->setSuffix(QStringLiteral("%"));
         leafScaleSpin_->setValue(scalePercent(kLeafScaleKey));
         trashScaleSpin_->setValue(scalePercent(kTrashScaleKey));
-        // 容量按理论上限的百分比给，20%~70%。
+        // 容量 = 总面积×% / 碰撞箱面积，滑条 20%~85%。
         maxLeavesSpin_->setRange(kCapPercentMin, kCapPercentMax);
         maxLeavesSpin_->setSingleStep(5);
         maxLeavesSpin_->setSuffix(QStringLiteral("%"));
@@ -3503,7 +4715,8 @@ private:
         giftTitle->setObjectName(QStringLiteral("CardTitle"));
         giftLay->addWidget(giftTitle);
         rulesHint_ = new QLabel(
-            QStringLiteral("单列规则最多 10 条；礼物为 Null 的条目会被忽略。"), giftCard);
+            QStringLiteral("最多 10 条；未选礼物的空规则只留在设置页，不会渲染到悬浮窗。"),
+            giftCard);
         rulesHint_->setWordWrap(true);
         giftLay->addWidget(rulesHint_);
 
@@ -3545,7 +4758,10 @@ private:
     void rebuildGiftRuleCards() {
         if (!rulesLay_) return;
         while (QLayoutItem* item = rulesLay_->takeAt(0)) {
-            if (QWidget* w = item->widget()) w->deleteLater();
+            if (QWidget* w = item->widget()) {
+                w->hide();
+                delete w;
+            }
             delete item;
         }
         ruleCards_.clear();
@@ -3565,18 +4781,22 @@ private:
             delete rulesLay_->takeAt(rulesLay_->count() - 1);
         }
         auto* card = new LeafGiftRuleCard(rule, rulesHost_);
+        QPointer<LeafGiftRuleCard> cardGuard(card);
         card->setCallbacks(
             [this]() { persistGiftRulesFromCards(); },
             [this](LeafGiftRuleCard* target) {
+                QPointer<LeafGiftRuleCard> guard(target);
                 auto* picker = liveaio::util::sessionGiftPicker();
-                if (!picker) return;
-                picker->setOnPicked([this, target](const QString& name) {
-                    if (target) target->applyGift(name);
+                if (!picker || !guard) return;
+                picker->setOnPicked([guard](const QString& name) {
+                    if (guard) guard->applyGift(name);
                 });
-                picker->openAt(target->pickAnchor(), assignedGifts(target), false);
+                QWidget* anchor = guard->pickAnchor();
+                if (!anchor) return;
+                picker->openAt(anchor, assignedGifts(guard.data()), false);
             },
             [this](LeafGiftRuleCard* target) { removeGiftRuleCard(target); },
-            [this, card]() { return assignedGifts(card); });
+            [this, cardGuard]() { return assignedGifts(cardGuard.data()); });
         rulesLay_->addWidget(card, 0, Qt::AlignTop);
         ruleCards_.append(card);
         card->reloadIconDeferred(iconDelayMs);
@@ -3586,14 +4806,21 @@ private:
     void addGiftRule() {
         if (ruleCards_.size() >= kMaxGiftRules) return;
         appendGiftRuleCard(LeafGiftRule{}, 0);
-        persistGiftRulesFromCards();
+        // Persist on next tick so ChildAdded hover-wiring + first paint finish first.
+        QPointer<LeafToolWindow> self(this);
+        QTimer::singleShot(0, this, [self]() {
+            if (!self) return;
+            self->persistGiftRulesFromCards();
+            self->updateAddRuleBtn();
+        });
         updateAddRuleBtn();
     }
 
     void removeGiftRuleCard(LeafGiftRuleCard* card) {
         if (!card) return;
         ruleCards_.removeAll(card);
-        card->deleteLater();
+        card->hide();
+        delete card;
         if (ruleCards_.isEmpty()) appendGiftRuleCard(LeafGiftRule{}, 0);
         persistGiftRulesFromCards();
         updateAddRuleBtn();
@@ -3613,11 +4840,29 @@ private:
         if (giftRules_.size() > kMaxGiftRules) giftRules_.resize(kMaxGiftRules);
         saveLeafGiftRules(giftRules_);
         pushGiftRulesToCore();
-        if (runtime_) runtime_->applyGiftRules(giftRules_);
+        scheduleOverlayGiftRulesSync();
+    }
+
+    // Empty drafts stay in settings only. Overlay rebuild runs only when the
+    // gift-bound signature changes (first gift pick / edit / remove of a real rule).
+    void scheduleOverlayGiftRulesSync() {
+        if (!runtime_ || !runtime_->isOverlayActive()) return;
+        const QString sig = overlayRulesSignature(giftRules_);
+        if (sig == lastOverlaySig_) return;
+        ++overlayRulesSyncGen_;
+        const quint64 gen = overlayRulesSyncGen_;
+        const QVector<LeafGiftRule> rules = effectiveLeafGiftRules(giftRules_);
+        QPointer<LeafToolWindow> self(this);
+        QTimer::singleShot(0, this, [self, gen, rules, sig]() {
+            if (!self || gen != self->overlayRulesSyncGen_) return;
+            if (!self->runtime_ || !self->runtime_->isOverlayActive()) return;
+            self->runtime_->applyGiftRules(rules);
+            self->lastOverlaySig_ = sig;
+        });
     }
 
     void pushGiftRulesToCore() {
-        pushLeafGiftRulesToCore(giftRules_);
+        pushLeafGiftRulesToCore(effectiveLeafGiftRules(giftRules_));
     }
 
     void updateAddRuleBtn() {
@@ -3632,7 +4877,12 @@ private:
     }
 
     void pushSimGift(const QString& gift, int count) {
-        if (!runtime_ || !runtime_->isOverlayActive()) return;
+        if (!runtime_) return;
+        if (!runtime_->isOverlayActive()) {
+            publishToolDemand(QStringLiteral("leaf"), true);
+            runtime_->ensureOverlayOpen(nullptr);
+        }
+        publishToolDemand(QStringLiteral("leaf"), true);
         const int n = std::max(1, count);
         pushGiftRulesToCore();
         sendCore(QJsonObject{
@@ -3641,6 +4891,8 @@ private:
             {QStringLiteral("count"), n},
             {QStringLiteral("user"), QStringLiteral("LiveAIO")},
         });
+        // Do not wait on leaf.spawn — apply locally (Core echo suppressed once).
+        runtime_->applySimGiftLocally(gift, n);
         refreshStats();
     }
 
@@ -3656,7 +4908,7 @@ private:
             guard->refreshOpenBtn();
             guard->refreshStats();
         });
-        if (runtime_->isOverlayActive()) runtime_->applyGiftRules(giftRules_);
+        if (runtime_->isOverlayActive()) scheduleOverlayGiftRulesSync();
         refreshOpenBtn();
         refreshStats();
     }
@@ -3756,6 +5008,8 @@ private:
     liveaio::util::ThemedComboBox* skinCombo_ = nullptr;
     QMap<QString, QString> skinNameToId_;
     QTimer* statsTimer_ = nullptr;
+    quint64 overlayRulesSyncGen_ = 0;
+    QString lastOverlaySig_;
     QVector<LeafGiftRule> giftRules_;
     QVector<LeafGiftRuleCard*> ruleCards_;
 };
@@ -3766,6 +5020,180 @@ static ToolRuntimeBase* createLeafRuntime(QObject* parent, std::function<void()>
 
 static ToolWindowBase* createLeafTool(CoreClient* core, LeafToolRuntime* runtime) {
     return new LeafToolWindow(core, runtime);
+}
+
+// Isolated smoke: build N empty rule cards (same path as「添加规则」) under a temp window.
+// Trigger: LIVEAIO_TOOLS_SELFTEST=leaf_card — used to catch 0xc0000005 without manual clicks.
+void smokeTestLeafGiftRuleCards() {
+    leafAddRuleLog(QStringLiteral("smoke begin"));
+    QWidget host;
+    host.setWindowTitle(QStringLiteral("leaf_card_smoke"));
+    host.resize(720, 400);
+    auto* lay = new QVBoxLayout(&host);
+    host.show();
+    for (int i = 0; i < 8; ++i) {
+        auto* card = new LeafGiftRuleCard(LeafGiftRule{}, &host);
+        lay->addWidget(card);
+        QApplication::processEvents();
+    }
+    QApplication::processEvents();
+    leafAddRuleLog(QStringLiteral("smoke cards OK"));
+
+    CoreClient core;
+    installConfigBridge();
+    auto* runtime = new LeafToolRuntime(&core, []() {});
+    auto* win = new LeafToolWindow(&core, runtime);
+    win->show();
+    QApplication::processEvents();
+    win->debugSmokeAddRules(5);
+    QApplication::processEvents();
+    leafAddRuleLog(QStringLiteral("smoke full window OK"));
+    delete win;
+    delete runtime;
+}
+
+static qint64 percentileUs(QVector<qint64> samples, qreal p) {
+    if (samples.isEmpty()) return 0;
+    std::sort(samples.begin(), samples.end());
+    const int last = samples.size() - 1;
+    const int idx = std::clamp(static_cast<int>(std::lround(last * p)), 0, last);
+    return samples[idx];
+}
+
+#ifdef Q_OS_WIN
+static quint64 fileTimeToU64(const FILETIME& ft) {
+    return (static_cast<quint64>(ft.dwHighDateTime) << 32) | ft.dwLowDateTime;
+}
+
+static quint64 currentProcessCpu100ns() {
+    FILETIME create{}, exit{}, kernel{}, user{};
+    if (!GetProcessTimes(GetCurrentProcess(), &create, &exit, &kernel, &user)) return 0;
+    return fileTimeToU64(kernel) + fileTimeToU64(user);
+}
+#endif
+
+static double processCpuPercentOverWall(quint64 cpu0, quint64 cpu1, qint64 wallMs) {
+    if (wallMs <= 0 || cpu1 <= cpu0) return 0.0;
+    const int cpus = std::max(1, QThread::idealThreadCount());
+    // FILETIME = 100ns；换算成「占整机」百分比。
+    const double procMs = static_cast<double>(cpu1 - cpu0) / 10000.0;
+    return procMs / (static_cast<double>(wallMs) * cpus) * 100.0;
+}
+
+// 开真实悬浮窗压测：LIVEAIO_TOOLS_SELFTEST=leaf_perf 或 leaf_perf:1200
+// 通过标准：storm/idle 的 tick+paint p95 都压在帧预算内，且 storm 整机 CPU% < 5。
+int smokeTestLeafPerf() {
+    int target = 1200;
+    const QString raw = qEnvironmentVariable("LIVEAIO_TOOLS_SELFTEST");
+    const int colon = raw.indexOf(QLatin1Char(':'));
+    if (colon >= 0) {
+        bool ok = false;
+        const int n = raw.mid(colon + 1).toInt(&ok);
+        if (ok) target = std::clamp(n, 100, kMaxLeavesHard);
+    }
+
+    CoreClient core;
+    installConfigBridge();
+    auto* runtime = new LeafToolRuntime(&core, []() {});
+    runtime->ensureOverlayOpen(nullptr);
+    QApplication::processEvents();
+    LeafCanvas* canvas = runtime->controller() ? runtime->controller()->canvas() : nullptr;
+    if (!canvas) {
+        qWarning("leaf_perf: overlay canvas missing");
+        delete runtime;
+        return 2;
+    }
+    // 小叶子 + 高密度：尽量让硬顶成为瓶颈而不是软容量。
+    canvas->applySettings(kCapPercentMax, 80, 100);
+    canvas->resize(std::max(canvas->width(), 900), std::max(canvas->height(), 700));
+    QApplication::processEvents();
+    canvas->debugForceFill(target);
+    for (int i = 0; i < 8; ++i) QApplication::processEvents();
+
+    struct PhaseResult {
+        qint64 tickP95 = 0;
+        qint64 paintP95 = 0;
+        double cpuPct = 0.0;
+    };
+
+    auto samplePhase = [&](const char* name, int ms, bool wake) -> PhaseResult {
+        QVector<qint64> ticks;
+        QVector<qint64> paints;
+        ticks.reserve(ms / 8);
+        paints.reserve(ms / 8);
+        if (wake) canvas->debugWakeAll(120.0);
+#ifdef Q_OS_WIN
+        const quint64 cpu0 = currentProcessCpu100ns();
+#else
+        const quint64 cpu0 = 0;
+#endif
+        QElapsedTimer wall;
+        wall.start();
+        qint64 lastTick = -1;
+        qint64 lastPaint = -1;
+        while (wall.elapsed() < ms) {
+            QApplication::processEvents(QEventLoop::AllEvents, 32);
+            QThread::msleep(10); // 禁止忙等，否则整机 CPU% 会被采样本身抬高
+            const qint64 t = canvas->lastTickUs();
+            const qint64 p = canvas->lastPaintUs();
+            if (t > 0 && t != lastTick) {
+                ticks.append(t);
+                lastTick = t;
+            }
+            if (p > 0 && p != lastPaint) {
+                paints.append(p);
+                lastPaint = p;
+            }
+        }
+        const qint64 wallMs = wall.elapsed();
+#ifdef Q_OS_WIN
+        const quint64 cpu1 = currentProcessCpu100ns();
+#else
+        const quint64 cpu1 = 0;
+#endif
+        PhaseResult r;
+        r.tickP95 = percentileUs(ticks, 0.95);
+        r.paintP95 = percentileUs(paints, 0.95);
+        r.cpuPct = processCpuPercentOverWall(cpu0, cpu1, wallMs);
+        qInfo("leaf_perf phase=%s n=%d awake=%d tick_p95_us=%lld paint_p95_us=%lld cpu_pct=%.2f",
+              name, canvas->aliveCount(), canvas->awakeCount(),
+              static_cast<long long>(r.tickP95), static_cast<long long>(r.paintP95),
+              r.cpuPct);
+        return r;
+    };
+
+    // settle → storm → idle
+    samplePhase("settle", 2500, false);
+    const PhaseResult storm = samplePhase("storm", 2500, true);
+    samplePhase("cooldown", 2500, false);
+    const PhaseResult idle = samplePhase("idle", 1500, false);
+
+    const QString logDir = QDir(qEnvironmentVariable("LIVEAIO_ROOT", QDir::currentPath()))
+                               .filePath(QStringLiteral("log"));
+    QDir().mkpath(logDir);
+    const QString logPath = QDir(logDir).filePath(QStringLiteral("leaf_perf.txt"));
+    QFile log(logPath);
+    const bool okStorm = storm.tickP95 <= 20000 && storm.paintP95 <= 20000;
+    const bool okIdle = idle.tickP95 <= 8000 && idle.paintP95 <= 12000;
+    const bool okCpu = storm.cpuPct < 5.0 && idle.cpuPct < 5.0;
+    const bool pass = okStorm && okIdle && okCpu && canvas->aliveCount() >= target;
+    if (log.open(QIODevice::WriteOnly | QIODevice::Truncate | QIODevice::Text)) {
+        QTextStream out(&log);
+        out << "target=" << target
+            << " alive=" << canvas->aliveCount()
+            << " storm_tick_p95_us=" << storm.tickP95
+            << " storm_paint_p95_us=" << storm.paintP95
+            << " storm_cpu_pct=" << storm.cpuPct
+            << " idle_tick_p95_us=" << idle.tickP95
+            << " idle_paint_p95_us=" << idle.paintP95
+            << " idle_cpu_pct=" << idle.cpuPct
+            << " pass=" << (pass ? 1 : 0) << "\n";
+    }
+    qInfo("leaf_perf done pass=%d log=%s", pass ? 1 : 0, qPrintable(logPath));
+
+    OverlayHostService::instance().teardown(OverlayToolId::Leaf);
+    delete runtime;
+    return pass ? 0 : 1;
 }
 
 }  // namespace liveaio::tools::leaf

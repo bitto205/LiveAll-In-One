@@ -9,6 +9,7 @@ import (
 	"io"
 	"strconv"
 	"sync"
+	"time"
 
 	"liveaio/listener/livepb"
 
@@ -95,6 +96,7 @@ func (r *Registry) New(id ID) (Driver, error) {
 type Manager struct {
 	mu       sync.Mutex
 	stopFn   func()
+	stopped  chan struct{}
 	root     string
 	tcp      string
 	logf     func(string, ...any)
@@ -120,17 +122,28 @@ func NewCapture(root, tcp string, logf func(string, ...any)) *Manager {
 func (m *Manager) Stop() {
 	m.mu.Lock()
 	fn := m.stopFn
+	done := m.stopped
 	m.stopFn = nil
+	m.stopped = nil
 	m.current = ""
 	m.mu.Unlock()
 	if fn != nil {
 		fn()
 	}
+	// Leave needs ~2s; Close is hard-capped ~3s. Keep this under the old IPC-blocking
+	// budget now that handle runs off the read loop — but still finish before Reap.
+	if done != nil {
+		select {
+		case <-done:
+		case <-time.After(4 * time.Second):
+		}
+	}
 }
 
-func (m *Manager) setStop(fn func()) {
+func (m *Manager) setStop(fn func(), done chan struct{}) {
 	m.mu.Lock()
 	m.stopFn = fn
+	m.stopped = done
 	m.mu.Unlock()
 }
 
@@ -161,18 +174,27 @@ func (m *Manager) Start(route, liveID string, forceSystem bool) error {
 
 	if id == Route4 {
 		if err := PrepareR4(m.root); err != nil {
+			m.mu.Lock()
+			m.current = ""
+			m.mu.Unlock()
 			return err
 		}
 		// Hub owns Shell; register a cancel so Manager.Stop is aligned.
 		ctx, cancel := context.WithCancel(context.Background())
-		m.setStop(cancel)
-		go func() { <-ctx.Done() }()
+		done := make(chan struct{})
+		m.setStop(cancel, done)
+		go func() {
+			<-ctx.Done()
+			close(done)
+		}()
 		m.logf("route ready", "route", string(id))
 		return nil
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
 	go func() {
+		defer close(done)
 		if err := drv.Run(ctx, p); err != nil && ctx.Err() == nil {
 			m.logf("route stopped", "route", string(id), "err", err)
 			if m.OnError != nil {
@@ -180,7 +202,7 @@ func (m *Manager) Start(route, liveID string, forceSystem bool) error {
 			}
 		}
 	}()
-	m.setStop(cancel)
+	m.setStop(cancel, done)
 	m.logf("route started", "route", string(id), "driver", fmt.Sprintf("%T", drv))
 	return nil
 }
@@ -223,25 +245,35 @@ func ParseItem(method string, payload []byte) Msg {
 		if err := proto.Unmarshal(payload, &pb); err != nil {
 			return nil
 		}
-		if pb.GetRepeatEnd() != 1 {
-			return nil
+		group, repeat, combo, total, wireEnd := scanGiftCountFields(payload)
+		if combo == 0 {
+			combo = pb.GetComboCount()
+		}
+		repeatEnd := wireEnd
+		if repeatEnd == 0 {
+			repeatEnd = pb.GetRepeatEnd()
 		}
 		u := userName(pb.GetUser())
+		uid := userID(pb.GetUser())
 		gname := ""
 		var gid int64
 		if pb.GetGift() != nil {
 			gname = pb.GetGift().GetName()
 			gid = pb.GetGift().GetId()
 		}
-		count := pb.GetComboCount()
-		if count == 0 {
-			count = 1
-		}
 		if u == "" || gname == "" {
 			return nil
 		}
+		instant := settleGiftCount(group, repeat, combo, total, 0)
+		key := giftComboKey(uid, pb.GetGiftId(), gname, gid)
+		if repeatEnd != 1 {
+			// Intermediate combo tick — remember peak, wait for repeatEnd.
+			noteGiftComboPeak(key, instant)
+			return nil
+		}
+		count := settleGiftCount(group, repeat, combo, total, takeGiftComboPeak(key))
 		return Msg{
-			"type": "gift", "user": u, "user_id": userID(pb.GetUser()),
+			"type": "gift", "user": u, "user_id": uid,
 			"gift": gname, "gift_id": gid, "count": count, "repeat_end": 1,
 		}
 

@@ -1,9 +1,10 @@
+//go:build windows
+
 package core
 
 import (
 	"fmt"
 	"os"
-	"strings"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -60,41 +61,4 @@ func isAdmin() bool {
 		return false
 	}
 	return elevation.TokenIsElevated != 0
-}
-
-// QuoteArg wraps an argument for ShellExecute parameter string.
-func QuoteArg(s string) string {
-	if s == "" {
-		return `""`
-	}
-	needs := false
-	for _, r := range s {
-		if r == ' ' || r == '\t' || r == '"' {
-			needs = true
-			break
-		}
-	}
-	if !needs {
-		return s
-	}
-	out := `"`
-	for _, r := range s {
-		if r == '"' {
-			out += `\`
-		}
-		out += string(r)
-	}
-	out += `"`
-	return out
-}
-
-func BuildElevatedParams(argv []string) string {
-	if len(argv) <= 1 {
-		return ""
-	}
-	var parts []string
-	for _, a := range argv[1:] {
-		parts = append(parts, QuoteArg(a))
-	}
-	return strings.Join(parts, " ")
 }

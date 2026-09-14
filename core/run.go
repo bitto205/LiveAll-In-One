@@ -7,8 +7,11 @@ import (
 	"os/signal"
 	"runtime"
 	"runtime/debug"
+	"strings"
 	"syscall"
 	"time"
+
+	"liveaio/listener"
 )
 
 // SupervisorRun is the process lifecycle owner shared by:
@@ -68,7 +71,10 @@ func SupervisorRun(args []string) int {
 
 	h, srv := startHub(ctx, root, fs.tcp, log, cancel)
 	bindPagesBridge(h)
-	defer h.stopCapture()
+	defer func() {
+		h.stopCapture()
+		listener.ReapOwnedBrowsers(root)
+	}()
 	defer h.overtime.Stop()
 	defer func() {
 		StopPagesChild()
@@ -193,3 +199,39 @@ func startTrayModule(root string, log *slog.Logger, h *hub, cancel context.Cance
 
 // Run keeps the historical name for DLL / main entry.
 func Run(args []string) int { return SupervisorRun(args) }
+
+func QuoteArg(s string) string {
+	if s == "" {
+		return `""`
+	}
+	needs := false
+	for _, r := range s {
+		if r == ' ' || r == '\t' || r == '"' {
+			needs = true
+			break
+		}
+	}
+	if !needs {
+		return s
+	}
+	out := `"`
+	for _, r := range s {
+		if r == '"' {
+			out += `\`
+		}
+		out += string(r)
+	}
+	out += `"`
+	return out
+}
+
+func BuildElevatedParams(argv []string) string {
+	if len(argv) <= 1 {
+		return ""
+	}
+	var parts []string
+	for _, a := range argv[1:] {
+		parts = append(parts, QuoteArg(a))
+	}
+	return strings.Join(parts, " ")
+}

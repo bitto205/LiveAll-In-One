@@ -11,6 +11,7 @@
 #include <QCoreApplication>
 #include <QMetaObject>
 #include <QThread>
+#include <QTimer>
 
 namespace {
 // Go 侧可能再次请求显示界面。Qt 不允许一个进程里先后跑两个 QApplication，
@@ -48,6 +49,16 @@ extern "C" LIVEAIO_PAGES_API int LiveAIO_PagesRun(int argc, char** argv) {
     if (!startHidden) win->show();
     win->requestInitialState();
     g_mainWindow.storeRelease(win);
+    if (!qEnvironmentVariable("LIVEAIO_TOOLS_SELFTEST").isEmpty()) {
+        // 自测不进工具页也会 LoadLibrary，从而跑 LiveAIO_ToolsWarm。
+        QTimer::singleShot(80, &app, []() {
+            QString err;
+            if (!liveaio::pages::ToolsPlugin::instance().ensureLoaded(&err)) {
+                qWarning("LIVEAIO_TOOLS_SELFTEST load failed: %s", qPrintable(err));
+                qApp->exit(2);
+            }
+        });
+    }
     const int code = app.exec();
     g_mainWindow.storeRelease(nullptr);
     return code;

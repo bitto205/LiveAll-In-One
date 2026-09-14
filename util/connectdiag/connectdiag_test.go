@@ -2,6 +2,7 @@ package connectdiag
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -73,8 +74,59 @@ func TestClassifyBrowserFault_BadRoom(t *testing.T) {
 	}
 }
 
+func TestRoute4UserMessages(t *testing.T) {
+	if got := ErrNotLivingConnectFail().Error(); got != MsgNotLivingConnectFail {
+		t.Fatalf("not living fail: %q", got)
+	}
+	err := ErrProxyShellNoResponse(nil)
+	got := err.Error()
+	if !strings.HasPrefix(got, MsgProxyShellNotRunning) && !strings.HasPrefix(got, MsgProxyShellNoResponse) {
+		t.Fatalf("proxy silent: %q", got)
+	}
+	if strings.Contains(got, MsgTimeoutNet) || strings.Contains(got, MsgTimeout) {
+		t.Fatalf("must not wrap as network timeout: %q", got)
+	}
+	ce, ok := AsConnectError(err)
+	if !ok || ce.Code != CodeTimeout {
+		t.Fatalf("code: %v", ce)
+	}
+
+	connErr := ErrProxyShellConnect(fmt.Errorf("proxy_shell 端口未就绪"))
+	got = connErr.Error()
+	if strings.Contains(got, MsgTimeoutNet) {
+		t.Fatalf("connect must not use network timeout framing: %q", got)
+	}
+	if !strings.Contains(got, "proxy_shell") {
+		t.Fatalf("want shell hint: %q", got)
+	}
+}
+
 func TestTryBadRoom_TooEarly(t *testing.T) {
 	if err := TryBadRoom(context.TODO(), 0, false, 2*time.Second); err != nil {
+		t.Fatal("too early")
+	}
+}
+
+func TestLooksEndedLiveBody(t *testing.T) {
+	if !LooksEndedLiveBody("Soloman\n直播已结束\n聊天功能不可用") {
+		t.Fatal("want ended")
+	}
+	if LooksEndedLiveBody("正在直播 聊天") {
+		t.Fatal("living body should not match")
+	}
+}
+
+func TestClassifyBrowserFault_EndedLive(t *testing.T) {
+	h := PageHints{AnchorLiveRoom: true, EndedLive: true}
+	err := ClassifyBrowserFault(context.TODO(), 0, false, &h)
+	ce, ok := AsConnectError(err)
+	if !ok || ce.Code != CodeNotLiving {
+		t.Fatalf("want not_living got %v", err)
+	}
+}
+
+func TestTryEndedLive_TooEarly(t *testing.T) {
+	if err := TryEndedLive(context.TODO(), 0, false, 2*time.Second); err != nil {
 		t.Fatal("too early")
 	}
 }

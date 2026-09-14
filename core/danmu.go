@@ -1,6 +1,9 @@
 package core
 
-import "sync"
+import (
+	"fmt"
+	"sync"
+)
 
 type Danmu struct {
 	mu      sync.Mutex
@@ -64,7 +67,18 @@ func (f *Danmu) Accept(msg map[string]any, giftDiamonds int) map[string]any {
 			return nil
 		}
 		gift, _ := msg["gift"].(string)
-		return map[string]any{"op": "danmu.show", "kind": "gift", "user": user, "text": gift, "gift": gift}
+		count := toInt(msg["count"])
+		if count < 1 {
+			count = 1
+		}
+		text := gift
+		if count > 1 {
+			text = fmt.Sprintf("%s x%d", gift, count)
+		}
+		return map[string]any{
+			"op": "danmu.show", "kind": "gift", "user": user,
+			"text": text, "gift": gift, "count": count,
+		}
 	case "follow":
 		if !f.s.FollowOn {
 			return nil

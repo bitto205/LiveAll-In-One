@@ -22,7 +22,6 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
-	"syscall"
 	"time"
 )
 
@@ -176,7 +175,7 @@ func caInTrustStore() bool {
 	cmd := exec.Command("powershell", "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden",
 		"-Command",
 		`$s = Get-ChildItem Cert:\LocalMachine\Root | Where-Object { $_.Subject -like '*LiveAIO*' -or $_.Subject -like '*LiveHelper*' }; if ($s.Count -gt 0) { 'YES' }`)
-	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
+	hideCmd(cmd)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return false
@@ -190,7 +189,7 @@ func installCAToTrustStore(certPath string) {
 		return
 	}
 	cmd := exec.Command("certutil", "-addstore", "-f", "ROOT", certPath)
-	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
+	hideCmd(cmd)
 	out, err := cmd.CombinedOutput()
 	msg := strings.TrimSpace(string(out))
 	if err != nil {
@@ -272,14 +271,14 @@ type ipcServer struct {
 }
 
 var (
-	wsRelayActive uint32 // 1=webcast WSS relay running (101 upgrade done)
-	liveActive    uint32 // 1=room/enter status==2（开播中）
+	wsRelayActive uint32 // count of tracked webcast push WSS relays (/push/v2/)
+	liveActive    uint32 // 1=room/enter status==2（开播中） or push WS open
 )
 
 var roomEnterStatusRe = regexp.MustCompile(`"status"\s*:\s*([24])\s*,\s*"status_str"`)
 
 func isWSRelayActive() bool {
-	return atomic.LoadUint32(&wsRelayActive) == 1
+	return atomic.LoadUint32(&wsRelayActive) > 0
 }
 
 func isLiveActive() bool {
@@ -341,16 +340,31 @@ func setLiveActive(active bool, ipc *ipcServer, host string) {
 }
 
 func beginWSRelay(ipc *ipcServer, host string) {
-	if atomic.SwapUint32(&wsRelayActive, 1) == 1 {
+	n := atomic.AddUint32(&wsRelayActive, 1)
+	if n != 1 {
+		logger.Printf("WS relay +1 (n=%d host=%s)", n, host)
 		return
 	}
 	logger.Printf("WS relay open: %s", host)
 	pushIPCControl(ipc, ctrlWSOpen)
+	// Treat an open webcast WS as live. Room-enter JSON sniff is best-effort and
+	// frequently missed when the main app attaches after the stream started.
+	setLiveActive(true, ipc, host)
 }
 
 func endWSRelay(ipc *ipcServer, host string) {
-	if atomic.SwapUint32(&wsRelayActive, 0) == 0 {
-		return
+	for {
+		cur := atomic.LoadUint32(&wsRelayActive)
+		if cur == 0 {
+			return
+		}
+		if atomic.CompareAndSwapUint32(&wsRelayActive, cur, cur-1) {
+			if cur > 1 {
+				logger.Printf("WS relay -1 (n=%d host=%s)", cur-1, host)
+				return
+			}
+			break
+		}
 	}
 	atomic.StoreUint32(&liveActive, 0)
 	logger.Printf("WS relay closed: %s (ready for next stream)", host)
@@ -540,13 +554,26 @@ func writeWSFrame(w io.Writer, opcode byte, payload []byte, fin bool) error {
 
 func relayWS(clientR io.Reader, clientW io.Writer,
 	serverR io.Reader, serverW io.Writer,
-	host string, ipc *ipcServer) {
-	beginWSRelay(ipc, host)
-	defer endWSRelay(ipc, host)
+	clientConn, serverConn net.Conn,
+	host string, ipc *ipcServer, trackLive bool) {
+	if trackLive {
+		beginWSRelay(ipc, host)
+		defer endWSRelay(ipc, host)
+	}
+
+	done := make(chan struct{})
+	var once sync.Once
+	kill := func() {
+		once.Do(func() {
+			_ = clientConn.Close()
+			_ = serverConn.Close()
+			close(done)
+		})
+	}
 
 	// server → client: reassemble fragmented frames, push complete payloads to IPC
-	// 开播判定改由 room/enter HTTP status=2 触发，不再用首包二进制帧确认
 	go func() {
+		defer kill()
 		var acc []byte
 		var curOpcode byte
 		for {
@@ -564,22 +591,28 @@ func relayWS(clientR io.Reader, clientW io.Writer,
 				acc = append(acc, payload...)
 			}
 			if fin && curOpcode == 2 { // complete binary message from server
-				ipc.push(acc)
+				if trackLive {
+					ipc.push(acc)
+				}
 				acc = nil
 			}
 		}
 	}()
 
-	// client → server: passthrough
-	for {
-		opcode, payload, fin, err := readWSFrame(clientR)
-		if err != nil {
-			return
+	// client → server: passthrough; any error tears down both sides (no half-dead relay)
+	go func() {
+		defer kill()
+		for {
+			opcode, payload, fin, err := readWSFrame(clientR)
+			if err != nil {
+				return
+			}
+			if writeWSFrame(serverW, opcode, payload, fin) != nil {
+				return
+			}
 		}
-		if writeWSFrame(serverW, opcode, payload, fin) != nil {
-			return
-		}
-	}
+	}()
+	<-done
 }
 
 // ─── HTTP Relay ───────────────────────────────────────────────────────────────
@@ -632,7 +665,11 @@ func relayHTTP(clientConn, serverConn net.Conn, host string, ipc *ipcServer) {
 
 	if isWS && status == 101 {
 		logger.Printf("WS: %s", host)
-		relayWS(clientBuf, clientConn, serverBuf, serverConn, host, ipc)
+		// Only /push/v2/ carries gift PushFrames (same as routes 1/2). Other webcast
+		// sockets must not flip live flags or starve IPC when they open/close.
+		trackLive := bytes.Contains(bytes.ToLower(req), []byte("/push/v2/"))
+		relayWS(clientBuf, clientConn, serverBuf, serverConn,
+			clientConn, serverConn, host, ipc, trackLive)
 		return
 	}
 
@@ -751,21 +788,6 @@ func handleConn(conn net.Conn, ipc *ipcServer) {
 // proxy_shell.exe lifecycle must follow 直播伴侣, not main software.
 // We watch the PID of the process that spawned us (Electron main process).
 // When 直播伴侣 exits, we exit too.
-
-func processAlive(pid int) bool {
-	const PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
-	const STILL_ACTIVE = 259
-	h, err := syscall.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, uint32(pid))
-	if err != nil {
-		return false
-	}
-	defer syscall.CloseHandle(h)
-	var code uint32
-	if err = syscall.GetExitCodeProcess(h, &code); err != nil {
-		return false
-	}
-	return code == STILL_ACTIVE
-}
 
 func watchParent() {
 	ppid := os.Getppid()

@@ -17,6 +17,7 @@
 #include <QPainter>
 #include <QPainterPath>
 #include <QPixmap>
+#include <QPointer>
 #include <QRandomGenerator>
 #include <QScreen>
 #include <QSet>
@@ -26,6 +27,11 @@
 #include <QTableWidgetItem>
 #include <QTextEdit>
 #include <QTimer>
+#include <QDate>
+#include <QDateTime>
+#include <QDebug>
+#include <QDir>
+#include <QHash>
 #include <QVariantAnimation>
 
 #ifdef Q_OS_WIN
@@ -306,6 +312,12 @@ private:
             && op != QStringLiteral("leaf.spawn")) {
             return;
         }
+        // Live leaf.spawn can arrive while the settings panel was closed but Core
+        // leaf.Active is still on — ensure runtime exists to paint the overlay.
+        if (op == QStringLiteral("leaf.spawn")) {
+            ensureEntry(QStringLiteral("leaf"));
+            publishDemand(QStringLiteral("leaf"), true);
+        }
         for (auto it = entries_.begin(); it != entries_.end(); ++it) {
             ToolEntry& entry = it.value();
             if (entry.runtime) entry.runtime->onCorePacket(packet);
@@ -330,6 +342,18 @@ private:
 extern "C" LIVEAIO_TOOLS_API void LiveAIO_ToolsWarm(void) {
     if (!QApplication::instance()) return;
     liveaio::tools::ToolsSession::instance().warm();
+    const QString selftest = qEnvironmentVariable("LIVEAIO_TOOLS_SELFTEST");
+    if (selftest == QLatin1String("leaf_card")) {
+        QTimer::singleShot(0, qApp, []() {
+            liveaio::tools::leaf::smokeTestLeafGiftRuleCards();
+            qApp->exit(0);
+        });
+    } else if (selftest.startsWith(QLatin1String("leaf_perf"))) {
+        QTimer::singleShot(0, qApp, []() {
+            const int rc = liveaio::tools::leaf::smokeTestLeafPerf();
+            qApp->exit(rc);
+        });
+    }
 }
 
 extern "C" LIVEAIO_TOOLS_API int LiveAIO_ToolsOpen(const char* tool_id) {

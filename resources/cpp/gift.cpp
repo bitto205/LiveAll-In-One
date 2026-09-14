@@ -7,6 +7,7 @@
 #include <QLabel>
 #include <QObject>
 #include <QPixmap>
+#include <QPointer>
 #include <QString>
 #include <QStringList>
 #include <QTimer>
@@ -291,8 +292,11 @@ class GiftAnimPlayer final : public QObject {
 public:
     explicit GiftAnimPlayer(QLabel* label) : QObject(label), label_(label) {
         animTimer_.setTimerType(Qt::PreciseTimer);
-        QObject::connect(&animTimer_, &QTimer::timeout, label, [this]() { onAnimTick(); });
-        QObject::connect(&loadTimer_, &QTimer::timeout, label, [this]() { decodeNextFrame(); });
+        // Context must be `this` (not the label): if the label is reparented/torn
+        // down while a tick is queued, label-context slots can still fire on a
+        // half-dead player and AV (seen when leaf rules rebuild mid-session).
+        QObject::connect(&animTimer_, &QTimer::timeout, this, [this]() { onAnimTick(); });
+        QObject::connect(&loadTimer_, &QTimer::timeout, this, [this]() { decodeNextFrame(); });
     }
 
     void setAnimated(const QString& path, int side) {
@@ -369,7 +373,7 @@ private:
         animTimer_.start(std::max(30, delays_.value(index_, 100)));
     }
 
-    QLabel* label_ = nullptr;
+    QPointer<QLabel> label_;
     QTimer animTimer_;
     QTimer loadTimer_;
     QString animPath_;

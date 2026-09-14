@@ -1,4 +1,4 @@
-# LiveAIO build — single exe + multi DLL (Core / Pages / Tools).
+﻿# LiveAIO build — single exe + multi DLL (Core / Pages / Tools).
 # Usage:
 #   .\scripts\build.ps1
 #   .\scripts\build.ps1 -Release
@@ -46,6 +46,63 @@ function Write-Warn([string]$msg) { Write-Host "[build] WARN: $msg" -ForegroundC
 function Fail([string]$msg) {
     if ($Soft) { Write-Warn $msg; return }
     throw $msg
+}
+
+# Drop credentials / local-only trees that Soft or F5 may leave under out dirs.
+function Remove-PackagingSecrets([string]$Dir) {
+    if (-not $Dir -or -not (Test-Path -LiteralPath $Dir)) { return }
+    foreach ($name in @("state.json", "config.json")) {
+        $p = Join-Path $Dir $name
+        if (Test-Path -LiteralPath $p) {
+            Remove-Item -LiteralPath $p -Force -ErrorAction SilentlyContinue
+            Write-Step "pack exclude → $name"
+        }
+    }
+    foreach ($name in @("log", "msg_log")) {
+        $p = Join-Path $Dir $name
+        if (Test-Path -LiteralPath $p) {
+            Remove-Item -LiteralPath $p -Recurse -Force -ErrorAction SilentlyContinue
+            Write-Step "pack exclude → $name/"
+        }
+    }
+    $priv = Join-Path $Dir "resources\private_skin"
+    if (Test-Path -LiteralPath $priv) {
+        Remove-Item -LiteralPath $priv -Recurse -Force -ErrorAction SilentlyContinue
+        Write-Step "pack exclude → resources/private_skin/"
+    }
+}
+
+# Sync repo resources into a product root, never copying private_skin.
+function Sync-ResourcesTo([string]$DestRoot) {
+    $resSrc = Join-Path $Root "resources"
+    if (-not (Test-Path -LiteralPath $resSrc)) { return }
+    $resDst = Join-Path $DestRoot "resources"
+    Write-Step "Sync resources → $DestRoot"
+    if (Test-Path -LiteralPath $resDst) {
+        Remove-Item -Recurse -Force $resDst
+    }
+    New-Item -ItemType Directory -Force -Path $resDst | Out-Null
+    Get-ChildItem -LiteralPath $resSrc -Force | Where-Object { $_.Name -ne "private_skin" } | ForEach-Object {
+        Copy-Item -LiteralPath $_.FullName -Destination (Join-Path $resDst $_.Name) -Recurse -Force
+    }
+}
+
+# F5/tray can lock out/*.exe|*.dll; link failures often look like a vague "cmake build failed".
+# Soft builds do not kill processes (avoid killing an active F5 session).
+# Non-Soft builds stop LiveAIO*; never kill chrome-headless-shell.
+function Stop-LiveAioLockers {
+    $procs = Get-Process -ErrorAction SilentlyContinue | Where-Object {
+        ($_.ProcessName -eq "LiveAIO") -or ($_.ProcessName -like "LiveAIO*")
+    }
+    if (-not $procs) { return }
+    $list = ($procs | ForEach-Object { "$($_.ProcessName)($($_.Id))" }) -join ", "
+    if ($Soft) {
+        Write-Warn "LiveAIO still running ($list); Soft build will not kill it. Stop F5 if link fails."
+        return
+    }
+    Write-Step "stopping processes that may lock build outputs: $list"
+    $procs | Stop-Process -Force -ErrorAction SilentlyContinue
+    Start-Sleep -Milliseconds 400
 }
 
 function Get-AppVersion {
@@ -161,6 +218,38 @@ function Invoke-GoCoreBuild([string]$OutDir) {
     Write-Step "OK LiveAIOCore.dll"
 }
 
+function Invoke-ProxyShellBuild([string]$OutDir) {
+    # Route 3/4 MITM helper: source in listener/proxy_shell_go, shipped as listener/proxy_shell.exe.
+    $srcDir = Join-Path $Root "listener\proxy_shell_go"
+    $repoExe = Join-Path $Root "listener\proxy_shell.exe"
+    if (-not (Test-Path (Join-Path $srcDir "main.go"))) {
+        Fail "proxy_shell source missing: $srcDir\main.go"
+        return
+    }
+    Write-Step "proxy_shell.exe → listener\"
+    $prev = Get-Location
+    try {
+        Set-Location $srcDir
+        & go build -ldflags="-s -w" -o $repoExe .
+        if ($LASTEXITCODE -ne 0) {
+            Fail "go build proxy_shell failed (exit $LASTEXITCODE)"
+            return
+        }
+    } finally {
+        Set-Location $prev
+    }
+    if (-not (Test-Path $repoExe)) {
+        Fail "proxy_shell.exe not produced at $repoExe"
+        return
+    }
+    if ($OutDir) {
+        $dstDir = Join-Path $OutDir "listener"
+        New-Item -ItemType Directory -Force -Path $dstDir | Out-Null
+        Copy-Item $repoExe (Join-Path $dstDir "proxy_shell.exe") -Force
+    }
+    Write-Step "OK proxy_shell.exe"
+}
+
 function Invoke-CmakeBuild([string]$OutDir, [string]$QtRoot) {
     Write-Step "CMake host/pages/tools → $OutDir"
     $cmake = Find-CommandPath "cmake.exe" @(
@@ -212,7 +301,7 @@ function Invoke-CmakeBuild([string]$OutDir, [string]$QtRoot) {
         "-DCMAKE_BUILD_TYPE=Release",
         "-DLIVEAIO_OUT_DIR=$OutDir",
         "-DCMAKE_PREFIX_PATH=$QtRoot",
-        "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON"
+        "-DCMAKE_EXPORT_COMPILE_COMMANDS:BOOL=ON"
     )
     if ($gcc) { $cmakeArgs += "-DCMAKE_C_COMPILER=$($gcc.Source)" }
     if ($gxx) { $cmakeArgs += "-DCMAKE_CXX_COMPILER=$($gxx.Source)" }
@@ -222,18 +311,31 @@ function Invoke-CmakeBuild([string]$OutDir, [string]$QtRoot) {
         return
     }
 
+    Stop-LiveAioLockers
+    & $cmake --build $cmakeBuildDir --config Release
+    if ($LASTEXITCODE -ne 0) {
+        $lockHint = ""
+        $holders = Get-Process -ErrorAction SilentlyContinue | Where-Object {
+            ($_.ProcessName -eq "LiveAIO") -or ($_.ProcessName -like "LiveAIO*")
+        }
+        if ($holders) {
+            $lockHint = " (DLL likely locked by: " +
+                (($holders | ForEach-Object { "$($_.ProcessName)($($_.Id))" }) -join ", ") +
+                "). Stop F5/debug or LiveAIO.exe and rebuild."
+        } else {
+            $lockHint = " (scroll up for ninja/g++ errors; often a locked LiveAIO*.dll from a prior F5 session)"
+        }
+        Fail ("cmake build failed" + $lockHint)
+        return
+    }
+
     # clangd：仓库根 .clangd 已设 CompilationDatabase: build/cmake/all；勿复制到仓库根。
+    # 放在 build 之后检查：部分环境下 configure 末尾文件才落盘，提前查会误报。
     $compDb = Join-Path $cmakeBuildDir "compile_commands.json"
-    if (-not [string]::IsNullOrWhiteSpace($compDb) -and (Test-Path -LiteralPath $compDb)) {
+    if (Test-Path -LiteralPath $compDb) {
         Write-Step "compile_commands.json → $cmakeBuildDir (clangd via .clangd)"
     } else {
         Write-Warn "CMAKE_EXPORT_COMPILE_COMMANDS did not produce compile_commands.json"
-    }
-
-    & $cmake --build $cmakeBuildDir --config Release
-    if ($LASTEXITCODE -ne 0) {
-        Fail "cmake build failed"
-        return
     }
 
     $qtBin = Join-Path $QtRoot "bin"
@@ -312,13 +414,9 @@ function Invoke-StageRelease {
     if (Test-Path $StageDir) { Remove-Item -Recurse -Force $StageDir }
     New-Item -ItemType Directory -Force -Path $StageDir | Out-Null
     Copy-Item -Path (Join-Path $CustomDir "*") -Destination $StageDir -Recurse -Force
+    Remove-PackagingSecrets $StageDir
 
-    $resSrc = Join-Path $Root "resources"
-    if (Test-Path $resSrc) {
-        $resDst = Join-Path $StageDir "resources"
-        if (Test-Path $resDst) { Remove-Item -Recurse -Force $resDst }
-        Copy-Item -Path $resSrc -Destination $resDst -Recurse -Force
-    }
+    Sync-ResourcesTo $StageDir
     $lic = Join-Path $Root "LICENSE"
     if (Test-Path $lic) { Copy-Item $lic (Join-Path $StageDir "LICENSE") -Force }
 
@@ -332,6 +430,7 @@ function Invoke-StageRelease {
     if ($IncludeBrowsers) {
         Invoke-CopyBrowsers -DestDir $StageDir
     }
+    Remove-PackagingSecrets $StageDir
 }
 
 function Find-UpxExe {
@@ -474,6 +573,7 @@ function Invoke-Nsis([string]$StageDir, [string]$AppVer) {
     $nsi = Join-Path $ScriptsDir "installer.nsi"
     $license = Join-Path $Root "LICENSE"
     Write-Step "NSIS → $outfile"
+    Remove-PackagingSecrets $StageDir
     & $makensis `
         "/DSRCDIR=$StageDir" `
         "/DOUTFILE=$outfile" `
@@ -500,12 +600,25 @@ New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
 
 Write-Step "root=$Root version=$AppVer out=$OutDir flags: Release=$Release Upx=$Upx Browsers=$Browsers Nsis=$WantNsis Soft=$Soft"
 
+Stop-LiveAioLockers
+
 $qt = Find-QtPrefix
 if (-not $SkipGo) {
     try { Invoke-GoCoreBuild -OutDir $OutDir }
     catch { if ($Soft) { Write-Warn $_ } else { throw } }
+    try { Invoke-ProxyShellBuild -OutDir $OutDir }
+    catch { if ($Soft) { Write-Warn $_ } else { throw } }
 } else {
     Write-Step "SkipGo"
+    # Still ship proxy_shell when present so Soft SkipGo packs remain usable for route 3/4.
+    $proxy = Join-Path $Root "listener\proxy_shell.exe"
+    if (Test-Path $proxy) {
+        $dstDir = Join-Path $OutDir "listener"
+        New-Item -ItemType Directory -Force -Path $dstDir | Out-Null
+        Copy-Item $proxy (Join-Path $dstDir "proxy_shell.exe") -Force
+    } else {
+        Write-Warn "listener\proxy_shell.exe missing (route 3/4 patch will fail)"
+    }
 }
 
 if (-not $SkipCpp) {
@@ -515,20 +628,13 @@ if (-not $SkipCpp) {
     Write-Step "SkipCpp"
 }
 
-# 始终把 resources 同步进产物目录，使 custom/ / version / NSIS 成为「完整包」
+# 始终把 resources 同步进产物目录，使 custom/ / version / NSIS 成为[完整包]
 # （Core + resources），与 ResolveAppRoot 的 isPackagedRoot 一致。
 if ([string]::IsNullOrWhiteSpace($Root)) { $Root = $script:Root }
 if ([string]::IsNullOrWhiteSpace($Root)) { throw "build.ps1: `$Root is empty after C++ build" }
 if ([string]::IsNullOrWhiteSpace($OutDir)) { throw "build.ps1: `$OutDir is empty after C++ build" }
-$resSrc = Join-Path $Root "resources"
-$resDst = Join-Path $OutDir "resources"
-if (-not [string]::IsNullOrWhiteSpace($resSrc) -and (Test-Path -LiteralPath $resSrc)) {
-    Write-Step "Sync resources → $OutDir"
-    if (-not [string]::IsNullOrWhiteSpace($resDst) -and (Test-Path -LiteralPath $resDst)) {
-        Remove-Item -Recurse -Force $resDst
-    }
-    Copy-Item $resSrc $resDst -Recurse -Force
-}
+Sync-ResourcesTo $OutDir
+Remove-PackagingSecrets $OutDir
 
 if ($Release -and ($OutDir -ne $CustomDir)) {
     # Already writing into version dir; resources synced above.
@@ -558,12 +664,19 @@ if ($Release -and ($OutDir -ne $CustomDir)) {
         $src = Join-Path $OutDir $name
         if (Test-Path $src) { Copy-Item $src (Join-Path $CustomDir $name) -Force }
     }
+    $proxySrc = Join-Path $OutDir "listener\proxy_shell.exe"
+    if (Test-Path $proxySrc) {
+        $proxyDstDir = Join-Path $CustomDir "listener"
+        New-Item -ItemType Directory -Force -Path $proxyDstDir | Out-Null
+        Copy-Item $proxySrc (Join-Path $proxyDstDir "proxy_shell.exe") -Force
+    }
     $resSrc = Join-Path $OutDir "resources"
     if (Test-Path $resSrc) {
         $resDst = Join-Path $CustomDir "resources"
         if (Test-Path $resDst) { Remove-Item -Recurse -Force $resDst }
         Copy-Item $resSrc $resDst -Recurse -Force
     }
+    Remove-PackagingSecrets $CustomDir
 }
 
 if ($WantNsis) {
@@ -575,15 +688,13 @@ if ($WantNsis) {
     } else {
         # Release out dir may already have resources/browsers; fill gaps.
         if (-not (Test-Path (Join-Path $stage "resources"))) {
-            $resSrc = Join-Path $Root "resources"
-            if (Test-Path $resSrc) {
-                Copy-Item $resSrc (Join-Path $stage "resources") -Recurse -Force
-            }
+            Sync-ResourcesTo $stage
         }
         if ($Browsers -and -not (Test-Path (Join-Path $stage "browsers"))) {
             Invoke-CopyBrowsers -DestDir $stage
         }
     }
+    Remove-PackagingSecrets $stage
     Invoke-Nsis -StageDir $stage -AppVer $AppVer
 }
 

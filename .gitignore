@@ -2,22 +2,11 @@
 __pycache__/
 *.pyc
 state.json
-.DS_store
-Thumbs.db
-.vscode/
-!.vscode/launch.json
-!.vscode/tasks.json
-!.vscode/extensions.json
-!.vscode/settings.json
-.cursor/
-!.cursor/rules/
-!.cursor/rules/**
-!.cursor/skills/
-!.cursor/skills/**
+config.json
 log/
 msg_log/
-config.json
 browsers/
+resources/private_skin/
 
 # go.mod / go.sum 必须在仓库根（Go 模块根目录，不能放进 main/）
 
@@ -49,4 +38,5 @@ aqtinstall.log
 build/
 # clangd 用 .clangd → build/cmake/all；勿在仓库根落 compile_commands.json
 compile_commands.json
-test/
+# 本地临时目录；包内 *_test.go 仍放各包目录（go test 要求）
+/test/

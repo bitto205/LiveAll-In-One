@@ -9,7 +9,6 @@ import (
 	"net/http"
 	"os/exec"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/chromedp/chromedp"
@@ -24,6 +23,11 @@ const (
 
 	MsgConnected  = "直播间已连接"
 	MsgNotLiving  = "直播间未开播"
+	// Route 4 (proxy_shell decides live): fail connect when not on-air.
+	MsgNotLivingConnectFail = "直播间未开播连接失败"
+	MsgProxyShellNoResponse = "proxy_shell未正常响应"
+	// Companion / proxy_shell not running — expected until user starts 直播伴侣.
+	MsgProxyShellNotRunning = "请先启动直播伴侣并开播（未检测到 proxy_shell）"
 	MsgBadRoom    = "房间号错误，请检查房间号"
 	MsgTimeoutNet = "连接超时，请检查您的网络连接与配置，可在github提出issue"
 	MsgTimeout    = "连接超时，请检查您的网络连接"
@@ -49,6 +53,12 @@ func (e *ConnectError) Error() string {
 	if e == nil {
 		return ""
 	}
+	// Full user-facing sentences already in Detail (Route 4).
+	if e.Detail != "" && (e.Detail == MsgNotLivingConnectFail ||
+		strings.HasPrefix(e.Detail, MsgProxyShellNoResponse) ||
+		strings.HasPrefix(e.Detail, MsgProxyShellNotRunning)) {
+		return e.Detail
+	}
 	base := MsgTimeout
 	switch e.Code {
 	case CodeNotLiving:
@@ -67,11 +77,22 @@ func (e *ConnectError) Error() string {
 }
 
 func ErrNotLiving() error  { return &ConnectError{Code: CodeNotLiving} }
-func ErrBadRoom() error   { return &ConnectError{Code: CodeBadRoom} }
-func ErrTimeoutNet() error { return &ConnectError{Code: CodeTimeoutNet} }
-func ErrTimeout() error   { return &ConnectError{Code: CodeTimeout} }
+func ErrBadRoom() error     { return &ConnectError{Code: CodeBadRoom} }
+func ErrTimeoutNet() error  { return &ConnectError{Code: CodeTimeoutNet} }
+func ErrTimeout() error     { return &ConnectError{Code: CodeTimeout} }
 func ErrWithDetail(code ConnectCode, detail string) error {
 	return &ConnectError{Code: code, Detail: strings.TrimSpace(detail)}
+}
+
+// ErrNotLivingConnectFail is Route 4 when proxy_shell reports not on-air.
+func ErrNotLivingConnectFail() error {
+	return &ConnectError{Code: CodeNotLiving, Detail: MsgNotLivingConnectFail}
+}
+
+// ErrProxyShellNoResponse is Route 4 when live-query / IPC does not answer.
+// Do not classify as network timeout — missing companion is normal until connect.
+func ErrProxyShellNoResponse(cause error) error {
+	return &ConnectError{Code: CodeTimeout, Detail: formatProxyShellFail(InspectProxyShell(), cause)}
 }
 
 func AsConnectError(err error) (*ConnectError, bool) {
@@ -82,11 +103,12 @@ func AsConnectError(err error) (*ConnectError, bool) {
 	return nil, false
 }
 
-// PageHints from a title probe at connect failure time.
+// PageHints from a title/body probe at connect failure time.
 type PageHints struct {
 	Title          string
 	AnchorLiveRoom bool
 	LandingPage    bool
+	EndedLive      bool // page body shows 直播已结束 (common for private/offline rooms)
 }
 
 func ReadPageTitle(ctx context.Context) (string, error) {
@@ -95,12 +117,37 @@ func ReadPageTitle(ctx context.Context) (string, error) {
 	return strings.TrimSpace(title), err
 }
 
+func ReadPageBodyText(ctx context.Context, maxRunes int) (string, error) {
+	if maxRunes <= 0 {
+		maxRunes = 2000
+	}
+	var body string
+	err := chromedp.Run(ctx, chromedp.Evaluate(
+		fmt.Sprintf(`(document.body && document.body.innerText || '').slice(0, %d)`, maxRunes),
+		&body,
+	))
+	return body, err
+}
+
+// LooksEndedLiveBody reports offline UI text on live.douyin.com room pages.
+// Private / inaccessible rooms often keep an anchor title but never call room/enter,
+// and show "直播已结束" (+ "聊天功能不可用") with empty RENDER_DATA.
+func LooksEndedLiveBody(body string) bool {
+	return strings.Contains(body, "直播已结束")
+}
+
 func PageHintsFromTitle(title string) PageHints {
 	return PageHints{
 		Title:          title,
 		AnchorLiveRoom: isAnchorLiveTitle(title),
 		LandingPage:    isLandingTitle(title),
 	}
+}
+
+func PageHintsFromTitleAndBody(title, body string) PageHints {
+	h := PageHintsFromTitle(title)
+	h.EndedLive = LooksEndedLiveBody(body)
+	return h
 }
 
 func isAnchorLiveTitle(title string) bool {
@@ -137,6 +184,22 @@ func TryBadRoom(ctx context.Context, enterReqN int, enterSeen bool, sinceNav tim
 	return nil
 }
 
+// TryEndedLive probes body text when stuck with no enter/WSS.
+// Private / offline rooms often keep "…的抖音直播间" title but never hit room/enter.
+func TryEndedLive(ctx context.Context, enterReqN int, enterSeen bool, sinceNav time.Duration) error {
+	if enterSeen || enterReqN > 0 || sinceNav < BadRoomMinWait {
+		return nil
+	}
+	body, err := ReadPageBodyText(ctx, 2000)
+	if err != nil {
+		return nil
+	}
+	if LooksEndedLiveBody(body) {
+		return ErrNotLiving()
+	}
+	return nil
+}
+
 // ClassifyBrowserFault maps a final timeout (no WSS / hung enter) to case 3/4/5.
 // Runs InternetReachable only here — not during normal capture.
 func ClassifyBrowserFault(ctx context.Context, enterReqN int, enterSeen bool, hints *PageHints) error {
@@ -144,13 +207,22 @@ func ClassifyBrowserFault(ctx context.Context, enterReqN int, enterSeen bool, hi
 	if hints != nil {
 		h = *hints
 	}
-	if h.Title == "" && !h.LandingPage && !h.AnchorLiveRoom {
+	if h.Title == "" && !h.LandingPage && !h.AnchorLiveRoom && !h.EndedLive {
 		if title, err := ReadPageTitle(ctx); err == nil {
 			h = PageHintsFromTitle(title)
 		}
 	}
+	if !h.EndedLive {
+		if body, err := ReadPageBodyText(ctx, 2000); err == nil {
+			h.EndedLive = LooksEndedLiveBody(body)
+		}
+	}
 	if !enterSeen && enterReqN == 0 && h.LandingPage {
 		return ErrBadRoom()
+	}
+	// Prefer not_living over timeout_net when the room page explicitly says ended.
+	if h.EndedLive && !enterSeen {
+		return ErrNotLiving()
 	}
 	if h.AnchorLiveRoom || enterReqN > 0 {
 		if InternetReachable() {
@@ -233,18 +305,26 @@ func (s ProxyShellStatus) OK() bool {
 	return s.ProcessRunning && s.IPCListening && s.ProxyListening
 }
 
-// ErrProxyShellConnect wraps proxy_shell IPC / health failures with full diagnostics.
-func ErrProxyShellConnect(cause error) error {
-	st := InspectProxyShell()
-	detail := st.Diagnostic()
+func formatProxyShellFail(st ProxyShellStatus, cause error) string {
+	var b strings.Builder
+	if !st.ProcessRunning {
+		b.WriteString(MsgProxyShellNotRunning)
+	} else {
+		b.WriteString(MsgProxyShellNoResponse)
+	}
+	b.WriteByte('\n')
+	b.WriteString(st.Diagnostic())
 	if cause != nil && strings.TrimSpace(cause.Error()) != "" {
-		detail += "\n" + cause.Error()
+		b.WriteByte('\n')
+		b.WriteString(strings.TrimSpace(cause.Error()))
 	}
-	code := CodeTimeout
-	if InternetReachable() {
-		code = CodeTimeoutNet
-	}
-	return ErrWithDetail(code, detail)
+	return b.String()
+}
+
+// ErrProxyShellConnect wraps proxy_shell IPC / health failures.
+// Only call from connect path. Never frames "shell not running" as network timeout.
+func ErrProxyShellConnect(cause error) error {
+	return &ConnectError{Code: CodeTimeout, Detail: formatProxyShellFail(InspectProxyShell(), cause)}
 }
 
 func TCPOpen(host string, port int) bool {
@@ -258,7 +338,7 @@ func TCPOpen(host string, port int) bool {
 
 func proxyShellRunning() bool {
 	cmd := exec.Command("tasklist", "/FI", "IMAGENAME eq "+ProxyShellName, "/NH")
-	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: 0x08000000}
+	hideConsoleWindow(cmd)
 	out, err := cmd.Output()
 	if err != nil {
 		return false

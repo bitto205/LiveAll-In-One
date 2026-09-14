@@ -13,8 +13,8 @@
 #include <QEvent>
 #include <QFile>
 #include <QFontMetrics>
-#include <QFrame>
-#include <QHBoxLayout>
+#include <QGuiApplication>
+#include <QScreen>
 #include <QLabel>
 #include <QLineEdit>
 #include <QMouseEvent>
@@ -398,8 +398,12 @@ inline void paintChromeBox(QPainter& p, const QWidget* w,
                           const QColor& border, const QColor& fill,
                           int borderPx = kControlBorderW, int radiusPx = kControlRadius) {
     if (!w || w->width() <= 0 || w->height() <= 0) return;
+    // mapTo(nullptr) is UB — can AV while a control is mid-reparent / not yet in a window.
+    QWidget* top = w->window();
+    if (!top) return;
     const qreal dpr = w->devicePixelRatioF();
-    const QPointF originDev = QPointF(w->mapTo(w->window(), QPoint(0, 0))) * dpr;
+    if (dpr <= 0) return;
+    const QPointF originDev = QPointF(w->mapTo(top, QPoint(0, 0))) * dpr;
     // 往控件内部取下一条网格线：向外取会让外圈落在控件之外被裁掉，
     // 表现就是左边/上边的描边比另外两边薄。
     const qreal shiftX = std::ceil(originDev.x()) - originDev.x();
@@ -743,29 +747,48 @@ inline void wireHoverBatch(QWidget* host, const QVector<QWidget*>& targets) {
 // 给整棵子树里的按钮统一接上代理判定，并跟踪后续新建控件（懒加载 Tab / 动态卡片）。
 inline void installHoverAutoWiring(QWidget* root) {
     if (!root) return;
+    // One wirer per root — double-install used to stack filters and corrupt attach walks.
+    if (root->property("liveaioHoverAutoRoot").toBool()) return;
+    root->setProperty("liveaioHoverAutoRoot", true);
+
     class HoverAutoWirer final : public QObject {
     public:
-        explicit HoverAutoWirer(QWidget* root) : QObject(root) { attach(root); }
+        explicit HoverAutoWirer(QWidget* root) : QObject(root) { attachTree(root); }
+
     protected:
         bool eventFilter(QObject*, QEvent* e) override {
             if (e->type() != QEvent::ChildAdded) return false;
             // ChildAdded 时派生类构造还没跑完，qobject_cast 会失手，延后一轮再接。
             QPointer<QObject> child(static_cast<QChildEvent*>(e)->child());
             QTimer::singleShot(0, this, [this, child]() {
-                if (auto* w = qobject_cast<QWidget*>(child.data())) attach(w);
+                if (auto* w = qobject_cast<QWidget*>(child.data())) attachTree(w);
             });
             return false;
         }
+
     private:
-        void attach(QWidget* w) {
-            if (!w || w->property("liveaioHoverWired").toBool()) return;
-            w->setProperty("liveaioHoverWired", true);
-            w->installEventFilter(this);
-            if (qobject_cast<QPushButton*>(w)) {
-                if (QWidget* host = w->parentWidget()) wireHoverProxy(host, w);
-            }
-            for (QObject* child : w->children()) {
-                if (auto* cw = qobject_cast<QWidget*>(child)) attach(cw);
+        void attachTree(QWidget* start) {
+            if (!start) return;
+            // Iterative + snapshot: wireHoverProxy adds QObject children to parents while
+            // walking; a live children() reference + recursion SIGSEGV'd Pages on「添加规则」
+            // (HoverAutoWirer::attach, 0xc0000005).
+            QVector<QWidget*> stack;
+            stack.append(start);
+            while (!stack.isEmpty()) {
+                QWidget* w = stack.takeLast();
+                if (!w || w->property("liveaioHoverWired").toBool()) continue;
+                w->setProperty("liveaioHoverWired", true);
+                w->installEventFilter(this);
+                // ChromeButton already tracks hover itself — proxying it also parents a
+                // HoverProxyFilter under the card and mutates children mid-walk.
+                if (qobject_cast<QPushButton*>(w)
+                    && !w->property("liveaioChromeButton").toBool()) {
+                    if (QWidget* host = w->parentWidget()) wireHoverProxy(host, w);
+                }
+                const QObjectList kids = w->children();
+                for (QObject* child : kids) {
+                    if (auto* cw = qobject_cast<QWidget*>(child)) stack.append(cw);
+                }
             }
         }
     };
@@ -1099,8 +1122,8 @@ private:
 class ThemedComboBox final : public QWidget {
 public:
     explicit ThemedComboBox(QWidget* parent = nullptr) : QWidget(parent) {
-        popup_ = new DropPopup;
-        // 触发钮走自绘 ChromeButton：外形高即控件高，四边描边同厚且不会被裁。
+        // Lazy DropPopup: constructing a Qt::Popup|StaysOnTop HWND for every combo
+        // during「添加规则」has AV'd the Pages process (0xc0000005). Create on first open.
         btn_ = new ChromeButton(QString(), this, kControlH, ControlVariant::Field);
         btn_->setTextAlignment(Qt::AlignLeft);
         btn_->setTrailingArrow(true);
@@ -1184,6 +1207,7 @@ private:
     }
 
     void togglePopup() {
+        if (!popup_) popup_ = new DropPopup;
         if (popup_->isVisible()) {
             popup_->hide();
             return;

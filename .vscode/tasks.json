@@ -1,0 +1,160 @@
+{
+
+  "version": "2.0.0",
+
+  "tasks": [
+
+    {
+
+      "label": "build: LiveAIO (cmake+go)",
+
+      "type": "shell",
+
+      "command": "powershell",
+
+      "args": [
+
+        "-NoProfile",
+
+        "-ExecutionPolicy",
+
+        "Bypass",
+
+        "-File",
+
+        "${workspaceFolder}\\scripts\\build.ps1"
+
+      ],
+
+      "options": {
+
+        "cwd": "${workspaceFolder}",
+
+        "env": {
+
+          "GOPROXY": "https://goproxy.cn,direct"
+
+        }
+
+      },
+
+      "group": {
+
+        "kind": "build",
+
+        "isDefault": true
+
+      },
+
+      "problemMatcher": [],
+
+      "presentation": {
+
+        "reveal": "always",
+
+        "panel": "shared",
+
+        "clear": true
+
+      }
+
+    },
+
+    {
+
+      "label": "build: cmake only",
+
+      "type": "shell",
+
+      "command": "powershell",
+
+      "args": [
+
+        "-NoProfile",
+
+        "-ExecutionPolicy",
+
+        "Bypass",
+
+        "-File",
+
+        "${workspaceFolder}\\scripts\\build.ps1",
+
+        "-SkipGo"
+
+      ],
+
+      "options": {
+
+        "cwd": "${workspaceFolder}"
+
+      },
+
+      "group": "build",
+
+      "problemMatcher": [],
+
+      "presentation": {
+
+        "reveal": "always",
+
+        "panel": "shared"
+
+      }
+
+    },
+
+    {
+
+      "label": "build: go core dll only",
+
+      "type": "shell",
+
+      "command": "powershell",
+
+      "args": [
+
+        "-NoProfile",
+
+        "-ExecutionPolicy",
+
+        "Bypass",
+
+        "-File",
+
+        "${workspaceFolder}\\scripts\\build.ps1",
+
+        "-SkipCpp"
+
+      ],
+
+      "options": {
+
+        "cwd": "${workspaceFolder}",
+
+        "env": {
+
+          "GOPROXY": "https://goproxy.cn,direct"
+
+        }
+
+      },
+
+      "group": "build",
+
+      "problemMatcher": [],
+
+      "presentation": {
+
+        "reveal": "always",
+
+        "panel": "shared"
+
+      }
+
+    }
+
+  ]
+
+}
+

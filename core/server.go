@@ -14,7 +14,6 @@ import (
 
 const (
 	connWriteTimeout = 2 * time.Second
-	connReadTimeout  = 60 * time.Second
 	serverStopWait   = 3 * time.Second
 )
 
@@ -172,6 +171,13 @@ func (s *Server) serveConn(ctx context.Context, raw net.Conn) {
 			s.OnDisconnect(c)
 		}
 	}()
+	// 直播间静默（无人说话/没礼物）很正常：禁止用读超时踢 UI↔Core。
+	// 真正的存活靠 WSS/采集层；TCP keepalive 只防半死连接。
+	_ = raw.SetReadDeadline(time.Time{})
+	if tc, ok := raw.(*net.TCPConn); ok {
+		_ = tc.SetKeepAlive(true)
+		_ = tc.SetKeepAlivePeriod(30 * time.Second)
+	}
 	_ = c.Send(Envelope{"op": OpReady, "version": Version, "protocol_version": ProtocolVersion})
 
 	r := bufio.NewReader(raw)
@@ -181,7 +187,6 @@ func (s *Server) serveConn(ctx context.Context, raw net.Conn) {
 			return
 		default:
 		}
-		_ = raw.SetReadDeadline(time.Now().Add(connReadTimeout))
 		line, err := r.ReadBytes('\n')
 		if err != nil {
 			if err != io.EOF {
@@ -195,6 +200,9 @@ func (s *Server) serveConn(ctx context.Context, raw net.Conn) {
 			continue
 		}
 		if s.Handler != nil {
+			// Keep handle synchronous so disconnect/connect stay TCP-ordered.
+			// Long work (stopCapture / browser teardown) must run in a goroutine
+			// inside the handler — never block here with chromedp/taskkill.
 			s.Handler(c, env)
 		}
 	}

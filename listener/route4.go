@@ -22,12 +22,21 @@ const (
 	proxyPort = connectdiag.ProxyShellProxyPort
 	shellName = connectdiag.ProxyShellName
 
-	DefaultIPCAddr = "127.0.0.1:19098"
-	CtrlPrefix     = "__LH_CTRL__:"
-	CtrlLiveOn     = "LIVE_ON_AIR:true"
-	CtrlLiveOff    = "LIVE_ON_AIR:false"
-	CtrlWSOpen     = "WS_OPEN"
-	CtrlWSDown     = "WS_DISCONNECTED"
+	DefaultIPCAddr  = "127.0.0.1:19098"
+	CtrlPrefix      = "__LH_CTRL__:"
+	CtrlLiveOn      = "LIVE_ON_AIR:true"
+	CtrlLiveOff     = "LIVE_ON_AIR:false"
+	CtrlWSOpen      = "WS_OPEN"
+	CtrlWSConnected = "WS_CONNECTED"
+	CtrlWSDown      = "WS_DISCONNECTED"
+
+	ipcQueryLiveOnAir     = "__LH_QUERY__:LIVE_ON_AIR"
+	ipcReplyLiveOnAirPref = "__LH_REPLY__:LIVE_ON_AIR:"
+
+	// Shell dial after PrepareR4 already saw ports; keep this short.
+	shellDialTimeout = 8 * time.Second
+	// One-shot live query (mirrors old listener4.query_live_on_air).
+	liveQueryTimeout = 3 * time.Second
 )
 
 type catalog struct {
@@ -50,9 +59,18 @@ func (R4) Run(ctx context.Context, p Params) error {
 }
 
 // PrepareR4 checks patch catalog + proxy_shell ports. Frames via Shell IPC.
+// Process/port probe only runs on connect (not on route.env page enter).
 func PrepareR4(root string) error {
 	if err := ensurePatched(root); err != nil {
 		return err
+	}
+	if connectdiag.ProxyShellPortsOpen() {
+		return nil
+	}
+	// Companion not started: fail immediately — do not wait 5s or call network probes.
+	st := connectdiag.InspectProxyShell()
+	if !st.ProcessRunning {
+		return connectdiag.ErrProxyShellConnect(fmt.Errorf("proxy_shell 未运行"))
 	}
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
@@ -102,6 +120,9 @@ func ensurePatched(root string) error {
 	if cat.Spawn == "" || !strings.Contains(body, cat.Spawn) {
 		return fmt.Errorf("index.js missing spawn injection")
 	}
+	if !spawnAnchoredToProxy(body, cat.Spawn, cat.ProxyInject) {
+		return fmt.Errorf("proxy_shell spawn not anchored to proxy-server switch")
+	}
 	switch cat.ProxyMode {
 	case "inject":
 		if cat.ProxyInject == "" || !strings.Contains(body, cat.ProxyInject) {
@@ -119,23 +140,20 @@ func ensurePatched(root string) error {
 	if _, err := os.Stat(deployed); err != nil {
 		return fmt.Errorf("deployed %s missing", shellName)
 	}
-	if _, err := os.Stat(src); err == nil {
-		a, _ := os.ReadFile(src)
-		b, _ := os.ReadFile(deployed)
-		if len(a) > 0 && len(b) > 0 && string(a) != string(b) {
-			return fmt.Errorf("proxy_shell.exe does not match bundled copy")
-		}
-	}
+	// Do not hard-fail on byte mismatch: rebuilding listener/proxy_shell.exe is
+	// common during dev, and the companion-side process may still be the older
+	// copy while ports are healthy. UI can still offer re-patch via PageCheck.
+	_ = src
 	return nil
 }
 
 // Shell reads length-prefixed packets from proxy_shell IPC (routes 3/4).
 type Shell struct {
-	Addr    string
+	Addr        string
 	PlainErrors bool // route 3: plain errors, no connectdiag
-	OnCtrl  func(ctrl string)
-	OnFrame func(raw []byte)
-	OnErr   func(error)
+	OnCtrl      func(ctrl string)
+	OnFrame     func(raw []byte)
+	OnErr       func(error)
 
 	mu     sync.Mutex
 	conn   net.Conn
@@ -193,7 +211,7 @@ func (c *Shell) Start() error {
 	}
 
 	var conn net.Conn
-	deadline := time.Now().Add(15 * time.Second)
+	deadline := time.Now().Add(shellDialTimeout)
 	for {
 		conn, err = net.DialTimeout("tcp", c.addr(), 2*time.Second)
 		if err == nil {
@@ -220,6 +238,49 @@ func (c *Shell) Start() error {
 
 	go c.readLoop(conn)
 	return nil
+}
+
+// QueryLiveOnAir asks proxy_shell whether the companion room is on-air.
+// Uses a one-shot IPC connection (does not start the streaming Shell).
+// Mirrors old Python listener4.query_live_on_air.
+func QueryLiveOnAir(addr string) (onAir bool, err error) {
+	if addr == "" {
+		addr = DefaultIPCAddr
+	}
+	token, err := ReadToken()
+	if err != nil {
+		return false, connectdiag.ErrProxyShellNoResponse(fmt.Errorf("ipc token: %w", err))
+	}
+	conn, err := net.DialTimeout("tcp", addr, 2*time.Second)
+	if err != nil {
+		return false, connectdiag.ErrProxyShellNoResponse(fmt.Errorf("dial IPC: %w", err))
+	}
+	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(liveQueryTimeout))
+	if _, err := conn.Write([]byte(token + "\n")); err != nil {
+		return false, connectdiag.ErrProxyShellNoResponse(fmt.Errorf("write token: %w", err))
+	}
+	// Must arrive within proxy_shell's 500ms query window after token.
+	if _, err := conn.Write([]byte(ipcQueryLiveOnAir + "\n")); err != nil {
+		return false, connectdiag.ErrProxyShellNoResponse(fmt.Errorf("write query: %w", err))
+	}
+	r := bufio.NewReader(conn)
+	line, err := r.ReadString('\n')
+	if err != nil {
+		return false, connectdiag.ErrProxyShellNoResponse(fmt.Errorf("read reply: %w", err))
+	}
+	reply := strings.TrimSpace(line)
+	if !strings.HasPrefix(reply, ipcReplyLiveOnAirPref) {
+		return false, connectdiag.ErrProxyShellNoResponse(fmt.Errorf("bad reply %q", reply))
+	}
+	switch strings.TrimPrefix(reply, ipcReplyLiveOnAirPref) {
+	case "true":
+		return true, nil
+	case "false":
+		return false, nil
+	default:
+		return false, connectdiag.ErrProxyShellNoResponse(fmt.Errorf("bad reply %q", reply))
+	}
 }
 
 func (c *Shell) Stop() {
@@ -249,8 +310,12 @@ func (c *Shell) readLoop(conn net.Conn) {
 		}
 		var hdr [4]byte
 		if _, err := io.ReadFull(r, hdr[:]); err != nil {
-			if c.OnErr != nil && err != io.EOF {
-				c.OnErr(err)
+			if c.OnErr != nil {
+				if err == io.EOF {
+					c.OnErr(fmt.Errorf("proxy_shell IPC closed"))
+				} else {
+					c.OnErr(err)
+				}
 			}
 			return
 		}

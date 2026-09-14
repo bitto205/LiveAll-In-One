@@ -8,10 +8,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
-	"syscall"
 	"time"
-
-	"golang.org/x/sys/windows/registry"
 )
 
 const (
@@ -69,40 +66,6 @@ func writeConfigKey(root, key string, val any) error {
 		return err
 	}
 	return os.WriteFile(path, b, 0644)
-}
-
-func scanCompanionInstallDir() string {
-	hives := []registry.Key{registry.LOCAL_MACHINE, registry.CURRENT_USER}
-	subkeys := []string{
-		`SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall`,
-		`SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall`,
-	}
-	for _, hive := range hives {
-		for _, sub := range subkeys {
-			k, err := registry.OpenKey(hive, sub, registry.ENUMERATE_SUB_KEYS|registry.QUERY_VALUE)
-			if err != nil {
-				continue
-			}
-			names, _ := k.ReadSubKeyNames(-1)
-			for _, name := range names {
-				sk, err := registry.OpenKey(k, name, registry.QUERY_VALUE)
-				if err != nil {
-					continue
-				}
-				dn, _, _ := sk.GetStringValue("DisplayName")
-				loc, _, _ := sk.GetStringValue("InstallLocation")
-				sk.Close()
-				if strings.Contains(dn, "\u76f4\u64ad\u4f34\u4fa3") && loc != "" {
-					if st, err := os.Stat(loc); err == nil && st.IsDir() {
-						k.Close()
-						return loc
-					}
-				}
-			}
-			k.Close()
-		}
-	}
-	return ""
 }
 
 func GetManualCompanionDir(root string) string {
@@ -196,15 +159,73 @@ func applyPatch(content, dest, indexPath string) (string, catalog, string) {
 		cat.ProxyInject = proxyInject
 		newContent = newContent[:rm[0]] + proxyInject + newContent[rm[0]:]
 	}
+	// Insert spawn AFTER the proxy-server statement. Inject mode places
+	// appendSwitch inside a comma-expression just before i.on("ready"); putting
+	// ";(function..." BEFORE that switch yields `N(),;(function` → SyntaxError.
+	// appendSwitch already ends with ";", so a leading-";" spawn is safe after it.
 	spawn := cat.Spawn
-	idx := strings.Index(newContent, "proxy-server")
-	if idx >= 0 {
-		lineStart := strings.LastIndex(newContent[:idx], ";") + 1
-		newContent = newContent[:lineStart] + spawn + newContent[lineStart:]
+	anchor := -1
+	injectLen := 0
+	if cat.ProxyInject != "" {
+		anchor = strings.Index(newContent, cat.ProxyInject)
+		injectLen = len(cat.ProxyInject)
 	}
+	if anchor < 0 {
+		// replace-mode: find the switch call and skip to its trailing ";"
+		for _, pat := range []string{`appendSwitch("proxy-server"`, `appendSwitch('proxy-server'`} {
+			if i := strings.Index(newContent, pat); i >= 0 {
+				semi := strings.Index(newContent[i:], ";")
+				if semi < 0 {
+					return "", catalog{}, "proxy-server switch missing trailing semicolon"
+				}
+				anchor = i
+				injectLen = semi + 1
+				break
+			}
+		}
+	}
+	if anchor < 0 {
+		return "", catalog{}, "proxy-server switch missing after patch"
+	}
+	at := anchor + injectLen
+	newContent = newContent[:at] + spawn + newContent[at:]
 	okRE := regexp.MustCompile(`,!\w+\.ok\)`)
 	newContent = okRE.ReplaceAllString(newContent, ",false)")
 	return newContent, cat, ""
+}
+
+// spawnAnchoredToProxy reports whether the spawn snippet sits immediately after
+// (preferred) or before the proxy-server switch.
+func spawnAnchoredToProxy(body, spawn, proxyInject string) bool {
+	if spawn == "" || !strings.Contains(body, spawn) {
+		return false
+	}
+	si := strings.Index(body, spawn)
+	pi := -1
+	plen := 0
+	if proxyInject != "" {
+		pi = strings.Index(body, proxyInject)
+		plen = len(proxyInject)
+	}
+	if pi < 0 {
+		for _, pat := range []string{`appendSwitch("proxy-server"`, `appendSwitch('proxy-server'`} {
+			if i := strings.Index(body, pat); i >= 0 {
+				semi := strings.Index(body[i:], ";")
+				if semi < 0 {
+					return false
+				}
+				pi = i
+				plen = semi + 1
+				break
+			}
+		}
+	}
+	if pi < 0 {
+		return false
+	}
+	// Only "right after the proxy statement" is valid. Prefixed placement can
+	// produce `N(),;(function...` inside a comma-expression and crash Electron.
+	return si >= pi+plen && si-(pi+plen) <= 8
 }
 
 // PatchCompanion patches companion index.js and deploys proxy_shell.exe.
@@ -215,7 +236,7 @@ func PatchCompanion(root string) (bool, string) {
 	}
 	src := bundledShell(root)
 	if _, err := os.Stat(src); err != nil {
-		return false, "Bundled proxy_shell.exe not found in listener directory"
+		return false, fmt.Sprintf("Bundled proxy_shell.exe not found: %s (build listener/proxy_shell_go)", src)
 	}
 	dest := filepath.Join(filepath.Dir(path), shellProcess)
 	if IsCompanionPatched(root) {
@@ -308,18 +329,14 @@ func IsCompanionPatched(root string) bool {
 	if cat.Spawn == "" || !strings.Contains(body, cat.Spawn) {
 		return false
 	}
+	if !spawnAnchoredToProxy(body, cat.Spawn, cat.ProxyInject) {
+		return false
+	}
 	deployed := filepath.Join(filepath.Dir(cat.IndexPath), shellName)
-	src := bundledShell(root)
 	if _, err := os.Stat(deployed); err != nil {
 		return false
 	}
-	if _, err := os.Stat(src); err == nil {
-		a, _ := os.ReadFile(src)
-		b, _ := os.ReadFile(deployed)
-		if len(a) > 0 && string(a) != string(b) {
-			return false
-		}
-	}
+	// exe byte identity is informational for PageCheck; do not invalidate patch.
 	return true
 }
 
@@ -342,7 +359,7 @@ func InstallCACert() error {
 		return err
 	}
 	cmd := exec.Command("certutil", "-addstore", "-f", "ROOT", cert)
-	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
+	hideCmd(cmd)
 	_, _ = cmd.CombinedOutput()
 	return nil
 }
@@ -352,7 +369,7 @@ func BootstrapProxyShellCA(shellExe string) error {
 		return nil
 	}
 	cmd := exec.Command(shellExe)
-	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
+	hideCmd(cmd)
 	if err := cmd.Start(); err != nil {
 		return InstallCACert()
 	}
@@ -369,29 +386,36 @@ func PageCheckRoute4(root string) map[string]any {
 	reg := scanCompanionInstallDir() != ""
 	patched := IsCompanionPatched(root)
 	out := map[string]any{
-		"route":                  "4",
-		"ok":                     true,
-		"ready":                  patched,
-		"companion_in_registry":  reg,
-		"companion_installed":    install != "",
-		"manual_path_invalid":    GetManualCompanionDir(root) != "" && install == "",
-		"manual_companion_dir":   install,
-		"index_js_found":         index != "",
-		"is_patched":             patched,
-		"index_patched":          patched,
-		"index_modified":         index != "" && contentHasPatchTraces(mustRead(index)),
-		"exe_identical":          patched,
-		"exe_in_place":           false,
-		"patch_needed":           index != "" && !patched,
-		"message":                "",
+		"route":                 "4",
+		"ok":                    true,
+		"ready":                 patched,
+		"companion_in_registry": reg,
+		"companion_installed":   install != "",
+		"manual_path_invalid":   GetManualCompanionDir(root) != "" && install == "",
+		"manual_companion_dir":  install,
+		"index_js_found":        index != "",
+		"is_patched":            patched,
+		"index_patched":         patched,
+		"index_modified":        index != "" && contentHasPatchTraces(mustRead(index)),
+		"exe_identical":         patched,
+		"exe_in_place":          false,
+		"patch_needed":          index != "" && !patched,
+		"message":               "",
 	}
 	if index != "" {
 		dest := filepath.Join(filepath.Dir(index), shellProcess)
 		if st, err := os.Stat(dest); err == nil && !st.IsDir() {
 			out["exe_in_place"] = true
+			src := bundledShell(root)
+			if a, err1 := os.ReadFile(src); err1 == nil {
+				if b, err2 := os.ReadFile(dest); err2 == nil {
+					out["exe_identical"] = len(a) > 0 && string(a) == string(b)
+				}
+			}
 		}
 	}
-	_ = InstallCACert()
+	// CA install belongs to patch/bootstrap, not every route.env poll (entering
+	// the page must not run certutil / probe proxy_shell).
 	return out
 }
 
@@ -401,60 +425,19 @@ func PageCheckRoute3(root string) map[string]any {
 	fields["route"] = "3"
 	fields["system_proxy"] = proxy.Enable
 	fields["proxy_server"] = proxy.Server
-	fields["ready"] = fields["companion_installed"] == true
 	fields["is_patched"] = false
 	fields["patch_needed"] = false
+	// Match Pages Route3Page::ready(): companion present, no foreign proxy, not patched.
+	companionOK := fields["companion_installed"] == true && fields["index_js_found"] == true
+	indexModified := fields["index_modified"] == true
+	manualBad := fields["manual_path_invalid"] == true
+	fields["ready"] = companionOK && !manualBad && !proxy.Enable && !indexModified
 	return fields
 }
 
 type proxySnapshot struct {
 	Enable bool
 	Server string
-}
-
-func getSystemProxy() (proxySnapshot, error) {
-	k, err := registry.OpenKey(registry.CURRENT_USER,
-		`Software\Microsoft\Windows\CurrentVersion\Internet Settings`, registry.QUERY_VALUE)
-	if err != nil {
-		return proxySnapshot{}, err
-	}
-	defer k.Close()
-	enable, _, _ := k.GetIntegerValue("ProxyEnable")
-	server, _, _ := k.GetStringValue("ProxyServer")
-	return proxySnapshot{Enable: enable != 0, Server: server}, nil
-}
-
-func setSystemProxy(server string, enable bool) error {
-	k, err := registry.OpenKey(registry.CURRENT_USER,
-		`Software\Microsoft\Windows\CurrentVersion\Internet Settings`, registry.SET_VALUE)
-	if err != nil {
-		return err
-	}
-	defer k.Close()
-	var en uint32
-	if enable {
-		en = 1
-	}
-	if err := k.SetDWordValue("ProxyEnable", en); err != nil {
-		return err
-	}
-	if server != "" {
-		if err := k.SetStringValue("ProxyServer", server); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func restoreSystemProxy(prev proxySnapshot) error {
-	if err := setSystemProxy(prev.Server, prev.Enable); err != nil {
-		return fmt.Errorf("restore proxy: %w", err)
-	}
-	return nil
-}
-
-func hideCmd(cmd *exec.Cmd) {
-	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: 0x08000000}
 }
 
 func mustRead(path string) string {

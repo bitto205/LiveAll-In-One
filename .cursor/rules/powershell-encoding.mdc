@@ -1,0 +1,26 @@
+---
+description: PowerShell 改源码后必须检查 UTF-8 编码（防 GBK/BOM/截断导致数百静态错误）
+alwaysApply: true
+---
+
+# PowerShell 编码护栏
+
+本仓库源码为 **UTF-8 无 BOM**（含大量中文 `QStringLiteral` / 注释）。在 Windows PowerShell 默认代码页（常为 GBK/936）下，`Set-Content`、`Out-File`、`>` 重定向、错误的 `GetBytes` 往返都会把中文写坏，表现为：
+
+- `QStringLiteral` 引号被截断 → 级联成 **数百条** IDE/静态检查错误
+- 编译报 `unterminated argument list invoking macro "QStringLiteral"`
+- 文件出现 UTF-8 BOM、或 `\uFFFD` 替换字符
+
+## 强制规则
+
+1. **不要用 PowerShell 整文件重写**含中文的 `.cpp/.h/.md`（禁止 `Set-Content` / `Out-File` / `>` 覆盖源码）。
+2. 改源码优先用编辑工具（StrReplace / Write / EditNotebook）；批量修复用 **Python** 显式 `encoding="utf-8"`。
+3. 任何经 PowerShell 触碰源码的操作之后，立刻跑：
+
+```powershell
+python scripts/check_utf8.py <改过的文件...>
+```
+
+4. 看到静态检查突然暴增（尤其上百条）时，先怀疑编码，再查逻辑。
+
+详见 skill：`.cursor/skills/powershell-encoding/SKILL.md`

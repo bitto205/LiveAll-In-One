@@ -5,28 +5,45 @@ import (
 	"encoding/base64"
 	"log/slog"
 	"sync"
+	"sync/atomic"
+	"time"
 
 	"liveaio/listener"
+	"liveaio/util/connectdiag"
 )
+
+const route4WssGrace = 30 * time.Second
 
 type hub struct {
 	mu        sync.Mutex
 	conns     map[*Conn]struct{}
 	root      string
+	sessionMu sync.Mutex
 	route     string
 	liveID    string
 	connected bool
 	forceMode bool
-	overtime  *Engine
-	leaf      *LeafEngine
-	danmu     *Danmu
-	memo      *Memo
-	config    *ConfigStore
-	log       *slog.Logger
-	shutdown  func()
-	showUI    func()
-	capture   *listener.Manager
-	shell     *listener.Shell
+	// wantCapture + activeGen gate late capture callbacks after cancel/disconnect.
+	wantCapture atomic.Bool
+	sessionGen  atomic.Uint64
+	activeGen   atomic.Uint64
+	captureMu   sync.Mutex
+	settleUntil time.Time // next Start should wait until this (set after real Stop)
+	overtime    *Engine
+	leaf        *LeafEngine
+	danmu       *Danmu
+	memo        *Memo
+	config      *ConfigStore
+	log         *slog.Logger
+	shutdown    func()
+	showUI      func()
+	capture     *listener.Manager
+	shell       *listener.Shell
+
+	// Route 4 companion WS can flap; defer connected=false until grace expires.
+	r4WssGraceMu  sync.Mutex
+	r4WssGrace    *time.Timer
+	r4WssGraceGen uint64
 }
 
 func startHub(ctx context.Context, root, tcp string, log *slog.Logger, shutdown func()) (*hub, *Server) {
@@ -41,29 +58,18 @@ func startHub(ctx context.Context, root, tcp string, log *slog.Logger, shutdown 
 		}),
 	}
 	h.capture.OnFrame = func(raw []byte) { h.ingestFrame(raw) }
-	h.capture.OnMessage = func(m listener.Msg) { h.afterMessage(m) }
-	h.capture.OnStatus = func(connected bool) {
-		h.connected = connected
-		env := h.statusEnvelope()
-		if connected && h.route != "3" {
-			env["msg"] = listener.MsgConnected
-		} else if connected {
-			env["msg"] = "监听已开启"
+	h.capture.OnMessage = func(m listener.Msg) {
+		if !h.wantCapture.Load() {
+			return
 		}
-		h.send(env)
+		h.afterMessage(m)
+	}
+	// Default callbacks; startListen rebinds them to the connect-time session gen.
+	h.capture.OnStatus = func(connected bool) {
+		h.publishCaptureStatus(connected, h.activeGen.Load())
 	}
 	h.capture.OnError = func(err error) {
-		h.connected = false
-		code := "listen"
-		msg := err.Error()
-		if h.route != "3" {
-			if ce, ok := listener.AsConnectError(err); ok {
-				code = string(ce.Code)
-				msg = ce.Error()
-			}
-		}
-		h.send(Envelope{"op": OpError, "code": code, "route": h.route, "msg": msg})
-		h.send(h.statusEnvelope())
+		h.handleCaptureError(h.activeGen.Load(), err)
 	}
 	h.overtime = NewOvertime(
 		func(rem int, running bool) {
@@ -73,13 +79,18 @@ func startHub(ctx context.Context, root, tcp string, log *slog.Logger, shutdown 
 			h.send(Envelope{"op": OpLedger, "entries": entries})
 		},
 	)
-	h.leaf = NewLeaf(func(gift string, leaves int, user string) {
-		h.send(Envelope{
+	h.leaf = NewLeaf(func(gift string, leaves int, user string, action string) {
+		h.log.Info("leaf spawn", "gift", gift, "leaves", leaves, "action", action, "user", user)
+		env := Envelope{
 			"op":    OpLeafSpawn,
 			"gift":  gift,
 			"count": leaves,
 			"user":  user,
-		})
+		}
+		if action != "" {
+			env["action"] = action
+		}
+		h.send(env)
 	})
 	h.danmu = NewDanmu()
 	h.memo = NewMemo()
@@ -165,6 +176,7 @@ func (h *hub) setToolDemand(tool string, active bool) {
 		h.leaf.SetActive(active)
 		if active {
 			h.ensureGiftCatalog()
+			h.hydrateLeafSettings()
 		}
 	case "danmu":
 		h.danmu.SetActive(active)
@@ -184,16 +196,65 @@ func (h *hub) setToolDemand(tool string, active bool) {
 	}
 }
 
+// hydrateLeafSettings loads leaf.settings from config when the in-memory table is empty.
+// Tools normally push tool.leaf.set; this covers demand-before-set and Core restart races.
+func (h *hub) hydrateLeafSettings() {
+	if h.leaf == nil || h.config == nil {
+		return
+	}
+	if h.leaf.NamedRuleCount() > 0 {
+		return
+	}
+	raw, ok, err := h.config.Get("leaf.settings")
+	if err != nil || !ok || raw == nil {
+		return
+	}
+	s := NormalizeLeafSettings(raw)
+	h.leaf.SetSettings(s)
+	if n := h.leaf.NamedRuleCount(); n > 0 {
+		h.log.Info("leaf settings hydrated", "rules", n)
+	}
+}
+
+func (h *hub) handleCaptureError(gen uint64, err error) {
+	if err == nil || !h.sessionAlive(gen) {
+		return
+	}
+	h.disarmCapture()
+	code := "listen"
+	msg := err.Error()
+	route, _, _, _, _ := h.snapshotSession()
+	if route != "3" {
+		if ce, ok := listener.AsConnectError(err); ok {
+			code = string(ce.Code)
+			msg = ce.Error()
+		}
+	}
+	h.send(Envelope{"op": OpError, "code": code, "route": route, "msg": msg})
+	h.send(h.statusEnvelope())
+	go h.stopCapture()
+}
+
 func (h *hub) ingestFrame(raw []byte) {
+	gen := h.activeGen.Load()
+	h.ingestFrameFor(gen, raw)
+}
+
+func (h *hub) ingestFrameFor(gen uint64, raw []byte) {
+	if !h.sessionAlive(gen) {
+		return
+	}
 	ok, msgs := listener.TryParseFrame(raw)
 	if !ok {
 		return
 	}
-	if !h.connected {
-		h.connected = true
-		h.send(h.statusEnvelope())
-	}
+	// Frames still flowing ⇒ cancel route4 "WSS down" grace (socket flap, not real end).
+	h.cancelRoute4WssGrace()
+	h.publishCaptureStatus(true, gen)
 	for _, m := range msgs {
+		if !h.sessionAlive(gen) {
+			return
+		}
 		out := Envelope{"op": OpMessage}
 		for k, v := range m {
 			out[k] = v
@@ -203,38 +264,100 @@ func (h *hub) ingestFrame(raw []byte) {
 	}
 }
 
-func (h *hub) stopCapture() {
-	if h.shell != nil {
-		h.shell.Stop()
-		h.shell = nil
+func (h *hub) cancelRoute4WssGrace() {
+	h.r4WssGraceMu.Lock()
+	defer h.r4WssGraceMu.Unlock()
+	if h.r4WssGrace != nil {
+		h.r4WssGrace.Stop()
+		h.r4WssGrace = nil
 	}
-	if h.capture != nil {
-		h.capture.Stop()
-	}
+	h.r4WssGraceGen = 0
 }
 
-func (h *hub) startRoute4() {
+func (h *hub) armRoute4WssGrace(ctrl string) {
+	gen := h.activeGen.Load()
+	if !h.sessionAlive(gen) {
+		return
+	}
+	h.r4WssGraceMu.Lock()
+	defer h.r4WssGraceMu.Unlock()
+	if h.r4WssGrace != nil {
+		h.r4WssGrace.Stop()
+	}
+	h.r4WssGraceGen = gen
+	h.log.Info("route4 wss down grace", "ctrl", ctrl, "grace_s", int(route4WssGrace.Seconds()), "session", gen)
+	h.r4WssGrace = time.AfterFunc(route4WssGrace, func() {
+		h.r4WssGraceMu.Lock()
+		armed := h.r4WssGraceGen
+		h.r4WssGrace = nil
+		h.r4WssGraceGen = 0
+		h.r4WssGraceMu.Unlock()
+		if armed == 0 || !h.sessionAlive(armed) {
+			return
+		}
+		h.disarmCapture()
+		env := h.statusEnvelope()
+		env["msg"] = "直播已断开"
+		env["session"] = armed
+		h.send(env)
+		h.log.Info("route4 live off", "via", "wss_grace", "session", armed)
+		go h.stopCapture()
+	})
+}
+
+func (h *hub) startRoute4(gen uint64) error {
+	// Live status is decided by proxy_shell (old Python listener4 path), not by
+	// waiting forever for a ctrl push after IPC dial.
+	onAir, err := listener.QueryLiveOnAir("")
+	if err != nil {
+		h.log.Error("route4 live query", "err", err)
+		code := "timeout"
+		msg := err.Error()
+		if ce, ok := listener.AsConnectError(err); ok {
+			code = string(ce.Code)
+			msg = ce.Error()
+		}
+		if h.sessionAlive(gen) {
+			h.send(Envelope{"op": OpError, "code": code, "route": "4", "msg": msg})
+		}
+		return err
+	}
+	if !onAir {
+		err = connectdiag.ErrNotLivingConnectFail()
+		h.log.Info("route4 not living", "session", gen)
+		if h.sessionAlive(gen) {
+			h.send(Envelope{"op": OpError, "code": string(listener.CodeNotLiving), "route": "4", "msg": err.Error()})
+		}
+		return err
+	}
+
 	cl := &listener.Shell{
 		OnCtrl: func(ctrl string) {
+			if !h.sessionAlive(gen) {
+				return
+			}
 			switch ctrl {
-			case listener.CtrlLiveOn:
-				h.connected = true
-				h.send(h.statusEnvelope())
-				h.log.Info("route4 live on")
+			case listener.CtrlLiveOn, listener.CtrlWSOpen, listener.CtrlWSConnected:
+				h.cancelRoute4WssGrace()
+				h.publishCaptureStatus(true, gen)
+				h.log.Info("route4 live on", "ctrl", ctrl, "session", gen)
 			case listener.CtrlLiveOff, listener.CtrlWSDown:
-				h.connected = false
-				h.send(h.statusEnvelope())
-				h.log.Info("route4 live off", "ctrl", ctrl)
+				h.armRoute4WssGrace(ctrl)
 			}
 		},
 		OnFrame: func(raw []byte) {
-			if !h.connected {
+			if !h.sessionAlive(gen) {
 				return
 			}
 			h.ingestFrame(raw)
 		},
 		OnErr: func(err error) {
 			h.log.Warn("shellipc", "err", err)
+			if !h.sessionAlive(gen) {
+				return
+			}
+			// Drop while "connected" — surface like a capture fault (not silent).
+			h.handleCaptureError(gen, connectdiag.ErrProxyShellNoResponse(err))
 		},
 	}
 	if err := cl.Start(); err != nil {
@@ -245,17 +368,43 @@ func (h *hub) startRoute4() {
 			code = string(ce.Code)
 			msg = ce.Error()
 		}
-		h.send(Envelope{"op": OpError, "code": code, "route": h.route, "msg": msg})
-		h.send(h.statusEnvelope())
-		return
+		if h.sessionAlive(gen) {
+			h.send(Envelope{"op": OpError, "code": code, "route": "4", "msg": msg})
+		}
+		return err
+	}
+	if !h.sessionAlive(gen) {
+		cl.Stop()
+		return nil
 	}
 	h.shell = cl
-	h.log.Info("route4 shellipc listening")
+	// Query already said on-air; mark connected now (ctrl replay is belt-and-suspenders).
+	h.publishCaptureStatus(true, gen)
+	h.log.Info("route4 shellipc listening", "session", gen, "on_air", true)
+	return nil
 }
 
 func (h *hub) startListen(route string, forceSystem bool) error {
 	if h.capture == nil {
 		return nil
+	}
+	gen := h.activeGen.Load()
+	// Bind callbacks to this connect gen so a dying shell cannot publish into
+	// a newer session via activeGen.Load().
+	h.capture.OnStatus = func(connected bool) {
+		h.publishCaptureStatus(connected, gen)
+	}
+	h.capture.OnError = func(err error) {
+		h.handleCaptureError(gen, err)
+	}
+	h.capture.OnFrame = func(raw []byte) {
+		h.ingestFrameFor(gen, raw)
+	}
+	h.capture.OnMessage = func(m listener.Msg) {
+		if !h.sessionAlive(gen) {
+			return
+		}
+		h.afterMessage(m)
 	}
 	if err := h.capture.Start(route, h.liveID, forceSystem); err != nil {
 		h.log.Error("listen", "route", route, "err", err)
@@ -294,45 +443,33 @@ func (h *hub) handle(c *Conn, env Envelope) {
 		if v, ok := env["force_system"].(bool); ok {
 			forceSystem = v
 		}
-		h.liveID = liveID
-		h.route = route
-		h.connected = false
-		h.forceMode = forceSystem
-		h.log.Info("connect", "live_id", liveID, "route", route)
-		h.stopCapture()
-
-		switch route {
-		case "4":
-			if err := h.startListen("4", false); err != nil {
+		// Never stopCapture on the IPC goroutine — browser teardown can block for
+		// seconds and make every UI click look like "Core 不响应".
+		h.disarmCapture()
+		gen := h.armCapture(route, liveID, forceSystem)
+		h.log.Info("connect", "live_id", liveID, "route", route, "session", gen)
+		out := h.statusEnvelope()
+		out["connecting"] = true
+		out["session"] = gen
+		h.send(out)
+		go func(gen uint64, route string, forceSystem bool) {
+			h.stopCapture()
+			if !h.sessionAlive(gen) {
 				return
 			}
-			h.startRoute4()
-		case "1", "2":
-			_ = h.startListen(route, forceSystem)
-		case "3":
-			if err := h.startListen("3", false); err != nil {
-				return
-			}
-			h.log.Info("route3 started")
-		}
+			h.runConnect(gen, route, forceSystem)
+		}(gen, route, forceSystem)
 
 	case OpDisconnect:
-		h.stopCapture()
-		h.connected = false
+		route, _, _, _, _ := h.snapshotSession()
+		h.disarmCapture()
 		h.send(h.statusEnvelope())
+		h.log.Info("disconnect", "route", route)
+		go h.stopCapture()
 
 	case OpStatus:
-		conn := false
-		if v, ok := env["connected"].(bool); ok {
-			conn = v
-		}
-		h.connected = conn
-		out := h.statusEnvelope()
-		out["connected"] = conn
-		if r, ok := env["route"].(string); ok && r != "" {
-			out["route"] = r
-		}
-		h.send(out)
+		// Snapshot only — clients must not mutate hub.connected via inbound status.
+		_ = c.Send(h.statusEnvelope())
 
 	case OpFramePush:
 		b64, _ := env["payload_b64"].(string)
@@ -397,7 +534,13 @@ func (h *hub) handle(c *Conn, env Envelope) {
 		if user == "" {
 			user = "sim"
 		}
-		h.leaf.HandleGift(user, user, gift, count)
+		// Sim from the settings panel implies the leaf engine should run even if
+		// tool.demand was dropped; live gifts still require Active via demand.
+		if !h.leaf.Active() {
+			h.leaf.SetActive(true)
+		}
+		h.hydrateLeafSettings()
+		h.leaf.HandleSimGift(user, user, gift, count)
 
 	case OpToolDanmuSet:
 		s := NormalizeDanmuSettings(env["settings"])
@@ -409,8 +552,7 @@ func (h *hub) handle(c *Conn, env Envelope) {
 
 	case OpToolDemand:
 		tool, _ := env["tool"].(string)
-		active, _ := env["active"].(bool)
-		h.setToolDemand(tool, active)
+		h.setToolDemand(tool, boolValue(env["active"], false))
 
 	case OpConfigSet:
 		key, _ := env["key"].(string)
@@ -469,17 +611,18 @@ func (h *hub) handle(c *Conn, env Envelope) {
 }
 
 func (h *hub) statusEnvelope() Envelope {
+	route, liveID, connected, force, gen := h.snapshotSession()
 	driver := "listener"
-	if h.route == "4" {
+	if route == "4" {
 		driver = "shellipc"
 	}
 	status := RouteStatus{
-		Route:       h.route,
-		Connected:   h.connected,
-		LiveID:      h.liveID,
+		Route:       route,
+		Connected:   connected,
+		LiveID:      liveID,
 		Driver:      driver,
 		Health:      "ok",
-		ForceSystem: h.forceMode,
+		ForceSystem: force,
 	}
 	return Envelope{
 		"op":           OpStatus,
@@ -489,6 +632,7 @@ func (h *hub) statusEnvelope() Envelope {
 		"driver":       status.Driver,
 		"health":       status.Health,
 		"force_system": status.ForceSystem,
+		"session":      gen,
 		"status":       status,
 	}
 }
@@ -496,15 +640,18 @@ func (h *hub) statusEnvelope() Envelope {
 func (h *hub) afterMessage(m listener.Msg) {
 	t, _ := m["type"].(string)
 	if t == "control" && listener.ControlEnded(m["status"]) {
-		if h.route == "3" {
+		route, _, connected, _, _ := h.snapshotSession()
+		if route == "3" {
 			h.log.Info("live ended", "via", "control", "route", "3")
 			return
 		}
-		if h.connected {
-			h.connected = false
-			h.send(h.statusEnvelope())
+		if connected {
+			h.disarmCapture()
+			env := h.statusEnvelope()
+			env["msg"] = "直播已断开"
+			h.send(env)
 			h.log.Info("live ended", "via", "control")
-			h.stopCapture()
+			go h.stopCapture()
 		}
 		return
 	}
@@ -530,11 +677,17 @@ func (h *hub) afterMessage(m listener.Msg) {
 			h.overtime.HandleGift(user, uid, gift, count)
 		}
 		if h.leaf.Active() {
+			h.hydrateLeafSettings()
+			h.log.Info("leaf gift", "gift", gift, "gift_count", count, "user", user)
 			h.leaf.HandleGift(user, uid, gift, count)
 		}
 	}
 	if h.danmu.Active() {
 		if show := h.danmu.Accept(m, diamonds); show != nil {
+			if t == "gift" {
+				h.log.Info("danmu show", "kind", "gift", "gift", show["gift"],
+					"count", show["count"], "user", show["user"])
+			}
 			h.send(Envelope(show))
 		}
 	}

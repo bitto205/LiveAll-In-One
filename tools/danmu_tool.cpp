@@ -173,21 +173,63 @@ public:
 
     void relayout() {
         const auto m = skin_.metrics();
-        const auto userSt = skin_.roleStyle(QStringLiteral("bubble"), QStringLiteral("user"));
-        const auto bodySt = skin_.roleStyle(
-            kind_ == QLatin1String("gift") ? QStringLiteral("gift_bubble") : QStringLiteral("bubble"),
-            QStringLiteral("body"));
-        const int maxChars = std::max(4, bodySt.maxChars);
-        const int minChars = std::max(1, bodySt.minChars);
-        const int chars = std::clamp(static_cast<int>(text_.size()), minChars, maxChars);
+        const QString surface = kind_ == QLatin1String("gift") ? QStringLiteral("gift_bubble")
+                                                              : QStringLiteral("bubble");
+        const auto userSt = skin_.roleStyle(surface, QStringLiteral("user"));
+        const auto bodySt = skin_.roleStyle(surface, QStringLiteral("body"));
         QFontMetrics ufm(userSt.font());
         QFontMetrics bfm(bodySt.font());
-        const int textW = std::max(ufm.horizontalAdvance(user_),
-                                   bfm.horizontalAdvance(QString(chars, QChar(0x4E2D))))
-                          + bodySt.slackPx;
-        const int contentW = textW + (giftPm_.isNull() ? 0 : (giftW_ + m.giftIconGap));
-        int innerW = contentW + m.padH * 2 + m.fadeW;
-        int innerH = std::max(bfm.height() + ufm.height() + 4, giftH_) + m.padV * 2;
+
+        const int maxChars = std::max(4, bodySt.maxChars);
+        const int minChars = std::max(1, bodySt.minChars);
+        const int refChars = std::clamp(static_cast<int>(text_.size()), minChars, maxChars);
+        // Wrap column: skin max_chars；不换行时按实际字宽，但仍封顶 max_chars 避免顶穿窗钮。
+        textColW_ = bfm.horizontalAdvance(QString(maxChars, QChar(0x4E2D))) + bodySt.slackPx;
+        bodyWordWrap_ = bodySt.wordWrap;
+        if (!bodyWordWrap_) {
+            textColW_ = std::min(
+                textColW_,
+                std::max(ufm.horizontalAdvance(user_),
+                         bfm.horizontalAdvance(QString(refChars, QChar(0x4E2D))))
+                    + bodySt.slackPx);
+        }
+        textColW_ = std::max(textColW_, ufm.horizontalAdvance(user_.left(12)) + bodySt.slackPx);
+
+        int bodyH = bfm.height();
+        if (bodyWordWrap_ && !text_.isEmpty()) {
+            const QRect br = bfm.boundingRect(QRect(0, 0, textColW_, 10000),
+                                             Qt::AlignLeft | Qt::AlignTop | Qt::TextWordWrap,
+                                             text_);
+            bodyH = std::max(bfm.height(), br.height());
+        }
+        const int userH = ufm.height();
+        const int textBlockH = userH + 2 + bodyH;
+        const int giftCol = giftPm_.isNull() ? 0 : (giftW_ + m.giftIconGap);
+
+        textPadL_ = m.padH;
+        int rightReserve = m.padH;
+        int busyIntrude = 0;
+        int winTotalW = 0;
+        int cornerHalf = 0;
+
+        if (skin_.usesPixelChrome()) {
+            ensureChromeMedia();
+            const auto ch = skin_.chromeMeta();
+            const auto deco = ch.value(QStringLiteral("deco")).toObject();
+            const int busyOverX =
+                std::max(1, int(std::lround(deco.value(QStringLiteral("busy_over_x")).toDouble(10))));
+            const int winGap = deco.value(QStringLiteral("win_gap")).toInt(2);
+            const int busyW = std::max(1, busyAnim_.logicalW);
+            busyIntrude = std::max(0, busyW - busyOverX);
+            textPadL_ = std::max(m.padH, busyIntrude + 4);
+            winTotalW = winMin_.logicalW + winMax_.logicalW + winClose_.logicalW + winGap * 2;
+            cornerHalf = std::max(1, cornerAnim_.logicalW / 2);
+            // 窗钮叠在内容区右上角，正文/ID 必须让开，否则会被 Win* 图挡住。
+            rightReserve = std::max(m.padH, winTotalW + 4);
+        }
+
+        int innerW = textPadL_ + giftCol + textColW_ + rightReserve + m.fadeW;
+        int innerH = std::max(textBlockH, giftH_) + m.padV * 2;
 
         if (!skin_.usesPixelChrome()) {
             stopChromeAnim();
@@ -197,13 +239,13 @@ public:
             return;
         }
 
-        ensureChromeMedia();
         const auto ch = skin_.chromeMeta();
         const auto deco = ch.value(QStringLiteral("deco")).toObject();
         const int outW = std::max(0, ch.value(QStringLiteral("out_w")).toInt(2));
         const int depth = std::max(0, ch.value(QStringLiteral("depth")).toInt(2));
         const int edge = outW + 2;
-        const int busyOverX = std::max(1, int(std::lround(deco.value(QStringLiteral("busy_over_x")).toDouble(10))));
+        const int busyOverX =
+            std::max(1, int(std::lround(deco.value(QStringLiteral("busy_over_x")).toDouble(10))));
         const int logoOverY = deco.value(QStringLiteral("logo_over_y")).toInt(2);
         const int winGap = deco.value(QStringLiteral("win_gap")).toInt(2);
         const int busyW = std::max(1, busyAnim_.logicalW);
@@ -213,12 +255,11 @@ public:
         const int cornerW = std::max(1, cornerAnim_.logicalW);
         const int cornerH = std::max(1, cornerAnim_.logicalH);
         const int winH = std::max({winMin_.logicalH, winMax_.logicalH, winClose_.logicalH, 18});
-        const int winTotalW = winMin_.logicalW + winMax_.logicalW + winClose_.logicalW
-            + winGap * 2;
+        winTotalW = winMin_.logicalW + winMax_.logicalW + winClose_.logicalW + winGap * 2;
         innerW = std::max(innerW, busyW + logoW + winTotalW);
         const int topPad = std::max({edge, logoH - logoOverY, winH});
         const int leftExtra = std::max(edge, busyOverX);
-        const int rightExtra = std::max(cornerW / 2, outW + depth);
+        const int rightExtra = std::max(cornerHalf > 0 ? cornerHalf : cornerW / 2, outW + depth);
         const int botExtra = std::max(cornerH / 2, outW + depth);
         const int totalW = leftExtra + innerW + rightExtra;
         const int totalH = topPad + innerH + botExtra;
@@ -278,24 +319,35 @@ protected:
             contentRect_ = rect();
         }
 
-        int x = contentRect_.x() + m.padH + m.fadeW / 2;
+        const QString surface = kind_ == QLatin1String("gift") ? QStringLiteral("gift_bubble")
+                                                              : QStringLiteral("bubble");
+        const auto userSt = skin_.roleStyle(surface, QStringLiteral("user"));
+        const auto bodySt = skin_.roleStyle(surface, QStringLiteral("body"));
+        QFontMetrics ufm(userSt.font());
+        QFontMetrics bfm(bodySt.font());
+
+        int x = contentRect_.x() + textPadL_ + m.fadeW / 2;
         int y = contentRect_.y() + m.padV;
         if (!giftPm_.isNull()) {
             p.drawPixmap(QRect(x, y + (contentRect_.height() - m.padV * 2 - giftH_) / 2,
                                giftW_, giftH_), giftPm_);
             x += giftW_ + m.giftIconGap;
         }
-        const auto userSt = skin_.roleStyle(QStringLiteral("bubble"), QStringLiteral("user"));
-        const auto bodySt = skin_.roleStyle(
-            kind_ == QLatin1String("gift") ? QStringLiteral("gift_bubble") : QStringLiteral("bubble"),
-            QStringLiteral("body"));
+        const int colW = std::max(1, textColW_);
+        const QString userDraw = ufm.elidedText(user_, Qt::ElideRight, colW);
         p.setFont(userSt.font());
         p.setPen(skin_.color(QStringLiteral("user"), QColor(255, 255, 255, 200)));
-        p.drawText(x, y + QFontMetrics(userSt.font()).ascent(), user_);
-        y += QFontMetrics(userSt.font()).height() + 2;
+        p.drawText(x, y + ufm.ascent(), userDraw);
+        y += ufm.height() + 2;
         p.setFont(bodySt.font());
         p.setPen(skin_.color(QStringLiteral("body"), QColor(255, 255, 255)));
-        p.drawText(x, y + QFontMetrics(bodySt.font()).ascent(), text_);
+        if (bodyWordWrap_) {
+            int flags = Qt::AlignLeft | Qt::AlignTop | Qt::TextWordWrap;
+            const QRect br = bfm.boundingRect(QRect(0, 0, colW, 10000), flags, text_);
+            p.drawText(QRect(x, y, colW, std::max(bfm.height(), br.height())), flags, text_);
+        } else {
+            p.drawText(x, y + bfm.ascent(), bfm.elidedText(text_, Qt::ElideRight, colW));
+        }
     }
 
     void ensureChromeMedia() {
@@ -466,6 +518,9 @@ protected:
     QRect contentRect_;
     QRect busyRect_, logoRect_, cornerRect_;
     QRect winRects_[3];
+    int textColW_ = 120;
+    int textPadL_ = 12;
+    bool bodyWordWrap_ = false;
     liveaio::resources::LoadedAnim busyAnim_;
     liveaio::resources::LoadedAnim cornerAnim_;
     liveaio::resources::LoadedStill logoStill_, winMin_, winMax_, winClose_;
@@ -513,9 +568,30 @@ public:
     }
 
     void unmount() {
-        clearAllBubbles();
-        drainBubblePool();
-        liveaio::resources::releaseGiftPixmapCaches();
+        // Immediate delete while still parented. setParent(nullptr)+deleteLater on
+        // translucent bubbles turns them into top-level HWNDs mid-paint and has
+        // AV'd Pages (0xc0000005) when closing the overlay during live gifts.
+        pending_.clear();
+        const auto alive = bubbles_;
+        bubbles_.clear();
+        for (auto* b : alive) {
+            if (!b) continue;
+            b->prepareForPool();
+            b->hide();
+            delete b;
+        }
+        for (auto* b : pool_) {
+            if (!b) continue;
+            b->prepareForPool();
+            b->hide();
+            delete b;
+        }
+        pool_.clear();
+        if (poolHost_) {
+            delete poolHost_;
+            poolHost_ = nullptr;
+        }
+        // Do not releaseGiftPixmapCaches here — leaf/overtime may still hold icons.
         root_ = nullptr;
     }
 
@@ -546,13 +622,6 @@ public:
         for (const auto& msg : pending) addMessage(msg.kind, msg.user, msg.text, msg.gift);
     }
 
-    void clearAllBubbles() {
-        pending_.clear();
-        const auto alive = bubbles_;
-        bubbles_.clear();
-        for (auto* b : alive) releaseBubble(b);
-    }
-
 private:
     struct PendingMsg {
         QString kind;
@@ -560,6 +629,15 @@ private:
         QString text;
         QString gift;
     };
+
+    QWidget* bubblePoolHost() {
+        if (!poolHost_) {
+            poolHost_ = new QWidget(nullptr);
+            poolHost_->setAttribute(Qt::WA_DontShowOnScreen, true);
+            poolHost_->hide();
+        }
+        return poolHost_;
+    }
 
     DanmuBubble* acquireBubble(const QString& kind, const QString& user, const QString& text,
                                const QString& gift) {
@@ -581,17 +659,11 @@ private:
         if (!bubble) return;
         bubble->prepareForPool();
         bubble->hide();
-        bubble->setParent(nullptr);
+        // Keep parented under a hidden holder — never nullptr (top-level translucent AV).
+        bubble->setParent(bubblePoolHost());
         bubbles_.removeAll(bubble);
         if (pool_.size() < kPoolCap) pool_.append(bubble);
-        else bubble->deleteLater();
-    }
-
-    void drainBubblePool() {
-        for (auto* b : pool_) {
-            if (b) b->deleteLater();
-        }
-        pool_.clear();
+        else delete bubble;
     }
 
     void onFrameResumed() {
@@ -611,19 +683,18 @@ private:
     }
 
     void placeBubble(DanmuBubble* bubble) {
-        if (!root_) return;
+        if (!root_ || !bubble) return;
         QWidget* area = root_->content();
+        if (!area) return;
         const int m = bubbleMargin();
-        const int bw = bubble->width();
-        const int bh = bubble->height();
+        const int bw = std::max(1, bubble->width());
+        const int bh = std::max(1, bubble->height());
+        // Allow oversized gift/chrome bubbles: clamp into the viewport instead of
+        // silently discarding (that looked like "gifts stopped showing").
         const int xMin = m;
         const int yMin = m;
-        const int xMax = area->width() - m - bw;
-        const int yMax = area->height() - m - bh;
-        if (xMax < xMin || yMax < yMin) {
-            releaseBubble(bubble);
-            return;
-        }
+        const int xMax = std::max(xMin, area->width() - m - bw);
+        const int yMax = std::max(yMin, area->height() - m - bh);
 
         QVector<QPoint> candidates;
         const int step = 20;
@@ -645,6 +716,12 @@ private:
             if (b && b->isVisible()) occupied.append(b->geometry());
         }
 
+        auto commit = [&](const QPoint& pos) {
+            bubble->move(pos);
+            bubbles_.append(bubble);
+            bubble->show();
+        };
+
         for (const QPoint& pos : candidates) {
             const QRect candidate(pos.x(), pos.y(), bw, bh);
             bool overlaps = false;
@@ -655,18 +732,21 @@ private:
                 }
             }
             if (overlaps) continue;
-            bubble->move(pos);
-            bubbles_.append(bubble);
-            bubble->show();
+            commit(pos);
             return;
         }
-        releaseBubble(bubble);
+        // Prefer showing with overlap over dropping gift/chat bubbles.
+        const QPoint fallback(
+            xMin + (xMax > xMin ? QRandomGenerator::global()->bounded(xMax - xMin + 1) : 0),
+            yMin + (yMax > yMin ? QRandomGenerator::global()->bounded(yMax - yMin + 1) : 0));
+        commit(fallback);
     }
 
     DanmuRoot* root_ = nullptr;
     ToolSkin skin_;
     QVector<DanmuBubble*> bubbles_;
     QVector<DanmuBubble*> pool_;
+    QWidget* poolHost_ = nullptr;
     QVector<PendingMsg> pending_;
 };
 
@@ -705,6 +785,8 @@ public:
             host.teardown(OverlayToolId::Danmu);
             return;
         }
+        // Same as leaf: every open path must arm Core danmu.Active + push filters.
+        publishToolDemand(QStringLiteral("danmu"), true);
         pushSavedDanmuSettings();
         if (!overlayCtrl_) overlayCtrl_ = new DanmuOverlayController(this);
         overlayCtrl_->show([this, onClosed]() {

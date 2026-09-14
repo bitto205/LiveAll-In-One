@@ -28,9 +28,7 @@ func (h *hub) handleUICommand(c *Conn, env Envelope) {
 		if route == "" {
 			route, _ = env["route"].(string)
 		}
-		st := h.queryRouteEnv(route)
-		st["op"] = OpRouteEnv
-		_ = c.Send(Envelope(st))
+		_ = c.Send(Envelope(h.queryRouteEnv(route)))
 
 	case "route4.set_companion_path":
 		pathStr, _ := payload["path"].(string)
@@ -45,21 +43,22 @@ func (h *hub) handleUICommand(c *Conn, env Envelope) {
 			"op": OpRouteEnv, "route": "4", "ok": ok, "message": msg,
 			"action": action,
 		})
-		if ok {
-			_ = c.Send(Envelope(h.queryRouteEnv("3")))
-			_ = c.Send(Envelope(h.queryRouteEnv("4")))
-		}
+		// Always refresh env so the Patch button leaves "…中" and reflects reality.
+		_ = c.Send(Envelope(h.queryRouteEnv("3")))
+		_ = c.Send(Envelope(h.queryRouteEnv("4")))
 
 	case "route4.patch", "route4.unpatch", "route3.unpatch":
-		ok, msg := h.runListenerAction(action)
-		_ = c.Send(Envelope{
-			"op": OpRouteEnv, "route": routeOrFromAction(action),
-			"ok": ok, "message": msg, "action": action,
-		})
-		if ok {
-			_ = c.Send(Envelope(h.queryRouteEnv("3")))
-			_ = c.Send(Envelope(h.queryRouteEnv("4")))
-		}
+		// Patch/unpatch can take seconds; keep Pages IPC free for connect/disconnect.
+		go func(action, route string) {
+			ok, msg := h.runListenerAction(action)
+			h.send(Envelope{
+				"op": OpRouteEnv, "route": routeOrFromAction(action),
+				"ok": ok, "message": msg, "action": action,
+			})
+			h.send(Envelope(h.queryRouteEnv("3")))
+			h.send(Envelope(h.queryRouteEnv("4")))
+			_ = route
+		}(action, route)
 
 	case "ui.show":
 		h.requestShowUI()
@@ -115,16 +114,22 @@ func (h *hub) runLoginThenNotify() {
 }
 
 func (h *hub) queryRouteEnv(route string) map[string]any {
-	out := DefaultRouteEnv(route)
-	out["op"] = OpRouteEnv
+	var out map[string]any
 	switch route {
 	case "3":
-		return listener.PageCheckRoute3(h.root)
+		out = listener.PageCheckRoute3(h.root)
 	case "4":
-		return listener.PageCheckRoute4(h.root)
+		out = listener.PageCheckRoute4(h.root)
 	default:
-		return out
+		out = DefaultRouteEnv(route)
 	}
+	if out == nil {
+		out = map[string]any{}
+	}
+	// PageCheck* maps omit op; without it Pages ignore the packet.
+	out["op"] = OpRouteEnv
+	out["route"] = route
+	return out
 }
 
 func (h *hub) runListenerAction(action string) (bool, string) {

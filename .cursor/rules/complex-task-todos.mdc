@@ -1,0 +1,15 @@
+---
+description: 公约 — load deliberate-execution skill; think/read/todo before edits
+alwaysApply: true
+---
+
+# 公约：深思熟虑执行
+
+本仓库复杂任务必须遵守 **deliberate-execution** skill。
+
+1. 动手改代码前，先 **Read** 技能文件：
+   `.cursor/skills/deliberate-execution/SKILL.md`
+2. 流程固定：`Think → Read → Plan/Todo → Change → Verify → Report`
+3. 非琐碎任务用 `TodoWrite`；改完必须验证（编译/命令/路径），不能凭感觉收工。
+
+琐碎单行修改可跳过正式 todo；拿不准时按复杂任务处理。

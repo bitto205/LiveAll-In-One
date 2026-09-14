@@ -186,13 +186,6 @@ static int totalSeconds(int h, int m, int s) {
     return std::clamp(h, 0, 999) * 3600 + std::clamp(m, 0, 60) * 60 + std::clamp(s, 0, 60);
 }
 
-static int unitToSeconds(int value, const QString& unit) {
-    const int v = std::clamp(value, 0, 999);
-    if (unit == QStringLiteral("时")) return v * 3600;
-    if (unit == QStringLiteral("分")) return v * 60;
-    return v;
-}
-
 static QString formatTimerDisplay(int totalSec) {
     const int total = std::max(0, totalSec);
     const int h = total / 3600;
@@ -1914,7 +1907,7 @@ public:
         ledger_.setOnChanged(nullptr);
         ledger_.clear();
         if (root_) root_->block()->releaseHeavyResources();
-        liveaio::resources::releaseGiftPixmapCaches();
+        // Do not releaseGiftPixmapCaches here — other overlays may still hold icons.
         root_ = nullptr;
         settings_ = Settings{};
         remaining_ = 0;

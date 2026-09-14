@@ -28,6 +28,9 @@
 #include <QPushButton>
 #include <QRadialGradient>
 #include <QScreen>
+#include <QTextStream>
+#include <QEventLoop>
+#include <QThread>
 #include <QScrollArea>
 #include <QScrollBar>
 #include <QSizePolicy>
@@ -35,6 +38,7 @@
 #include <QStackedWidget>
 #include <QTcpSocket>
 #include <QTimer>
+#include <QElapsedTimer>
 #include <QVBoxLayout>
 #include <QWidget>
 
@@ -66,27 +70,6 @@ static QString g_appRoot;
 static std::function<void(const QJsonObject&)> g_sendPacket;
 static QVariantMap g_configCache;
 static bool g_configCacheLoaded = false;
-
-struct ToolMeta {
-    QString id;
-    QString title;
-    QString desc;
-    QString icon;
-};
-
-static const QList<ToolMeta>& toolCatalog() {
-    static const QList<ToolMeta> catalog = {
-        {QStringLiteral("memo"), QStringLiteral("备忘录"),
-         QStringLiteral("将礼物、关注、点赞记录为可消除的列表条目"), QStringLiteral("📋")},
-        {QStringLiteral("danmu"), QStringLiteral("弹幕机"),
-         QStringLiteral("透明悬浮弹幕显示窗口"), QStringLiteral("💬")},
-        {QStringLiteral("overtime"), QStringLiteral("加班机"),
-         QStringLiteral("透明悬浮加班显示窗口"), QStringLiteral("⏱")},
-        {QStringLiteral("leaf"), QStringLiteral("捡叶子"),
-         QStringLiteral("送礼堆叶子，拖到垃圾桶消除"), QStringLiteral("🍃")},
-    };
-    return catalog;
-}
 
 static QVariantMap readConfigMap() {
     QFile file(QDir(g_appRoot).filePath(QStringLiteral("config.json")));
@@ -147,7 +130,18 @@ public:
             connected_ = false;
             ready_ = false;
             if (statusCallback_) statusCallback_(false);
+            QTimer::singleShot(800, this, [this]() {
+                if (socket_->state() != QAbstractSocket::UnconnectedState) return;
+                socket_->connectToHost(QString::fromLatin1(kCoreHost), kCorePort);
+            });
         });
+        pingTimer_ = new QTimer(this);
+        pingTimer_->setInterval(20000);
+        QObject::connect(pingTimer_, &QTimer::timeout, this, [this]() {
+            if (!ready_ || socket_->state() != QAbstractSocket::ConnectedState) return;
+            queueOrSend(QJsonObject{{QStringLiteral("op"), QStringLiteral("ping")}});
+        });
+        pingTimer_->start();
     }
 
     void connectToCore() { socket_->connectToHost(QString::fromLatin1(kCoreHost), kCorePort); }
@@ -160,12 +154,19 @@ public:
 private:
     void queueOrSend(const QJsonObject& packet) {
         const QString op = packet.value(QStringLiteral("op")).toString();
+        const bool queueable = op == QStringLiteral("config.set")
+            || op.startsWith(QStringLiteral("tool."));
         if (op == QStringLiteral("config.set") && !ready_) {
             pendingSets_.append(packet);
             return;
         }
         if (socket_->state() != QAbstractSocket::ConnectedState) {
-            if (op == QStringLiteral("config.set")) pendingSets_.append(packet);
+            if (queueable) pendingSets_.append(packet);
+            return;
+        }
+        if (!ready_ && queueable && op != QStringLiteral("config.set")) {
+            // Defer tool.* until after ready handshake so Core has accepted the client.
+            pendingSets_.append(packet);
             return;
         }
         QByteArray out = QJsonDocument(packet).toJson(QJsonDocument::Compact);
@@ -229,6 +230,7 @@ private:
     }
 
     QTcpSocket* socket_;
+    QTimer* pingTimer_ = nullptr;
     QByteArray buffer_;
     QVector<QJsonObject> pendingSets_;
     bool connected_ = false;
@@ -1571,8 +1573,13 @@ public:
         : QMainWindow(nullptr, Qt::FramelessWindowHint | Qt::Window), geoKey_(geoKey) {
         setAttribute(Qt::WA_TranslucentBackground);
         setAttribute(Qt::WA_QuitOnClose, false);
+        // 独立 HWND / 后备缓冲：减少与设置页、主页面同树脏区批处理互相拖累。
+        setAttribute(Qt::WA_NativeWindow, true);
+        setAttribute(Qt::WA_DontCreateNativeAncestors, true);
         liveaio::util::enableCaptureTransparency(this);
         setWindowTitle(title);
+        // 尽早实例化原生窗口，避免和别的 Qt 窗一起延迟合成。
+        winId();
         setStyleSheet(liveaio::util::popupChromeQss());
         liveaio::util::onThemeChange(this, [this](const QString&) {
             setStyleSheet(liveaio::util::popupChromeQss());
@@ -1910,9 +1917,12 @@ public:
         return *host;
     }
 
+    // Mounted content counts as active even if the shell is temporarily hidden
+    // (minimize / detach mid-teardown). Requiring isVisible() made reopen race
+    // past teardown and let closedCb tryRelease delete the runtime under show().
     bool isToolActive(OverlayToolId id) const {
         const Slot* s = slot(id);
-        return s && s->shell && s->shell->isVisible() && s->shell->hasMountedContent();
+        return s && s->shell && s->shell->hasMountedContent();
     }
 
     // 预备壳（不 show）：进设置页 ensure 时调用，不提前挂 Root / 不渲染。
@@ -1945,6 +1955,7 @@ public:
         root->setOnClose([this, tool]() { teardown(tool); });
         s->shell->show();
         s->shell->activateWindow();
+        refreshOverlayCpuBudget();
         QPointer<SharedOverlayShell> guard(s->shell);
         QTimer::singleShot(0, s->shell, [guard]() {
             if (guard) guard->afterShowContent();
@@ -1957,6 +1968,7 @@ public:
         std::function<void()> cb = done ? done : s->closedCb;
         s->closedCb = nullptr;
         detachContent(*s, cb);
+        refreshOverlayCpuBudget();
     }
 
     bool command(OverlayToolId tool, const QString& action) {
@@ -2012,11 +2024,19 @@ private:
     // 活跃实例立即注销；轻量壳留在单例宿主池中供再次打开复用。
     // 每个可见顶层窗口仍需要独立原生表面，内容与共享资源不重复常驻。
     void detachContent(Slot& s, std::function<void()> notify) {
-        if (s.shell) s.shell->hide();
+        if (s.shell) {
+            s.shell->setOnClosed(nullptr);
+            s.shell->hide();
+        }
         RippleOverlayRoot* root = s.shell ? s.shell->takeRoot() : nullptr;
         if (root) root->setOnClose(nullptr);
+        // closedCb must run before deferred root delete so controllers can stop
+        // timers / delete translucent children while still parented.
         if (notify) notify();
-        if (root) s.destroyer.enqueue(root);
+        if (root) {
+            root->hide();
+            s.destroyer.enqueue(root);
+        }
     }
 
     void ensureShell(OverlayToolId tool, Slot& s) {
@@ -2026,6 +2046,15 @@ private:
         else if (tool == OverlayToolId::Overtime) key = QStringLiteral("overtime_window_geometry");
         else if (tool == OverlayToolId::Leaf) key = QStringLiteral("leaf_window_geometry");
         s.shell = new SharedOverlayShell(key);
+    }
+
+    // 悬浮窗开关不再抬进程优先级，避免峰值 CPU 被调度抬高。
+    void refreshOverlayCpuBudget() {
+#ifdef Q_OS_WIN
+        SetPriorityClass(GetCurrentProcess(), NORMAL_PRIORITY_CLASS);
+#else
+        (void)0;
+#endif
     }
 
     Slot danmu_;
