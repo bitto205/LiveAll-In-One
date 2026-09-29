@@ -203,10 +203,6 @@ func launchBrowser(parent context.Context, opt BrowserOptions) (*BrowserSession,
 		)
 	} else {
 		opts = append(opts, chromedp.WindowSize(1920, 1080))
-		if !opt.Headless {
-			// Headed window stays blank white on VMs / RDP / broken GPU drivers.
-			opts = append(opts, chromedp.Flag("disable-gpu", true))
-		}
 	}
 
 	job, jobErr := newChromeJob()
@@ -216,7 +212,7 @@ func launchBrowser(parent context.Context, opt BrowserOptions) (*BrowserSession,
 	var earlyPID int32
 	opts = append(opts, chromedp.ModifyCmdFunc(func(cmd *exec.Cmd) {
 		// Register as LiveAIO child process (no detach) + Job Object membership.
-		bindChromeChildCmd(cmd, exe)
+		bindChromeChildCmd(cmd, exe, opt.Headless)
 		if job == nil {
 			return
 		}

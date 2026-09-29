@@ -322,14 +322,15 @@ func ensureCmdPath(cmd *exec.Cmd, fallback string) {
 }
 
 // bindChromeChildCmd marks the process as a normal LiveAIO child (no detach /
-// new process group) and hides the console window.
-func bindChromeChildCmd(cmd *exec.Cmd, exe string) {
+// new process group). hide must be false for headed windows: Chrome 154 keeps a
+// window started with SW_HIDE blank white even after it is shown.
+func bindChromeChildCmd(cmd *exec.Cmd, exe string, hide bool) {
 	if cmd == nil {
 		return
 	}
 	ensureCmdPath(cmd, exe)
 	cmd.SysProcAttr = &syscall.SysProcAttr{
-		HideWindow:    true,
+		HideWindow:    hide,
 		CreationFlags: 0, // stay in LiveAIO process tree; do not CREATE_NEW_PROCESS_GROUP
 	}
 }
