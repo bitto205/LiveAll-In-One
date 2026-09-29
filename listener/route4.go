@@ -3,7 +3,9 @@ package listener
 import (
 	"bufio"
 	"context"
+	"crypto/rand"
 	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -160,26 +162,58 @@ type Shell struct {
 	stopCh chan struct{}
 }
 
-func tokenPath() string {
-	home, _ := os.UserHomeDir()
-	for _, dir := range []string{
-		filepath.Join(home, ".liveaio"),
-		filepath.Join(home, ".livehelper"),
-	} {
-		p := filepath.Join(dir, "ipc_token")
-		if _, err := os.Stat(p); err == nil {
-			return p
-		}
-	}
-	return filepath.Join(home, ".liveaio", "ipc_token")
-}
-
-func ReadToken() (string, error) {
-	b, err := os.ReadFile(tokenPath())
+// tokenDir must match proxy_shell's aioDir(): it validates against this file.
+func tokenDir() (string, error) {
+	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", err
 	}
-	return strings.TrimSpace(string(b)), nil
+	aio := filepath.Join(home, ".liveaio")
+	if _, err := os.Stat(aio); err == nil {
+		return aio, nil
+	}
+	legacy := filepath.Join(home, ".livehelper")
+	if _, err := os.Stat(legacy); err == nil {
+		return legacy, nil
+	}
+	if err := os.MkdirAll(aio, 0o755); err != nil {
+		return "", err
+	}
+	return aio, nil
+}
+
+var tokenMu sync.Mutex
+
+// ReadToken returns the proxy_shell IPC token, creating it on first use.
+func ReadToken() (string, error) {
+	tokenMu.Lock()
+	defer tokenMu.Unlock()
+	dir, err := tokenDir()
+	if err != nil {
+		return "", err
+	}
+	p := filepath.Join(dir, "ipc_token")
+	if b, err := os.ReadFile(p); err == nil {
+		if tok := strings.TrimSpace(string(b)); tok != "" {
+			return tok, nil
+		}
+	} else if !os.IsNotExist(err) {
+		return "", err
+	}
+	var raw [24]byte
+	if _, err := rand.Read(raw[:]); err != nil {
+		return "", err
+	}
+	tok := hex.EncodeToString(raw[:])
+	tmp := p + ".tmp"
+	if err := os.WriteFile(tmp, []byte(tok+"\n"), 0o600); err != nil {
+		return "", err
+	}
+	if err := os.Rename(tmp, p); err != nil {
+		_ = os.Remove(tmp)
+		return "", err
+	}
+	return tok, nil
 }
 
 func (c *Shell) addr() string {

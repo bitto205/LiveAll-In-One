@@ -203,6 +203,10 @@ func launchBrowser(parent context.Context, opt BrowserOptions) (*BrowserSession,
 		)
 	} else {
 		opts = append(opts, chromedp.WindowSize(1920, 1080))
+		if !opt.Headless {
+			// Headed window stays blank white on VMs / RDP / broken GPU drivers.
+			opts = append(opts, chromedp.Flag("disable-gpu", true))
+		}
 	}
 
 	job, jobErr := newChromeJob()
