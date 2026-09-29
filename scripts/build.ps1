@@ -303,17 +303,32 @@ function Invoke-CmakeBuild([string]$OutDir, [string]$QtRoot) {
         "-DCMAKE_PREFIX_PATH=$QtRoot",
         "-DCMAKE_EXPORT_COMPILE_COMMANDS:BOOL=ON"
     )
-    if ($gcc) { $cmakeArgs += "-DCMAKE_C_COMPILER=$($gcc.Source)" }
-    if ($gxx) { $cmakeArgs += "-DCMAKE_CXX_COMPILER=$($gxx.Source)" }
-    & $cmake @cmakeArgs
-    if ($LASTEXITCODE -ne 0) {
+    # Forward slashes must match .vscode CMake Tools (shared build dir), or CMake wipes the cache.
+    if ($gcc) { $cmakeArgs += "-DCMAKE_C_COMPILER=$($gcc.Source -replace '\\', '/')" }
+    if ($gxx) { $cmakeArgs += "-DCMAKE_CXX_COMPILER=$($gxx.Source -replace '\\', '/')" }
+    # CMake warnings go to stderr; under outer 2>&1 / *> with EAP=Stop they abort the script.
+    $prevEap = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try {
+        & $cmake @cmakeArgs
+        $cfgExit = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $prevEap
+    }
+    if ($cfgExit -ne 0) {
         Fail "cmake configure failed"
         return
     }
 
     Stop-LiveAioLockers
-    & $cmake --build $cmakeBuildDir --config Release
-    if ($LASTEXITCODE -ne 0) {
+    $ErrorActionPreference = "Continue"
+    try {
+        & $cmake --build $cmakeBuildDir --config Release
+        $buildExit = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $prevEap
+    }
+    if ($buildExit -ne 0) {
         $lockHint = ""
         $holders = Get-Process -ErrorAction SilentlyContinue | Where-Object {
             ($_.ProcessName -eq "LiveAIO") -or ($_.ProcessName -like "LiveAIO*")
@@ -475,6 +490,23 @@ function Ensure-Upx {
     }
 }
 
+function Test-UpxPacked([string]$Path) {
+    # UPX payload marker near PE overlay; cheap skip before invoking upx.exe.
+    try {
+        $fs = [System.IO.File]::Open($Path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+        try {
+            $len = [int][Math]::Min($fs.Length, 512 * 1024)
+            if ($len -lt 64) { return $false }
+            $buf = New-Object byte[] $len
+            [void]$fs.Read($buf, 0, $len)
+            $ascii = [System.Text.Encoding]::ASCII.GetString($buf)
+            return ($ascii -match 'UPX!')
+        } finally { $fs.Close() }
+    } catch {
+        return $false
+    }
+}
+
 function Invoke-UpxCompress([string]$Dir) {
     $upx = Ensure-Upx
     if (-not $upx) { return }
@@ -488,28 +520,48 @@ function Invoke-UpxCompress([string]$Dir) {
     $ok = 0
     $skip = 0
     $fail = 0
-    foreach ($name in $targets) {
-        $path = Join-Path $Dir $name
-        if (-not (Test-Path $path)) {
-            Write-Warn "UPX skip missing $name"
-            $skip++
-            continue
-        }
-        Write-Step "UPX $name"
-        $p = Start-Process -FilePath $upx -ArgumentList @("--best", "--compress-icons=0", "-q", $path) `
-            -Wait -PassThru -NoNewWindow
-        switch ($p.ExitCode) {
-            0 { $ok++ }
-            2 {
-                # already packed / nothing to do
+    $tmpRoot = Join-Path $env:TEMP ("liveaio-upx-" + [guid]::NewGuid().ToString("n"))
+    New-Item -ItemType Directory -Force -Path $tmpRoot | Out-Null
+    try {
+        foreach ($name in $targets) {
+            $path = Join-Path $Dir $name
+            if (-not (Test-Path $path)) {
+                Write-Warn "UPX skip missing $name"
+                $skip++
+                continue
+            }
+            if (Test-UpxPacked $path) {
                 Write-Step "UPX skip (already packed): $name"
                 $skip++
+                continue
             }
-            default {
-                Write-Warn "UPX failed $name exit $($p.ExitCode)"
-                $fail++
+            Write-Step "UPX $name"
+            # Redirect stdio: UPX writes "already packed" to stderr; under $ErrorActionPreference=Stop
+            # + outer 2>&1 that becomes a terminating NativeCommandError.
+            $stdout = Join-Path $tmpRoot "$name.out"
+            $stderr = Join-Path $tmpRoot "$name.err"
+            $p = Start-Process -FilePath $upx -ArgumentList @("--best", "--compress-icons=0", "-q", $path) `
+                -Wait -PassThru -NoNewWindow `
+                -RedirectStandardOutput $stdout -RedirectStandardError $stderr
+            switch ($p.ExitCode) {
+                0 { $ok++ }
+                2 {
+                    Write-Step "UPX skip (already packed): $name"
+                    $skip++
+                }
+                default {
+                    $detail = ""
+                    if (Test-Path $stderr) {
+                        $detail = ((Get-Content -LiteralPath $stderr -ErrorAction SilentlyContinue) -join " ").Trim()
+                    }
+                    if ($detail) { Write-Warn "UPX failed $name exit $($p.ExitCode): $detail" }
+                    else { Write-Warn "UPX failed $name exit $($p.ExitCode)" }
+                    $fail++
+                }
             }
         }
+    } finally {
+        Remove-Item -LiteralPath $tmpRoot -Recurse -Force -ErrorAction SilentlyContinue
     }
     Write-Step "UPX done: ok=$ok skip=$skip fail=$fail"
 }
